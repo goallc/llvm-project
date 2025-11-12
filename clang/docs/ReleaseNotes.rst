@@ -341,10 +341,11 @@ Attribute Changes in Clang
 - New format attributes ``gnu_printf``, ``gnu_scanf``, ``gnu_strftime`` and ``gnu_strfmon`` are added
   as aliases for ``printf``, ``scanf``, ``strftime`` and ``strfmon``. (#GH16219)
 
-- New attribute ``modular_format`` to allow dynamically selecting at link time
-  which aspects of a statically linked libc's printf (et al) implementation are
-  required. This can reduce code size without requiring e.g. multilibs for
-  printf features. Requires cooperation with the libc implementation.
+- Added new attribute ``modular_format`` to allow dynamically selecting at link
+  time which aspects of a statically linked libc's printf (et al)
+  implementation are required. This can reduce code size without requiring e.g.
+  multilibs for printf features. Requires cooperation with the libc
+  implementation.
 
 Improvements to Clang's diagnostics
 -----------------------------------
