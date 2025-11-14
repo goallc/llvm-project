@@ -1919,92 +1919,106 @@ bool PreRARematStage::canIncreaseOccupancyOrReduceSpill() {
   // Identify rematerializable instructions in the function.
   for (unsigned I = 0, E = DAG.Regions.size(); I != E; ++I) {
     auto Region = DAG.Regions[I];
-    for (auto MI = Region.first; MI != Region.second; ++MI) {
-      // The instruction must be rematerializable.
-      MachineInstr &DefMI = *MI;
-      if (!isReMaterializable(DefMI))
-        continue;
-
-      // We only support rematerializing virtual registers with one definition.
-      Register Reg = DefMI.getOperand(0).getReg();
-      if (!Reg.isVirtual() || !DAG.MRI.hasOneDef(Reg))
-        continue;
-
-      // We only care to rematerialize the instruction if it has a single
-      // non-debug user in a different region. The using MI may not belong to a
-      // region if it is a lone region terminator.
-      MachineInstr *UseMI = DAG.MRI.getOneNonDBGUser(Reg);
-      if (!UseMI)
-        continue;
-      auto UseRegion = MIRegion.find(UseMI);
-      if (UseRegion != MIRegion.end() && UseRegion->second == I)
-        continue;
-
-      // Do not rematerialize an instruction if it uses or is used by an
-      // instruction that we have designated for rematerialization.
-      // FIXME: Allow for rematerialization chains: this requires 1. updating
-      // remat points to account for uses that are rematerialized, and 2. either
-      // rematerializing the candidates in careful ordering, or deferring the
-      // MBB RP walk until the entire chain has been rematerialized.
-      if (Rematerializations.contains(UseMI) ||
-          llvm::any_of(DefMI.operands(), [&RematRegs](MachineOperand &MO) {
-            return MO.isReg() && RematRegs.contains(MO.getReg());
-          }))
-        continue;
-
-      // Do not rematerialize an instruction it it uses registers that aren't
-      // available at its use. This ensures that we are not extending any live
-      // range while rematerializing.
-      SlotIndex UseIdx = DAG.LIS->getInstructionIndex(*UseMI).getRegSlot(true);
-      if (!VirtRegAuxInfo::allUsesAvailableAt(&DefMI, UseIdx, *DAG.LIS, DAG.MRI,
-                                              *DAG.TII))
-        continue;
-
-      REMAT_DEBUG(dbgs() << "Region " << I << ": remat instruction " << DefMI);
-      RematInstruction &Remat =
-          Rematerializations.try_emplace(&DefMI, UseMI).first->second;
-
-      bool RematUseful = false;
-      if (auto It = OptRegions.find(I); It != OptRegions.end()) {
-        // Optimistically consider that moving the instruction out of its
-        // defining region will reduce RP in the latter; this assumes that
-        // maximum RP in the region is reached somewhere between the defining
-        // instruction and the end of the region.
-        REMAT_DEBUG(dbgs() << "  Defining region is optimizable\n");
-        LaneBitmask Mask = DAG.RegionLiveOuts.getLiveRegsForRegionIdx(I)[Reg];
-        if (ReduceRPInRegion(It, Reg, Mask, RematUseful))
-          return true;
-      }
-
-      for (unsigned LIRegion = 0; LIRegion != E; ++LIRegion) {
-        // We are only collecting regions in which the register is a live-in
-        // (and may be live-through).
-        auto It = DAG.LiveIns[LIRegion].find(Reg);
-        if (It == DAG.LiveIns[LIRegion].end() || It->second.none())
+    const MachineRegisterInfo &MRI = MF.getRegInfo();
+    const TargetRegisterInfo *TRI = MRI.getTargetRegisterInfo();
+    const SIRegisterInfo *SRI = static_cast<const SIRegisterInfo *>(TRI);
+    for (bool OnSGPR : {true, false}) {
+      for (auto MI = Region.first; MI != Region.second; ++MI) {
+        // The instruction must be rematerializable.
+        MachineInstr &DefMI = *MI;
+        if (!isReMaterializable(DefMI))
           continue;
-        Remat.LiveInRegions.insert(LIRegion);
 
-        // Account for the reduction in RP due to the rematerialization in an
-        // optimizable region in which the defined register is a live-in. This
-        // is exact for live-through region but optimistic in the using region,
-        // where RP is actually reduced only if maximum RP is reached somewhere
-        // between the beginning of the region and the rematerializable
-        // instruction's use.
-        if (auto It = OptRegions.find(LIRegion); It != OptRegions.end()) {
-          REMAT_DEBUG(dbgs() << "  Live-in in region " << LIRegion << '\n');
-          if (ReduceRPInRegion(It, Reg, DAG.LiveIns[LIRegion][Reg],
-                               RematUseful))
+        // We only support rematerializing virtual registers with one
+        // definition.
+        Register Reg = DefMI.getOperand(0).getReg();
+        if (!Reg.isVirtual() || !DAG.MRI.hasOneDef(Reg))
+          continue;
+
+        const TargetRegisterClass *RC = MRI.getRegClass(Reg);
+        if (SRI->isSGPRClass(RC) != OnSGPR)
+          continue;
+
+        // We only care to rematerialize the instruction if it has a single
+        // non-debug user in a different region. The using MI may not belong to
+        // a region if it is a lone region terminator.
+        MachineInstr *UseMI = DAG.MRI.getOneNonDBGUser(Reg);
+        if (!UseMI)
+          continue;
+        auto UseRegion = MIRegion.find(UseMI);
+        if (UseRegion != MIRegion.end() && UseRegion->second == I)
+          continue;
+
+        // Do not rematerialize an instruction if it uses or is used by an
+        // instruction that we have designated for rematerialization.
+        // FIXME: Allow for rematerialization chains: this requires 1. updating
+        // remat points to account for uses that are rematerialized, and 2.
+        // either rematerializing the candidates in careful ordering, or
+        // deferring the MBB RP walk until the entire chain has been
+        // rematerialized.
+        if (Rematerializations.contains(UseMI) ||
+            llvm::any_of(DefMI.operands(), [&RematRegs](MachineOperand &MO) {
+              return MO.isReg() && RematRegs.contains(MO.getReg());
+            }))
+          continue;
+
+        // Do not rematerialize an instruction it it uses registers that aren't
+        // available at its use. This ensures that we are not extending any live
+        // range while rematerializing.
+        SlotIndex UseIdx =
+            DAG.LIS->getInstructionIndex(*UseMI).getRegSlot(true);
+        if (!VirtRegAuxInfo::allUsesAvailableAt(&DefMI, UseIdx, *DAG.LIS,
+                                                DAG.MRI, *DAG.TII))
+          continue;
+
+        REMAT_DEBUG(dbgs() << "Region " << I << ": remat instruction "
+                           << DefMI);
+        RematInstruction &Remat =
+            Rematerializations.try_emplace(&DefMI, UseMI).first->second;
+
+        bool RematUseful = false;
+        if (auto It = OptRegions.find(I); It != OptRegions.end()) {
+          // Optimistically consider that moving the instruction out of its
+          // defining region will reduce RP in the latter; this assumes that
+          // maximum RP in the region is reached somewhere between the defining
+          // instruction and the end of the region.
+          REMAT_DEBUG(dbgs() << "  Defining region is optimizable\n");
+          LaneBitmask Mask = DAG.RegionLiveOuts.getLiveRegsForRegionIdx(I)[Reg];
+          if (ReduceRPInRegion(It, Reg, Mask, RematUseful))
             return true;
         }
-      }
 
-      // If the instruction is not a live-in or live-out in any optimizable
-      // region then there is no point in rematerializing it.
-      if (!RematUseful) {
-        Rematerializations.pop_back();
-        REMAT_DEBUG(dbgs() << "  No impact, not rematerializing instruction\n");
-      } else {
-        RematRegs.insert(Reg);
+        for (unsigned LIRegion = 0; LIRegion != E; ++LIRegion) {
+          // We are only collecting regions in which the register is a live-in
+          // (and may be live-through).
+          auto It = DAG.LiveIns[LIRegion].find(Reg);
+          if (It == DAG.LiveIns[LIRegion].end() || It->second.none())
+            continue;
+          Remat.LiveInRegions.insert(LIRegion);
+
+          // Account for the reduction in RP due to the rematerialization in an
+          // optimizable region in which the defined register is a live-in. This
+          // is exact for live-through region but optimistic in the using
+          // region, where RP is actually reduced only if maximum RP is reached
+          // somewhere between the beginning of the region and the
+          // rematerializable instruction's use.
+          if (auto It = OptRegions.find(LIRegion); It != OptRegions.end()) {
+            REMAT_DEBUG(dbgs() << "  Live-in in region " << LIRegion << '\n');
+            if (ReduceRPInRegion(It, Reg, DAG.LiveIns[LIRegion][Reg],
+                                 RematUseful))
+              return true;
+          }
+        }
+
+        // If the instruction is not a live-in or live-out in any optimizable
+        // region then there is no point in rematerializing it.
+        if (!RematUseful) {
+          Rematerializations.pop_back();
+          REMAT_DEBUG(dbgs()
+                      << "  No impact, not rematerializing instruction\n");
+        } else {
+          RematRegs.insert(Reg);
+        }
       }
     }
   }
