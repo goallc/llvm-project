@@ -27,6 +27,7 @@
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
+#include <tuple>
 
 #define DEBUG_TYPE "x86-isel"
 
@@ -760,16 +761,18 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
 
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, isVarArg, MF, RVLocs, *DAG.getContext());
+  if (CallConv == CallingConv::Go && Subtarget.is64Bit())
+    CCInfo.AllocateStack(FuncInfo->getReturnStackOffset(), Align(8));
   CCInfo.AnalyzeReturn(Outs, RetCC_X86);
 
   SmallVector<std::pair<Register, SDValue>, 4> RetVals;
+  SmallVector<SDValue, 4> MemOpChains;
   for (unsigned I = 0, OutsIndex = 0, E = RVLocs.size(); I != E;
        ++I, ++OutsIndex) {
     CCValAssign &VA = RVLocs[I];
-    assert(VA.isRegLoc() && "Can only return in registers!");
 
     // Add the register to the CalleeSaveDisableRegs list.
-    if (ShouldDisableCalleeSavedRegister)
+    if (VA.isRegLoc() && ShouldDisableCalleeSavedRegister)
       MF.getRegInfo().disableCalleeSavedRegister(VA.getLocReg());
 
     SDValue ValToCopy = OutVals[OutsIndex];
@@ -835,6 +838,17 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
       }
     }
 
+    if (VA.isMemLoc()) {
+      unsigned ObjSize = VA.getLocVT().getStoreSize().getFixedValue();
+      int FI = MF.getFrameInfo().CreateFixedObject(ObjSize, VA.getLocMemOffset(),
+                                                   /*IsImmutable=*/false);
+      SDValue FIN = DAG.getFrameIndex(FI, getPointerTy(DAG.getDataLayout()));
+      MemOpChains.push_back(DAG.getStore(
+          Chain, dl, ValToCopy, FIN,
+          MachinePointerInfo::getFixedStack(DAG.getMachineFunction(), FI)));
+      continue;
+    }
+
     if (VA.needsCustom()) {
       assert(VA.getValVT() == MVT::v64i1 &&
              "Currently the only custom case is when we split v64i1 to 2 regs");
@@ -849,6 +863,9 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
       RetVals.push_back(std::make_pair(VA.getLocReg(), ValToCopy));
     }
   }
+
+  if (!MemOpChains.empty())
+    Chain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, MemOpChains);
 
   SDValue Glue;
   SmallVector<SDValue, 6> RetOps;
@@ -1120,6 +1137,9 @@ SDValue X86TargetLowering::LowerCallResult(
                  *DAG.getContext());
   CCInfo.AnalyzeCallResult(Ins, RetCC_X86);
 
+  SmallVector<std::tuple<int, unsigned, unsigned>, 4> ResultMemLocs;
+  SDValue StackPtr;
+
   // Copy all of the result registers out of their specified physreg.
   for (unsigned I = 0, InsIndex = 0, E = RVLocs.size(); I != E;
        ++I, ++InsIndex) {
@@ -1128,9 +1148,15 @@ SDValue X86TargetLowering::LowerCallResult(
 
     // In some calling conventions we need to remove the used registers
     // from the register mask.
-    if (RegMask) {
+    if (RegMask && VA.isRegLoc()) {
       for (MCPhysReg SubReg : TRI->subregs_inclusive(VA.getLocReg()))
         RegMask[SubReg / 32] &= ~(1u << (SubReg % 32));
+    }
+
+    if (VA.isMemLoc()) {
+      ResultMemLocs.push_back(std::make_tuple(VA.getLocMemOffset(), I, InVals.size()));
+      InVals.push_back(SDValue());
+      continue;
     }
 
     // Report an error if there was an attempt to return FP values via XMM
@@ -1199,6 +1225,28 @@ SDValue X86TargetLowering::LowerCallResult(
       Val = DAG.getBitcast(VA.getValVT(), Val);
 
     InVals.push_back(Val);
+  }
+
+  if (!ResultMemLocs.empty()) {
+    if (!StackPtr.getNode())
+      StackPtr = DAG.getCopyFromReg(Chain, dl, TRI->getStackRegister(),
+                                    getPointerTy(DAG.getDataLayout()));
+    SmallVector<SDValue, 4> MemOpChains;
+    for (const auto &[Offset, RVIndex, ValIndex] : ResultMemLocs) {
+      SDValue PtrOff = DAG.getIntPtrConstant(Offset, dl);
+      PtrOff = DAG.getNode(ISD::ADD, dl, getPointerTy(DAG.getDataLayout()),
+                           StackPtr, PtrOff);
+      EVT VT = RVLocs[RVIndex].getLocVT();
+      auto Load = DAG.getLoad(VT, dl, Chain, PtrOff, MachinePointerInfo());
+      SDValue Val = Load;
+      if (RVLocs[RVIndex].isExtInLoc())
+        Val = DAG.getNode(ISD::TRUNCATE, dl, RVLocs[RVIndex].getValVT(), Val);
+      if (RVLocs[RVIndex].getLocInfo() == CCValAssign::BCvt)
+        Val = DAG.getBitcast(RVLocs[RVIndex].getValVT(), Val);
+      InVals[ValIndex] = Val;
+      MemOpChains.push_back(Load.getValue(1));
+    }
+    Chain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, MemOpChains);
   }
 
   return Chain;
@@ -1718,6 +1766,9 @@ SDValue X86TargetLowering::LowerFormalArguments(
 
   CCInfo.AnalyzeArguments(Ins, CC_X86);
 
+  if (CallConv == CallingConv::Go && Subtarget.is64Bit())
+    FuncInfo->setReturnStackOffset(CCInfo.getStackSize());
+
   // In vectorcall calling convention a second pass is required for the HVA
   // types.
   if (CallingConv::X86_VectorCall == CallConv) {
@@ -2110,8 +2161,18 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   assert(!(isVarArg && canGuaranteeTCO(CallConv)) &&
          "Var args not supported with calling convention fastcc, ghc or hipe");
 
-  // Get a count of how many bytes are to be pushed on the stack.
+  // Analyze return values as well so calling conventions with stack-assigned
+  // results can reserve space in the outgoing call frame.
   unsigned NumBytes = CCInfo.getAlignedCallFrameSize();
+  if (CallConv == CallingConv::Go && Is64Bit) {
+    SmallVector<CCValAssign, 16> RVLocs;
+    CCState RetCCInfo(CallConv, isVarArg, MF, RVLocs, *DAG.getContext());
+    RetCCInfo.AllocateStack(CCInfo.getStackSize(), Align(8));
+    RetCCInfo.AnalyzeCallResult(Ins, RetCC_X86);
+    NumBytes = alignTo(RetCCInfo.getStackSize(), Align(16));
+  }
+
+  // Get a count of how many bytes are to be pushed on the stack.
   if (IsSibcall)
     // This is a sibcall. The memory operands are available in caller's
     // own caller's stack.

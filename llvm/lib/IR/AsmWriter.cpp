@@ -352,6 +352,7 @@ static void printCallingConv(unsigned cc, raw_ostream &Out) {
   case CallingConv::PreserveNone:  Out << "preserve_nonecc"; break;
   case CallingConv::CXX_FAST_TLS:  Out << "cxx_fast_tlscc"; break;
   case CallingConv::GHC:           Out << "ghccc"; break;
+  case CallingConv::Go:            Out << "gocc"; break;
   case CallingConv::Tail:          Out << "tailcc"; break;
   case CallingConv::GRAAL:         Out << "graalcc"; break;
   case CallingConv::CFGuard_Check: Out << "cfguard_checkcc"; break;

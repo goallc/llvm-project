@@ -2203,6 +2203,7 @@ void LLParser::parseOptionalDLLStorageClass(unsigned &Res) {
 ///   ::= 'preserve_allcc'
 ///   ::= 'preserve_nonecc'
 ///   ::= 'ghccc'
+///   ::= 'gocc'
 ///   ::= 'swiftcc'
 ///   ::= 'swifttailcc'
 ///   ::= 'x86_intrcc'
@@ -2269,6 +2270,7 @@ bool LLParser::parseOptionalCallingConv(unsigned &CC) {
   case lltok::kw_preserve_allcc: CC = CallingConv::PreserveAll; break;
   case lltok::kw_preserve_nonecc:CC = CallingConv::PreserveNone; break;
   case lltok::kw_ghccc:          CC = CallingConv::GHC; break;
+  case lltok::kw_gocc:           CC = CallingConv::Go; break;
   case lltok::kw_swiftcc:        CC = CallingConv::Swift; break;
   case lltok::kw_swifttailcc:    CC = CallingConv::SwiftTail; break;
   case lltok::kw_x86_intrcc:     CC = CallingConv::X86_INTR; break;

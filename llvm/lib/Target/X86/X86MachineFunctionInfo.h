@@ -114,6 +114,11 @@ class X86MachineFunctionInfo : public MachineFunctionInfo {
   /// ArgumentStackSize - The number of bytes on stack consumed by the arguments
   /// being passed on the stack.
   unsigned ArgumentStackSize = 0;
+
+  /// ReturnStackOffset - Start offset of Go ABIInternal stack-assigned return
+  /// values in the incoming argument/result area.
+  unsigned ReturnStackOffset = 0;
+  bool ReturnStackOffsetSet = false;
   /// NumLocalDynamics - Number of local-dynamic TLS accesses.
   unsigned NumLocalDynamics = 0;
   /// HasPushSequences - Keeps track of whether this function uses sequences
@@ -248,6 +253,16 @@ public:
 
   unsigned getArgumentStackSize() const { return ArgumentStackSize; }
   void setArgumentStackSize(unsigned size) { ArgumentStackSize = size; }
+
+  void setReturnStackOffset(unsigned Offset) {
+    assert(!ReturnStackOffsetSet && "Return stack offset set twice");
+    ReturnStackOffset = Offset;
+    ReturnStackOffsetSet = true;
+  }
+  unsigned getReturnStackOffset() const {
+    assert(ReturnStackOffsetSet && "Return stack offset not set");
+    return ReturnStackOffset;
+  }
 
   unsigned getNumLocalDynamicTLSAccesses() const { return NumLocalDynamics; }
   void incNumLocalDynamicTLSAccesses() { ++NumLocalDynamics; }

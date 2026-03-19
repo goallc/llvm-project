@@ -1189,6 +1189,7 @@ bool llvm::CallingConv::supportsNonVoidReturnType(CallingConv::ID CC) {
   case CallingConv::Cold:
   case CallingConv::GHC:
   case CallingConv::HiPE:
+  case CallingConv::Go:
   case CallingConv::AnyReg:
   case CallingConv::PreserveMost:
   case CallingConv::PreserveAll:
