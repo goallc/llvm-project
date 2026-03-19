@@ -740,11 +740,15 @@ def CC_X86_64_Go : CallingConv<[
 ]>;
 
 def RetCC_X86_64_Go : CallingConv<[
-  // Go ABIInternal resets the register assignment for results. For the initial
-  // implementation, only scalar returns are supported.
+  // Go ABIInternal resets the register assignment for results. Integer and
+  // floating-point results are then assigned independently from the start of
+  // their respective register sequences, which naturally supports multiple
+  // scalar return values.
   CCIfType<[i1, i8, i16, i32], CCPromoteToType<i64>>,
-  CCIfType<[i64], CCAssignToReg<[RAX]>>,
-  CCIfType<[f16, f32, f64], CCAssignToReg<[XMM0]>>
+  CCIfType<[i64], CCAssignToReg<[RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11]>>,
+  CCIfType<[f16, f32, f64],
+           CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
+                          XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14]>>
 ]>;
 
 // No explicit register is specified for the AnyReg calling convention. The

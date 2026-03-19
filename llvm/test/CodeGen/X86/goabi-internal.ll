@@ -62,3 +62,43 @@ entry:
   %sum = fadd double %x, %y
   ret double %sum
 }
+
+
+; CHECK-LABEL: go_ret_two_i64:
+; CHECK: leaq 1(%rdi), %rax
+; CHECK: leaq 2(%rdi), %rbx
+; CHECK: retq
+define gocc { i64, i64 } @go_ret_two_i64(i64 %x) {
+entry:
+  %a = add i64 %x, 1
+  %b = add i64 %x, 2
+  %r0 = insertvalue { i64, i64 } poison, i64 %a, 0
+  %r1 = insertvalue { i64, i64 } %r0, i64 %b, 1
+  ret { i64, i64 } %r1
+}
+
+; CHECK-LABEL: go_ret_i64_f64:
+; CHECK: leaq 3(%rdi), %rax
+; CHECK: addsd {{.*}}, %xmm0
+; CHECK: retq
+define gocc { i64, double } @go_ret_i64_f64(i64 %x, double %y) {
+entry:
+  %a = add i64 %x, 3
+  %b = fadd double %y, 1.000000e+00
+  %r0 = insertvalue { i64, double } poison, i64 %a, 0
+  %r1 = insertvalue { i64, double } %r0, double %b, 1
+  ret { i64, double } %r1
+}
+
+; CHECK-LABEL: go_ret_f32_f64:
+; CHECK: addss {{.*}}, %xmm0
+; CHECK: addsd {{.*}}, %xmm1
+; CHECK: retq
+define gocc { float, double } @go_ret_f32_f64(float %x, double %y) {
+entry:
+  %a = fadd float %x, 1.000000e+00
+  %b = fadd double %y, 2.000000e+00
+  %r0 = insertvalue { float, double } poison, float %a, 0
+  %r1 = insertvalue { float, double } %r0, double %b, 1
+  ret { float, double } %r1
+}
