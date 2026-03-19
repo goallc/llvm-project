@@ -102,3 +102,41 @@ entry:
   %r1 = insertvalue { float, double } %r0, double %b, 1
   ret { float, double } %r1
 }
+
+
+; CHECK-LABEL: go_ret_ten_i64:
+; CHECK: movq $10, {{[0-9]+}}(%rsp)
+define gocc { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } @go_ret_ten_i64() {
+entry:
+  ret { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 }
+      { i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7, i64 8, i64 9, i64 10 }
+}
+
+; CHECK-LABEL: call_go_ret_ten_i64:
+; CHECK: callq go_ret_ten_i64
+; CHECK: movq {{[0-9]+}}(%rsp), %rax
+define gocc i64 @call_go_ret_ten_i64() {
+entry:
+  %rv = call gocc { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } @go_ret_ten_i64()
+  %x = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %rv, 9
+  ret i64 %x
+}
+
+; CHECK-LABEL: go_ret_sixteen_f64:
+; CHECK: movsd {{.*}}, {{[0-9]+}}(%rsp)
+define gocc { double, double, double, double, double, double, double, double, double, double, double, double, double, double, double, double } @go_ret_sixteen_f64() {
+entry:
+  ret { double, double, double, double, double, double, double, double, double, double, double, double, double, double, double, double }
+      { double 1.0, double 2.0, double 3.0, double 4.0, double 5.0, double 6.0, double 7.0, double 8.0,
+        double 9.0, double 10.0, double 11.0, double 12.0, double 13.0, double 14.0, double 15.0, double 16.0 }
+}
+
+; CHECK-LABEL: call_go_ret_sixteen_f64:
+; CHECK: callq go_ret_sixteen_f64
+; CHECK: movsd {{[0-9]+}}(%rsp), %xmm0
+define gocc double @call_go_ret_sixteen_f64() {
+entry:
+  %rv = call gocc { double, double, double, double, double, double, double, double, double, double, double, double, double, double, double, double } @go_ret_sixteen_f64()
+  %x = extractvalue { double, double, double, double, double, double, double, double, double, double, double, double, double, double, double, double } %rv, 15
+  ret double %x
+}
