@@ -1,0 +1,64 @@
+; RUN: llc -mtriple=x86_64-unknown-linux-gnu < %s | FileCheck %s
+
+; CHECK-LABEL: go_int_args:
+; CHECK: movq %rax, -8(%rsp)
+; CHECK: movq %rbx, -16(%rsp)
+; CHECK: movq %rcx, -24(%rsp)
+; CHECK: movq %rdi, -32(%rsp)
+; CHECK: movq %rsi, -40(%rsp)
+; CHECK: movq %r8, -48(%rsp)
+; CHECK: movq %r9, -56(%rsp)
+; CHECK: movq %r10, -64(%rsp)
+; CHECK: movq %r11, -72(%rsp)
+define gocc void @go_int_args(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6, i64 %a7, i64 %a8) {
+entry:
+  %p0 = alloca i64, align 8
+  %p1 = alloca i64, align 8
+  %p2 = alloca i64, align 8
+  %p3 = alloca i64, align 8
+  %p4 = alloca i64, align 8
+  %p5 = alloca i64, align 8
+  %p6 = alloca i64, align 8
+  %p7 = alloca i64, align 8
+  %p8 = alloca i64, align 8
+  store i64 %a0, ptr %p0, align 8
+  store i64 %a1, ptr %p1, align 8
+  store i64 %a2, ptr %p2, align 8
+  store i64 %a3, ptr %p3, align 8
+  store i64 %a4, ptr %p4, align 8
+  store i64 %a5, ptr %p5, align 8
+  store i64 %a6, ptr %p6, align 8
+  store i64 %a7, ptr %p7, align 8
+  store i64 %a8, ptr %p8, align 8
+  ret void
+}
+
+; CHECK-LABEL: go_float_args:
+; CHECK: movss %xmm0, -4(%rsp)
+; CHECK: movsd %xmm1, -16(%rsp)
+; CHECK: retq
+define gocc void @go_float_args(float %a0, double %a1) {
+entry:
+  %p0 = alloca float, align 4
+  %p1 = alloca double, align 8
+  store float %a0, ptr %p0, align 4
+  store double %a1, ptr %p1, align 8
+  ret void
+}
+
+; CHECK-LABEL: go_ret_i64:
+; CHECK: movq %rdi, %rax
+; CHECK: retq
+define gocc i64 @go_ret_i64(i64 %x) {
+entry:
+  ret i64 %x
+}
+
+; CHECK-LABEL: go_ret_double:
+; CHECK: addsd %xmm1, %xmm0
+; CHECK: retq
+define gocc double @go_ret_double(double %x, double %y) {
+entry:
+  %sum = fadd double %x, %y
+  ret double %sum
+}

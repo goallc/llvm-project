@@ -478,6 +478,7 @@ def RetCC_X86_64 : CallingConv<[
   // Handle Swift calls.
   CCIfCC<"CallingConv::Swift", CCDelegateTo<RetCC_X86_64_Swift>>,
   CCIfCC<"CallingConv::SwiftTail", CCDelegateTo<RetCC_X86_64_Swift>>,
+  CCIfCC<"CallingConv::Go", CCDelegateTo<RetCC_X86_64_Go>>,
 
   // Handle explicit CC selection
   CCIfCC<"CallingConv::Win64", CCDelegateTo<RetCC_X86_Win64_C>>,
@@ -720,6 +721,30 @@ def CC_X86_64_HiPE : CallingConv<[
   // Integer/FP values get stored in stack slots that are 8 bytes in size and
   // 8-byte aligned if there are no more registers to hold them.
   CCIfType<[i32, i64, f32, f64], CCAssignToStack<8, 8>>
+]>;
+
+def CC_X86_64_Go : CallingConv<[
+  // Go ABIInternal on amd64 uses the following integer argument registers:
+  // RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11. Sub-word integers are widened
+  // to the full register width.
+  CCIfType<[i1, i8, i16, i32], CCPromoteToType<i64>>,
+  CCIfType<[i64], CCAssignToReg<[RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11]>>,
+
+  // Floating-point arguments use XMM0-XMM14.
+  CCIfType<[f16, f32, f64],
+           CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
+                          XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14]>>,
+
+  // Remaining supported scalar values spill to the stack in 8-byte slots.
+  CCIfType<[i64, f16, f32, f64], CCAssignToStack<8, 8>>
+]>;
+
+def RetCC_X86_64_Go : CallingConv<[
+  // Go ABIInternal resets the register assignment for results. For the initial
+  // implementation, only scalar returns are supported.
+  CCIfType<[i1, i8, i16, i32], CCPromoteToType<i64>>,
+  CCIfType<[i64], CCAssignToReg<[RAX]>>,
+  CCIfType<[f16, f32, f64], CCAssignToReg<[XMM0]>>
 ]>;
 
 // No explicit register is specified for the AnyReg calling convention. The
@@ -1081,6 +1106,7 @@ def CC_X86_32 : CallingConv<[
 def CC_X86_64 : CallingConv<[
   CCIfCC<"CallingConv::GHC", CCDelegateTo<CC_X86_64_GHC>>,
   CCIfCC<"CallingConv::HiPE", CCDelegateTo<CC_X86_64_HiPE>>,
+  CCIfCC<"CallingConv::Go", CCDelegateTo<CC_X86_64_Go>>,
   CCIfCC<"CallingConv::AnyReg", CCDelegateTo<CC_X86_64_AnyReg>>,
   CCIfCC<"CallingConv::Win64", CCDelegateTo<CC_X86_Win64_C>>,
   CCIfCC<"CallingConv::X86_64_SysV", CCDelegateTo<CC_X86_64_C>>,
