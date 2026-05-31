@@ -1167,6 +1167,14 @@ void MCObjectFileInfo::initDXContainerObjectFileInfo(const Triple &T) {
   TextSection = Ctx->getDXContainerSection("DXBC", SectionKind::getText());
 }
 
+void MCObjectFileInfo::initGoObjMCObjectFileInfo(const Triple &) {
+  TextSection = Ctx->getGoObjSection(".text", SectionKind::getText());
+  DataSection = Ctx->getGoObjSection(".data", SectionKind::getData());
+  BSSSection = Ctx->getGoObjSection(".bss", SectionKind::getBSS());
+  ReadOnlySection =
+      Ctx->getGoObjSection(".rodata", SectionKind::getReadOnly());
+}
+
 MCObjectFileInfo::~MCObjectFileInfo() = default;
 
 void MCObjectFileInfo::initMCObjectFileInfo(MCContext &MCCtx, bool PIC,
@@ -1204,6 +1212,9 @@ void MCObjectFileInfo::initMCObjectFileInfo(MCContext &MCCtx, bool PIC,
   case MCContext::IsGOFF:
     initGOFFMCObjectFileInfo(TheTriple);
     break;
+  case MCContext::IsGoObj:
+    initGoObjMCObjectFileInfo(TheTriple);
+    break;
   case MCContext::IsSPIRV:
     initSPIRVMCObjectFileInfo(TheTriple);
     break;
@@ -1231,6 +1242,7 @@ MCSection *MCObjectFileInfo::getDwarfComdatSection(const char *Name,
   case Triple::MachO:
   case Triple::COFF:
   case Triple::GOFF:
+  case Triple::GoObj:
   case Triple::SPIRV:
   case Triple::XCOFF:
   case Triple::DXContainer:

@@ -146,6 +146,9 @@ createX86ELFObjectWriter(bool IsELF64, uint8_t OSABI, uint16_t EMachine);
 std::unique_ptr<MCObjectTargetWriter>
 createX86WinCOFFObjectWriter(bool Is64Bit);
 
+/// Construct an X86 Go object writer.
+std::unique_ptr<MCObjectTargetWriter> createX86GoObjObjectWriter(bool Is64Bit);
+
 /// \param Reg speicifed register.
 /// \param Size the bit size of returned register.
 /// \param High requires the high register.

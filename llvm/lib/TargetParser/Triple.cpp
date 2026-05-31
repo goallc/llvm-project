@@ -467,6 +467,8 @@ StringRef Triple::getObjectFormatTypeName(ObjectFormatType Kind) {
     return "elf";
   case GOFF:
     return "goff";
+  case GoObj:
+    return "goobj";
   case MachO:
     return "macho";
   case Wasm:
@@ -767,6 +769,7 @@ static Triple::ObjectFormatType parseFormat(StringRef EnvironmentName) {
       .EndsWith("coff", Triple::COFF)
       .EndsWith("elf", Triple::ELF)
       .EndsWith("goff", Triple::GOFF)
+      .EndsWith("goobj", Triple::GoObj)
       .EndsWith("macho", Triple::MachO)
       .EndsWith("wasm", Triple::Wasm)
       .EndsWith("spirv", Triple::SPIRV)

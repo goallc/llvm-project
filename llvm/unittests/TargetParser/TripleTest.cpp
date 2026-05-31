@@ -3030,6 +3030,10 @@ TEST(TripleTest, FileFormat) {
   EXPECT_EQ(Triple::GOFF, T.getObjectFormat());
   EXPECT_EQ("goff", Triple::getObjectFormatTypeName(T.getObjectFormat()));
 
+  T.setObjectFormat(Triple::GoObj);
+  EXPECT_EQ(Triple::GoObj, T.getObjectFormat());
+  EXPECT_EQ("goobj", Triple::getObjectFormatTypeName(T.getObjectFormat()));
+
   T.setObjectFormat(Triple::SPIRV);
   EXPECT_EQ(Triple::SPIRV, T.getObjectFormat());
   EXPECT_EQ("spirv", Triple::getObjectFormatTypeName(T.getObjectFormat()));
@@ -3041,6 +3045,8 @@ TEST(TripleTest, FileFormat) {
   EXPECT_EQ(Triple::SPIRV, Triple("spirv32-apple-macosx").getObjectFormat());
   EXPECT_EQ(Triple::SPIRV, Triple("spirv64-apple-macosx").getObjectFormat());
   EXPECT_EQ(Triple::DXContainer, Triple("dxil-apple-macosx").getObjectFormat());
+  EXPECT_EQ(Triple::GoObj,
+            Triple("x86_64-unknown-linux-goobj").getObjectFormat());
 }
 
 TEST(TripleTest, DefaultExceptionHandling) {

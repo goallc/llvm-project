@@ -23,6 +23,7 @@
 #include "llvm/MC/MCPseudoProbe.h"
 #include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCSectionGOFF.h"
+#include "llvm/MC/MCSectionGoObj.h"
 #include "llvm/MC/MCSymbolTableEntry.h"
 #include "llvm/MC/SectionKind.h"
 #include "llvm/Support/Allocator.h"
@@ -55,6 +56,7 @@ class MCSection;
 class MCSectionCOFF;
 class MCSectionDXContainer;
 class MCSectionELF;
+class MCSectionGoObj;
 class MCSectionMachO;
 class MCSectionSPIRV;
 class MCSectionWasm;
@@ -94,7 +96,8 @@ public:
     IsSPIRV,
     IsWasm,
     IsXCOFF,
-    IsDXContainer
+    IsDXContainer,
+    IsGoObj
   };
 
 private:
@@ -144,6 +147,7 @@ private:
   SpecificBumpPtrAllocator<MCSectionELF> ELFAllocator;
   SpecificBumpPtrAllocator<MCSectionMachO> MachOAllocator;
   SpecificBumpPtrAllocator<MCSectionGOFF> GOFFAllocator;
+  SpecificBumpPtrAllocator<MCSectionGoObj> GoObjAllocator;
   SpecificBumpPtrAllocator<MCSectionSPIRV> SPIRVAllocator;
   SpecificBumpPtrAllocator<MCSectionWasm> WasmAllocator;
   SpecificBumpPtrAllocator<MCSectionXCOFF> XCOFFAllocator;
@@ -316,6 +320,7 @@ private:
   std::map<COFFSectionKey, MCSectionCOFF *> COFFUniquingMap;
   StringMap<MCSectionELF *> ELFUniquingMap;
   std::map<std::string, MCSectionGOFF *> GOFFUniquingMap;
+  StringMap<MCSectionGoObj *> GoObjUniquingMap;
   std::map<WasmSectionKey, MCSectionWasm *> WasmUniquingMap;
   std::map<XCOFFSectionKey, MCSectionXCOFF *> XCOFFUniquingMap;
   StringMap<MCSectionDXContainer *> DXCUniquingMap;
@@ -388,6 +393,7 @@ public:
 
   Environment getObjectFileType() const { return Env; }
   bool isELF() const { return Env == IsELF; }
+  bool isGoObj() const { return Env == IsGoObj; }
   bool isMachO() const { return Env == IsMachO; }
   bool isXCOFF() const { return Env == IsXCOFF; }
 
@@ -634,6 +640,8 @@ public:
                             unsigned UniqueID = MCSection::NonUniqueID);
 
   LLVM_ABI MCSectionSPIRV *getSPIRVSection();
+
+  LLVM_ABI MCSectionGoObj *getGoObjSection(StringRef Section, SectionKind K);
 
   MCSectionWasm *getWasmSection(const Twine &Section, SectionKind K,
                                 unsigned Flags = 0) {

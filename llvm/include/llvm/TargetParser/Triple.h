@@ -425,6 +425,7 @@ public:
     SPIRV,
     Wasm,
     XCOFF,
+    GoObj,
   };
 
 private:
@@ -868,6 +869,11 @@ public:
   /// Tests whether the OS uses the GOFF binary format.
   bool isOSBinFormatGOFF() const { return getObjectFormat() == Triple::GOFF; }
 
+  /// Tests whether the OS uses the Go gc toolchain object format.
+  bool isOSBinFormatGoObj() const {
+    return getObjectFormat() == Triple::GoObj;
+  }
+
   /// Tests whether the environment is MachO.
   bool isOSBinFormatMachO() const { return getObjectFormat() == Triple::MachO; }
 
@@ -1260,7 +1266,7 @@ public:
   /// Tests whether the target supports comdat
   bool supportsCOMDAT() const {
     return !(isOSBinFormatMachO() || isOSBinFormatXCOFF() ||
-             isOSBinFormatDXContainer());
+             isOSBinFormatDXContainer() || isOSBinFormatGoObj());
   }
 
   /// Tests whether the target uses emulated TLS as default.
