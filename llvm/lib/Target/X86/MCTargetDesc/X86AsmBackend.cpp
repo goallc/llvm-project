@@ -1088,6 +1088,19 @@ public:
   }
 };
 
+class GoObjX86AsmBackend : public X86AsmBackend {
+  bool Is64Bit;
+
+public:
+  GoObjX86AsmBackend(const Target &T, const MCSubtargetInfo &STI, bool Is64Bit)
+      : X86AsmBackend(T, STI), Is64Bit(Is64Bit) {}
+
+  std::unique_ptr<MCObjectTargetWriter>
+  createObjectTargetWriter() const override {
+    return createX86GoObjObjectWriter(Is64Bit);
+  }
+};
+
 class WindowsX86AsmBackend : public X86AsmBackend {
   bool Is64Bit;
 
@@ -1483,6 +1496,9 @@ MCAsmBackend *llvm::createX86_32AsmBackend(const Target &T,
   if (TheTriple.isOSBinFormatMachO())
     return new DarwinX86AsmBackend(T, MRI, STI);
 
+  if (TheTriple.isOSBinFormatGoObj())
+    return new GoObjX86AsmBackend(T, STI, /*Is64Bit=*/false);
+
   if (TheTriple.isOSWindows() && TheTriple.isOSBinFormatCOFF())
     return new WindowsX86AsmBackend(T, false, STI);
 
@@ -1501,6 +1517,9 @@ MCAsmBackend *llvm::createX86_64AsmBackend(const Target &T,
   const Triple &TheTriple = STI.getTargetTriple();
   if (TheTriple.isOSBinFormatMachO())
     return new DarwinX86AsmBackend(T, MRI, STI);
+
+  if (TheTriple.isOSBinFormatGoObj())
+    return new GoObjX86AsmBackend(T, STI, /*Is64Bit=*/true);
 
   if (TheTriple.isOSWindows() && TheTriple.isOSBinFormatCOFF())
     return new WindowsX86AsmBackend(T, true, STI);

@@ -27,6 +27,7 @@
 #include "llvm/MC/MCSectionDXContainer.h"
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCSectionGOFF.h"
+#include "llvm/MC/MCSectionGoObj.h"
 #include "llvm/MC/MCSectionMachO.h"
 #include "llvm/MC/MCSectionSPIRV.h"
 #include "llvm/MC/MCSectionWasm.h"
@@ -106,6 +107,9 @@ MCContext::MCContext(const Triple &TheTriple, const MCAsmInfo &mai,
   case Triple::GOFF:
     Env = IsGOFF;
     break;
+  case Triple::GoObj:
+    Env = IsGoObj;
+    break;
   case Triple::DXContainer:
     Env = IsDXContainer;
     break;
@@ -150,6 +154,7 @@ void MCContext::reset() {
   DXCAllocator.DestroyAll();
   ELFAllocator.DestroyAll();
   GOFFAllocator.DestroyAll();
+  GoObjAllocator.DestroyAll();
   MachOAllocator.DestroyAll();
   WasmAllocator.DestroyAll();
   XCOFFAllocator.DestroyAll();
@@ -176,6 +181,7 @@ void MCContext::reset() {
   MachOUniquingMap.clear();
   ELFUniquingMap.clear();
   GOFFUniquingMap.clear();
+  GoObjUniquingMap.clear();
   COFFUniquingMap.clear();
   WasmUniquingMap.clear();
   XCOFFUniquingMap.clear();
@@ -296,6 +302,8 @@ MCSymbol *MCContext::createSymbolImpl(const MCSymbolTableEntry *Name,
     return new (Name, *this) MCSymbolELF(Name, IsTemporary);
   case MCContext::IsGOFF:
     return new (Name, *this) MCSymbolGOFF(Name, IsTemporary);
+  case MCContext::IsGoObj:
+    return new (Name, *this) MCSymbol(Name, IsTemporary);
   case MCContext::IsMachO:
     return new (Name, *this) MCSymbolMachO(Name, IsTemporary);
   case MCContext::IsWasm:
@@ -927,6 +935,17 @@ MCSectionXCOFF *MCContext::getXCOFFSection(
 MCSectionSPIRV *MCContext::getSPIRVSection() {
   MCSectionSPIRV *Result = new (SPIRVAllocator.Allocate()) MCSectionSPIRV();
   return Result;
+}
+
+MCSectionGoObj *MCContext::getGoObjSection(StringRef Section, SectionKind K) {
+  auto ItInsertedPair = GoObjUniquingMap.try_emplace(Section);
+  MCSectionGoObj *&Entry = ItInsertedPair.first->second;
+  if (!ItInsertedPair.second)
+    return Entry;
+
+  StringRef Name = ItInsertedPair.first->getKey();
+  Entry = new (GoObjAllocator.Allocate()) MCSectionGoObj(Name, K, nullptr);
+  return Entry;
 }
 
 MCSectionDXContainer *MCContext::getDXContainerSection(StringRef Section,

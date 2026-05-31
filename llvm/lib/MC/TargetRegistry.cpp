@@ -70,6 +70,10 @@ MCStreamer *Target::createMCObjectStreamer(
     S = createGOFFStreamer(Ctx, std::move(TAB), std::move(OW),
                            std::move(Emitter));
     break;
+  case Triple::GoObj:
+    S = createGoObjStreamer(Ctx, std::move(TAB), std::move(OW),
+                            std::move(Emitter));
+    break;
   case Triple::XCOFF:
     S = XCOFFStreamerCtorFn(T, Ctx, std::move(TAB), std::move(OW),
                             std::move(Emitter));

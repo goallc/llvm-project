@@ -6543,6 +6543,7 @@ bool ARMAsmParser::parsePrefix(ARM::Specifier &Spec) {
     CurrentFormat = WASM;
     break;
   case MCContext::IsGOFF:
+  case MCContext::IsGoObj:
   case MCContext::IsSPIRV:
   case MCContext::IsXCOFF:
   case MCContext::IsDXContainer:

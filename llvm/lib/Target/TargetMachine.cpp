@@ -224,7 +224,7 @@ bool TargetMachine::shouldAssumeDSOLocal(const GlobalValue *GV) const {
     return true;
   }
 
-  if (TT.isOSBinFormatGOFF())
+  if (TT.isOSBinFormatGOFF() || TT.isOSBinFormatGoObj())
     return true;
 
   if (TT.isOSBinFormatMachO()) {

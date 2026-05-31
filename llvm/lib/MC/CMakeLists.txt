@@ -4,6 +4,7 @@ add_llvm_component_library(LLVMMC
   DXContainerPSVInfo.cpp
   DXContainerRootSignature.cpp
   ELFObjectWriter.cpp
+  GoObjObjectWriter.cpp
   GOFFObjectWriter.cpp
   MCAsmBackend.cpp
   MCAsmInfo.cpp
@@ -27,6 +28,7 @@ add_llvm_component_library(LLVMMC
   MCExpr.cpp
   MCFragment.cpp
   MCGOFFStreamer.cpp
+  MCGoObjStreamer.cpp
   MCInst.cpp
   MCInstPrinter.cpp
   MCInstrAnalysis.cpp
