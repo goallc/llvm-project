@@ -23,6 +23,7 @@
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCGoObjObjectWriter.h"
 #include "llvm/MC/MCInstPrinter.h"
 #include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCObjectWriter.h"
@@ -30,6 +31,7 @@
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Target/RegisterTargetPassConfigCallback.h"
@@ -45,6 +47,10 @@ static cl::opt<bool> EnableNoTrapAfterNoreturn(
     "no-trap-after-noreturn", cl::Hidden,
     cl::desc("Do not emit a trap instruction for 'unreachable' IR instructions "
              "after noreturn calls, even if --trap-unreachable is set."));
+
+static cl::opt<std::string>
+    GoObjPackagePath("goobj-package-path", cl::Hidden,
+                     cl::desc("Package path to record in Go object files"));
 
 void CodeGenTargetMachineImpl::initAsmInfo() {
   MRI.reset(TheTarget.createMCRegInfo(getTargetTriple()));
@@ -212,10 +218,22 @@ CodeGenTargetMachineImpl::createMCStreamer(raw_pwrite_stream &Out,
                                      inconvertibleErrorCode());
 
     Triple T(getTargetTriple());
+    std::unique_ptr<MCObjectWriter> OW;
+    if (DwoOut) {
+      OW = MAB->createDwoObjectWriter(Out, *DwoOut);
+    } else if (T.isOSBinFormatGoObj()) {
+      MCGoObjObjectWriterConfig Config;
+      Config.SourceKind = GoObj::SourceKind::Compiler;
+      Config.PackagePath = GoObjPackagePath;
+      OW = createGoObjObjectWriter(
+          cast<MCGoObjObjectTargetWriter>(MAB->createObjectTargetWriter()), Out,
+          std::move(Config));
+    } else {
+      OW = MAB->createObjectWriter(Out);
+    }
+
     AsmStreamer.reset(getTarget().createMCObjectStreamer(
-        T, Context, std::unique_ptr<MCAsmBackend>(MAB),
-        DwoOut ? MAB->createDwoObjectWriter(Out, *DwoOut)
-               : MAB->createObjectWriter(Out),
+        T, Context, std::unique_ptr<MCAsmBackend>(MAB), std::move(OW),
         std::unique_ptr<MCCodeEmitter>(MCE), STI));
     break;
   }

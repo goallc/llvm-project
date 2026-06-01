@@ -25,6 +25,9 @@ BLOCKS = [
 ]
 
 PKGIDX_NONE = (1 << 31) - 1
+PKGIDX_HASHED64 = PKGIDX_NONE - 1
+PKGIDX_HASHED = PKGIDX_NONE - 2
+PKGIDX_SELF = PKGIDX_NONE - 4
 SYMBOL_SIZE = 21
 RELOC_SIZE = 23
 
@@ -96,6 +99,12 @@ def main(path):
             symbols = nonpkgdef + nonpkgref
             if sym_index < len(symbols):
                 return symbols[sym_index]["name"]
+        if pkg_index == PKGIDX_HASHED64 and sym_index < len(hashed64def):
+            return hashed64def[sym_index]["name"]
+        if pkg_index == PKGIDX_HASHED and sym_index < len(hasheddef):
+            return hasheddef[sym_index]["name"]
+        if pkg_index == PKGIDX_SELF and sym_index < len(symdef):
+            return symdef[sym_index]["name"]
         return f"{pkg_index}:{sym_index}"
 
     for symbol_index in range(len(defined)):
