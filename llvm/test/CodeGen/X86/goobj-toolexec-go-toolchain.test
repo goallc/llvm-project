@@ -1,4 +1,12 @@
 # This exercises a mixed Go/LLVM GoObj link through go build -toolexec. The
-# Python driver skips when a suitable Go linux/amd64 toolchain is unavailable.
+# dependency package contains an LLVM IR file that llvm-goobj-toolexec discovers
+# from the package source directory.
 
-# RUN: %if x86-registered-target %{ %python %S/Inputs/goobj-toolexec-go-toolchain.py --toolexec llvm-goobj-toolexec --work-dir %t.dir %}
+# REQUIRES: x86-registered-target
+
+# RUN: rm -rf %t.dir %t.gocache
+# RUN: cp -R %S/Inputs/goobj-toolexec-module %t.dir
+# RUN: cd %t.dir && env GOCACHE=%t.gocache /home/zgy/02.golang/stablego/go1.26/bin/go build -a -ldflags=-w -toolexec llvm-goobj-toolexec -o toolexec-linked ./cmd/app
+# RUN: %t.dir/toolexec-linked 2>&1 | FileCheck %s
+
+# CHECK: 123

@@ -42,6 +42,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetMachine.h"
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <string>
@@ -54,8 +55,8 @@ static codegen::RegisterMTuneFlag MTF;
 static cl::OptionCategory GoObjToolCat("llvm-goobj-toolexec options");
 
 static cl::list<std::string>
-    IRInputs("llvm-ir", cl::desc("LLVM IR file to compile and add to the Go "
-                                 "package archive"),
+    IRInputs("llvm-ir", cl::desc("Additional LLVM IR file to compile for the "
+                                 "selected Go package archive"),
              cl::value_desc("path"), cl::ZeroOrMore, cl::cat(GoObjToolCat));
 
 static cl::list<std::string>
@@ -73,8 +74,8 @@ static cl::opt<std::string>
 
 static cl::opt<std::string>
     CompilePackage("compile-package",
-                   cl::desc("Go compile package to augment (default: "
-                            "--package-path, or main when unset)"),
+                   cl::desc("Only augment this Go compile package "
+                            "(default: augment packages with local .ll files)"),
                    cl::value_desc("package"), cl::cat(GoObjToolCat));
 
 static cl::opt<std::string>
@@ -201,6 +202,54 @@ static void addSymabisSymbol(SmallVectorImpl<std::string> &Symbols,
     Symbols.push_back(Symbol.str());
 }
 
+static void addIRInput(SmallVectorImpl<std::string> &Inputs, StringSet<> &Seen,
+                       StringRef IRPath) {
+  if (Seen.insert(IRPath).second)
+    Inputs.push_back(IRPath.str());
+}
+
+static void addSourceDirectory(SmallVectorImpl<std::string> &Dirs,
+                               StringSet<> &Seen, StringRef SourcePath) {
+  if (!sys::path::extension(SourcePath).equals_insensitive(".go"))
+    return;
+
+  SmallString<128> Dir(SourcePath);
+  sys::path::remove_filename(Dir);
+  if (Dir.empty())
+    Dir = ".";
+  if (Seen.insert(Dir).second)
+    Dirs.push_back(std::string(Dir));
+}
+
+static Error collectPackageIRInputs(SmallVectorImpl<std::string> &Inputs,
+                                    StringSet<> &SeenInputs) {
+  SmallVector<std::string, 8> SourceDirs;
+  StringSet<> SeenDirs;
+  for (const std::string &Arg : GoToolArgs)
+    addSourceDirectory(SourceDirs, SeenDirs, Arg);
+
+  SmallVector<std::string, 8> Discovered;
+  for (const std::string &Dir : SourceDirs) {
+    std::error_code EC;
+    for (sys::fs::directory_iterator It(Dir, EC), End; !EC && It != End;
+         It.increment(EC)) {
+      StringRef Path = It->path();
+      if (!sys::path::extension(Path).equals_insensitive(".ll"))
+        continue;
+      if (sys::fs::is_regular_file(Path))
+        Discovered.push_back(Path.str());
+    }
+    if (EC)
+      return createStringError(EC, "cannot scan package directory '" + Dir +
+                                       "' for LLVM IR files");
+  }
+
+  std::sort(Discovered.begin(), Discovered.end());
+  for (const std::string &IR : Discovered)
+    addIRInput(Inputs, SeenInputs, IR);
+  return Error::success();
+}
+
 static Error collectSymabisSymbols(StringRef IRPath,
                                    SmallVectorImpl<std::string> &Symbols,
                                    StringSet<> &Seen) {
@@ -227,6 +276,16 @@ static SmallVector<std::string, 16> getGoToolCommand() {
   Args.push_back(GoToolPath);
   llvm::append_range(Args, GoToolArgs);
   return Args;
+}
+
+static bool shouldAddExplicitIRInputs(StringRef GoPackage) {
+  if (IRInputs.empty())
+    return false;
+  if (!CompilePackage.empty())
+    return GoPackage == CompilePackage;
+  if (!PackagePath.empty())
+    return GoPackage == PackagePath;
+  return GoPackage == "main";
 }
 
 static int compileIRToGoObj(StringRef IRPath, StringRef ObjPath,
@@ -358,8 +417,8 @@ static SmallVector<std::string, 4> getPackCommand() {
   return {};
 }
 
-static int runAugmentedCompile() {
-  if (IRInputs.empty())
+static int runAugmentedCompile(ArrayRef<std::string> ActiveIRInputs) {
+  if (ActiveIRInputs.empty())
     return execute(getGoToolCommand());
 
   std::optional<std::string> Output = getGoToolFlag(GoToolArgs, "-o");
@@ -379,7 +438,7 @@ static int runAugmentedCompile() {
   StringSet<> SeenSymbols;
   for (const std::string &Symbol : SymabisSymbols)
     addSymabisSymbol(Symbols, SeenSymbols, Symbol);
-  for (const std::string &IR : IRInputs) {
+  for (const std::string &IR : ActiveIRInputs) {
     if (Error Err = collectSymabisSymbols(IR, Symbols, SeenSymbols)) {
       logAllUnhandledErrors(std::move(Err), errs());
       return 1;
@@ -426,10 +485,10 @@ static int runAugmentedCompile() {
     return RC;
 
   SmallVector<std::string, 8> ObjectPaths;
-  for (size_t I = 0; I != IRInputs.size(); ++I) {
+  for (size_t I = 0; I != ActiveIRInputs.size(); ++I) {
     SmallString<128> ObjPath(WorkDir);
     sys::path::append(ObjPath, "llvm-goobj-" + Twine(I) + ".o");
-    if (int RC = compileIRToGoObj(IRInputs[I], ObjPath, ObjectPackage))
+    if (int RC = compileIRToGoObj(ActiveIRInputs[I], ObjPath, ObjectPackage))
       return RC;
     ObjectPaths.push_back(std::string(ObjPath));
   }
@@ -461,15 +520,23 @@ int main(int argc, char **argv) {
   }
 
   std::string GoToolName = sys::path::filename(GoToolPath).str();
-  std::string GoPackage = getGoToolFlag(GoToolArgs, "-p").value_or("");
-  std::string TargetPackage =
-      CompilePackage.empty()
-          ? (PackagePath.empty() ? std::string("main")
-                                 : std::string(PackagePath))
-          : std::string(CompilePackage);
-  bool IsTargetCompile = GoToolName == "compile" && GoPackage == TargetPackage;
-  if (!IsTargetCompile)
+  if (GoToolName != "compile")
     return execute(getGoToolCommand());
 
-  return runAugmentedCompile();
+  std::string GoPackage = getGoToolFlag(GoToolArgs, "-p").value_or("");
+  if (!CompilePackage.empty() && GoPackage != CompilePackage)
+    return execute(getGoToolCommand());
+
+  SmallVector<std::string, 8> ActiveIRInputs;
+  StringSet<> SeenInputs;
+  if (Error Err = collectPackageIRInputs(ActiveIRInputs, SeenInputs)) {
+    logAllUnhandledErrors(std::move(Err), errs(), "llvm-goobj-toolexec: ");
+    return 1;
+  }
+  if (shouldAddExplicitIRInputs(GoPackage)) {
+    for (const std::string &IR : IRInputs)
+      addIRInput(ActiveIRInputs, SeenInputs, IR);
+  }
+
+  return runAugmentedCompile(ActiveIRInputs);
 }
