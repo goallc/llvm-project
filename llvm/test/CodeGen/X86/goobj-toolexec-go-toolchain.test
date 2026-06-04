@@ -1,0 +1,4 @@
+# This exercises a mixed Go/LLVM GoObj link through go build -toolexec. The
+# Python driver skips when a suitable Go linux/amd64 toolchain is unavailable.
+
+# RUN: %if x86-registered-target %{ %python %S/Inputs/goobj-toolexec-go-toolchain.py --toolexec llvm-goobj-toolexec --work-dir %t.dir %}
