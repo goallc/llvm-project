@@ -97,6 +97,9 @@ AArch64RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     // FIXME: Windows likely need this to be altered for properly unwinding.
     return CSR_AArch64_NoneRegs_SaveList;
 
+  case CallingConv::Go:
+    return CSR_AArch64_Go_SaveList;
+
   case CallingConv::AnyReg:
     return CSR_AArch64_AllRegs_SaveList;
 
@@ -277,6 +280,8 @@ AArch64RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
   if (CC == CallingConv::PreserveNone)
     return SCS ? CSR_AArch64_NoneRegs_SCS_RegMask
                : CSR_AArch64_NoneRegs_RegMask;
+  if (CC == CallingConv::Go)
+    return CSR_AArch64_Go_RegMask;
   if (CC == CallingConv::AnyReg)
     return SCS ? CSR_AArch64_AllRegs_SCS_RegMask : CSR_AArch64_AllRegs_RegMask;
 
@@ -537,6 +542,11 @@ AArch64RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   for (size_t i = 0; i < AArch64::GPR32commonRegClass.getNumRegs(); ++i) {
     if (MF.getSubtarget<AArch64Subtarget>().isXRegisterReservedForRA(i))
       markSuperRegs(Reserved, AArch64::GPR32commonRegClass.getRegister(i));
+  }
+
+  if (MF.getFunction().getCallingConv() == CallingConv::Go) {
+    markSuperRegs(Reserved, AArch64::W18);
+    markSuperRegs(Reserved, AArch64::W28);
   }
 
   if (MF.getSubtarget<AArch64Subtarget>().isLRReservedForRA()) {

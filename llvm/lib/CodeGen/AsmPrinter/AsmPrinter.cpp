@@ -36,6 +36,7 @@
 #include "llvm/BinaryFormat/COFF.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/BinaryFormat/GoObj.h"
 #include "llvm/CodeGen/AsmPrinterAnalysis.h"
 #include "llvm/CodeGen/BasicBlockSectionsProfileReader.h"
 #include "llvm/CodeGen/GCMetadata.h"
@@ -3207,6 +3208,10 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
     // Get the function entry point symbol.
     CurrentFnSym = getObjFileLowering().getFunctionEntryPointSymbol(&F, TM);
   }
+
+  if (TM.getTargetTriple().isOSBinFormatGoObj() &&
+      F.getCallingConv() == CallingConv::Go)
+    OutContext.setGoObjSymbolABI(CurrentFnSym, GoObj::SymABIInternal);
 
   CurrentFnSymForSize = CurrentFnSym;
   CurrentFnBegin = nullptr;

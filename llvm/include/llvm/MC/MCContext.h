@@ -158,6 +158,9 @@ private:
   /// Bindings of names to symbol table values.
   SymbolTable Symbols;
 
+  /// Go object symbol ABI overrides keyed by MC symbol.
+  DenseMap<const MCSymbol *, uint16_t> GoObjSymbolABIs;
+
   /// A mapping from a local label number and an instance count to a symbol.
   /// For example, in the assembly
   ///     1:
@@ -529,6 +532,17 @@ public:
   /// registerInlineAsmLabel - Records that the name is a label referenced in
   /// inline assembly.
   LLVM_ABI void registerInlineAsmLabel(MCSymbol *Sym);
+
+  void setGoObjSymbolABI(const MCSymbol *Sym, uint16_t ABI) {
+    GoObjSymbolABIs[Sym] = ABI;
+  }
+
+  std::optional<uint16_t> getGoObjSymbolABI(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolABIs.find(Sym);
+    if (It == GoObjSymbolABIs.end())
+      return std::nullopt;
+    return It->second;
+  }
 
   /// Allocates and returns a new `WasmSignature` instance (with empty parameter
   /// and return type lists).

@@ -6124,7 +6124,8 @@ private:
 LLVM_ABI void GetReturnInfo(CallingConv::ID CC, Type *ReturnType,
                             AttributeList attr,
                             SmallVectorImpl<ISD::OutputArg> &Outs,
-                            const TargetLowering &TLI, const DataLayout &DL);
+                            const TargetLowering &TLI, const DataLayout &DL,
+                            bool GoTupleResults = false);
 
 } // end namespace llvm
 

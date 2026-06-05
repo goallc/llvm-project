@@ -283,6 +283,8 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     return CSR_64_RT_AllRegs_SaveList;
   case CallingConv::PreserveNone:
     return CSR_64_NoneRegs_SaveList;
+  case CallingConv::Go:
+    return CSR_64_Go_SaveList;
   case CallingConv::CXX_FAST_TLS:
     if (Is64Bit)
       return MF->getInfo<X86MachineFunctionInfo>()->isSplitCSR() ?
@@ -424,6 +426,8 @@ X86RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
     return CSR_64_RT_AllRegs_RegMask;
   case CallingConv::PreserveNone:
     return CSR_64_NoneRegs_RegMask;
+  case CallingConv::Go:
+    return CSR_64_Go_RegMask;
   case CallingConv::CXX_FAST_TLS:
     if (Is64Bit)
       return CSR_64_TLS_Darwin_RegMask;
@@ -680,6 +684,13 @@ BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
     for (MCRegAliasIterator AI(X86::R14, this, true); AI.isValid(); ++AI)
       Reserved.set(*AI);
     for (MCRegAliasIterator AI(X86::R15, this, true); AI.isValid(); ++AI)
+      Reserved.set(*AI);
+  }
+
+  if (MF.getFunction().getCallingConv() == CallingConv::Go) {
+    for (MCRegAliasIterator AI(X86::R14, this, true); AI.isValid(); ++AI)
+      Reserved.set(*AI);
+    for (MCRegAliasIterator AI(X86::XMM15, this, true); AI.isValid(); ++AI)
       Reserved.set(*AI);
   }
 

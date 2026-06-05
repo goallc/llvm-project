@@ -1,7 +1,30 @@
 target triple = "x86_64-unknown-linux-goobj"
 
-define void @"example.com/goobjtoolexec/dep.Answer"() {
+define gocc i64 @"example.com/goobjtoolexec/dep.Answer"() {
 entry:
-  call void asm sideeffect "movq $$123, 8(%rsp)", "~{memory}"()
-  ret void
+  ret i64 123
 }
+
+define gocc i64 @"example.com/goobjtoolexec/dep.Add"(i64 %a, i64 %b) {
+entry:
+  %sum = add i64 %a, %b
+  ret i64 %sum
+}
+
+define gocc { i64, i64 } @"example.com/goobjtoolexec/dep.Pair"(i64 %a, i64 %b) #0 {
+entry:
+  %sum = add i64 %a, %b
+  %delta = sub i64 %b, %a
+  %ret0 = insertvalue { i64, i64 } poison, i64 %sum, 0
+  %ret1 = insertvalue { i64, i64 } %ret0, i64 %delta, 1
+  ret { i64, i64 } %ret1
+}
+
+define gocc i64 @"example.com/goobjtoolexec/dep.FloatAsInt"(double %a, double %b) {
+entry:
+  %sum = fadd double %a, %b
+  %ret = fptosi double %sum to i64
+  ret i64 %ret
+}
+
+attributes #0 = { "go_results_tuple" }

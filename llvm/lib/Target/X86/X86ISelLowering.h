@@ -172,6 +172,11 @@ namespace llvm {
                                 MMO.getAlign(), MMO.getFlags(), Fast);
     }
 
+    SDValue lowerGlobalOrExternalForCall(SDValue Op, SelectionDAG &DAG,
+                                         bool *IsImpCall) const {
+      return LowerGlobalOrExternal(Op, DAG, /*ForCall=*/true, IsImpCall);
+    }
+
     /// Provide custom lowering hooks for some operations.
     ///
     SDValue LowerOperation(SDValue Op, SelectionDAG &DAG) const override;

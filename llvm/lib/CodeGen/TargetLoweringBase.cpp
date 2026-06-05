@@ -20,6 +20,7 @@
 #include "llvm/Analysis/Loads.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/CodeGen/Analysis.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -2110,42 +2111,57 @@ MVT TargetLoweringBase::getPreferredSwitchConditionType(LLVMContext &Context,
 void llvm::GetReturnInfo(CallingConv::ID CC, Type *ReturnType,
                          AttributeList attr,
                          SmallVectorImpl<ISD::OutputArg> &Outs,
-                         const TargetLowering &TLI, const DataLayout &DL) {
-  SmallVector<Type *, 4> Types;
-  ComputeValueTypes(DL, ReturnType, Types);
-  unsigned NumValues = Types.size();
-  if (NumValues == 0) return;
+                         const TargetLowering &TLI, const DataLayout &DL,
+                         bool GoTupleResults) {
+  SmallVector<Type *, 4> ResultTys;
+  if (CC == CallingConv::Go)
+    goabi::getReturnTypes(ReturnType,
+                          GoTupleResults || goabi::hasTupleResultsAttr(attr),
+                          ResultTys);
+  else
+    ResultTys.push_back(ReturnType);
 
-  for (Type *Ty : Types) {
-    EVT VT = TLI.getValueType(DL, Ty);
-    ISD::NodeType ExtendKind = ISD::ANY_EXTEND;
+  for (unsigned ResultIndex = 0; ResultIndex != ResultTys.size();
+       ++ResultIndex) {
+    SmallVector<Type *, 4> Types;
+    SmallVector<TypeSize, 4> Offsets;
+    ComputeValueTypes(DL, ResultTys[ResultIndex], Types, &Offsets);
+    if (Types.empty())
+      continue;
 
-    if (attr.hasRetAttr(Attribute::SExt))
-      ExtendKind = ISD::SIGN_EXTEND;
-    else if (attr.hasRetAttr(Attribute::ZExt))
-      ExtendKind = ISD::ZERO_EXTEND;
+    for (unsigned TypeIndex = 0; TypeIndex != Types.size(); ++TypeIndex) {
+      Type *Ty = Types[TypeIndex];
+      EVT VT = TLI.getValueType(DL, Ty);
+      ISD::NodeType ExtendKind = ISD::ANY_EXTEND;
 
-    if (ExtendKind != ISD::ANY_EXTEND && VT.isInteger())
-      VT = TLI.getTypeForExtReturn(ReturnType->getContext(), VT, ExtendKind);
+      if (attr.hasRetAttr(Attribute::SExt))
+        ExtendKind = ISD::SIGN_EXTEND;
+      else if (attr.hasRetAttr(Attribute::ZExt))
+        ExtendKind = ISD::ZERO_EXTEND;
 
-    unsigned NumParts =
-        TLI.getNumRegistersForCallingConv(ReturnType->getContext(), CC, VT);
-    MVT PartVT =
-        TLI.getRegisterTypeForCallingConv(ReturnType->getContext(), CC, VT);
+      if (ExtendKind != ISD::ANY_EXTEND && VT.isInteger())
+        VT = TLI.getTypeForExtReturn(ReturnType->getContext(), VT, ExtendKind);
 
-    // 'inreg' on function refers to return value
-    ISD::ArgFlagsTy Flags = ISD::ArgFlagsTy();
-    if (attr.hasRetAttr(Attribute::InReg))
-      Flags.setInReg();
+      unsigned NumParts =
+          TLI.getNumRegistersForCallingConv(ReturnType->getContext(), CC, VT);
+      MVT PartVT =
+          TLI.getRegisterTypeForCallingConv(ReturnType->getContext(), CC, VT);
 
-    // Propagate extension type if any
-    if (attr.hasRetAttr(Attribute::SExt))
-      Flags.setSExt();
-    else if (attr.hasRetAttr(Attribute::ZExt))
-      Flags.setZExt();
+      ISD::ArgFlagsTy Flags = ISD::ArgFlagsTy();
+      if (attr.hasRetAttr(Attribute::InReg))
+        Flags.setInReg();
+      if (attr.hasRetAttr(Attribute::SExt))
+        Flags.setSExt();
+      else if (attr.hasRetAttr(Attribute::ZExt))
+        Flags.setZExt();
 
-    for (unsigned i = 0; i < NumParts; ++i)
-      Outs.push_back(ISD::OutputArg(Flags, PartVT, VT, Ty, 0, 0));
+      unsigned PartSize = PartVT.getStoreSize().getKnownMinValue();
+      for (unsigned PartIndex = 0; PartIndex != NumParts; ++PartIndex)
+        Outs.push_back(ISD::OutputArg(
+            Flags, PartVT, VT, Ty,
+            CC == CallingConv::Go ? ResultIndex : 0,
+            Offsets[TypeIndex].getFixedValue() + PartIndex * PartSize));
+    }
   }
 }
 

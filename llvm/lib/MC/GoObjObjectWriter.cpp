@@ -104,8 +104,8 @@ void addDefinedSymbol(std::vector<GoObjSymbol> &Symbols,
                       const MCSymbol *MCSym, const MCSection *Section,
                       uint64_t SectionBegin, uint64_t SectionEnd,
                       GoObj::DefinedSymbolBlock DefinedBlock,
-                      StringRef Name, uint8_t Type, uint64_t Size,
-                      ArrayRef<char> Data) {
+                      StringRef Name, uint8_t Type, uint16_t ABI,
+                      uint64_t Size, ArrayRef<char> Data) {
   GoObjSymbol Sym;
   Sym.Name = Name.str();
   Sym.Symbol = MCSym;
@@ -114,6 +114,7 @@ void addDefinedSymbol(std::vector<GoObjSymbol> &Symbols,
   Sym.SectionEnd = SectionEnd;
   Sym.DefinedBlock = DefinedBlock;
   Sym.Type = Type;
+  Sym.ABI = ABI;
   Sym.Size = Size;
   Sym.Data.append(Data.begin(), Data.end());
   Symbols.push_back(std::move(Sym));
@@ -332,9 +333,14 @@ uint64_t GoObjObjectWriter::writeObject() {
           report_fatal_error("GoObj section data is smaller than its layout");
         Data = ArrayRef<char>(Contents.data() + Begin, Size);
       }
+      uint8_t Type = getGoObjSymbolType(&Section);
+      uint16_t ABI = MCSym ? Asm->getContext()
+                                 .getGoObjSymbolABI(MCSym)
+                                 .value_or(GoObj::SymABI0)
+                           : GoObj::SymABI0;
       addDefinedSymbol(Symbols, MCSym, &Section, Begin, End,
-                       Config.DefaultDefinedSymbolBlock, Name,
-                       getGoObjSymbolType(&Section), Size, Data);
+                       Config.DefaultDefinedSymbolBlock, Name, Type, ABI, Size,
+                       Data);
     };
 
     if (SectionSymbols.empty()) {
