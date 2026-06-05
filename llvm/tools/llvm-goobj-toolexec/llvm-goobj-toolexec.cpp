@@ -126,6 +126,11 @@ public:
     return true;
   }
 };
+
+struct SymabisSymbol {
+  std::string Name;
+  std::string ABI;
+};
 } // namespace
 
 static void reportError(Twine Msg) {
@@ -196,10 +201,15 @@ static void initializeCodeGenForTool() {
   initializeScavengerTestPass(Registry);
 }
 
-static void addSymabisSymbol(SmallVectorImpl<std::string> &Symbols,
-                             StringSet<> &Seen, StringRef Symbol) {
+static StringRef getSymabisABIForFunction(const Function &F) {
+  return F.getCallingConv() == CallingConv::Go ? "ABIInternal" : "ABI0";
+}
+
+static void addSymabisSymbol(SmallVectorImpl<SymabisSymbol> &Symbols,
+                             StringSet<> &Seen, StringRef Symbol,
+                             StringRef ABI) {
   if (Seen.insert(Symbol).second)
-    Symbols.push_back(Symbol.str());
+    Symbols.push_back({Symbol.str(), ABI.str()});
 }
 
 static void addIRInput(SmallVectorImpl<std::string> &Inputs, StringSet<> &Seen,
@@ -251,7 +261,7 @@ static Error collectPackageIRInputs(SmallVectorImpl<std::string> &Inputs,
 }
 
 static Error collectSymabisSymbols(StringRef IRPath,
-                                   SmallVectorImpl<std::string> &Symbols,
+                                   SmallVectorImpl<SymabisSymbol> &Symbols,
                                    StringSet<> &Seen) {
   LLVMContext Context;
   SMDiagnostic Err;
@@ -266,7 +276,7 @@ static Error collectSymabisSymbols(StringRef IRPath,
   for (const Function &F : *M) {
     if (F.isDeclaration() || F.hasLocalLinkage() || F.getName().empty())
       continue;
-    addSymabisSymbol(Symbols, Seen, F.getName());
+    addSymabisSymbol(Symbols, Seen, F.getName(), getSymabisABIForFunction(F));
   }
   return Error::success();
 }
@@ -434,10 +444,10 @@ static int runAugmentedCompile(ArrayRef<std::string> ActiveIRInputs) {
     return 1;
   }
 
-  SmallVector<std::string, 8> Symbols;
+  SmallVector<SymabisSymbol, 8> Symbols;
   StringSet<> SeenSymbols;
   for (const std::string &Symbol : SymabisSymbols)
-    addSymabisSymbol(Symbols, SeenSymbols, Symbol);
+    addSymabisSymbol(Symbols, SeenSymbols, Symbol, GoABI);
   for (const std::string &IR : ActiveIRInputs) {
     if (Error Err = collectSymabisSymbols(IR, Symbols, SeenSymbols)) {
       logAllUnhandledErrors(std::move(Err), errs());
@@ -463,8 +473,8 @@ static int runAugmentedCompile(ArrayRef<std::string> ActiveIRInputs) {
                   EC.message());
       return 1;
     }
-    for (const std::string &Symbol : Symbols)
-      SymabisOS << "def " << Symbol << ' ' << GoABI << '\n';
+    for (const SymabisSymbol &Symbol : Symbols)
+      SymabisOS << "def " << Symbol.Name << ' ' << Symbol.ABI << '\n';
     SymabisOS.close();
     if (SymabisOS.has_error()) {
       reportError("cannot write '" + Twine(SymabisPath) + "'");

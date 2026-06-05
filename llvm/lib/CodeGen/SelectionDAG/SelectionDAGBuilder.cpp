@@ -34,6 +34,7 @@
 #include "llvm/CodeGen/CodeGenCommonISel.h"
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/CodeGen/GCMetadata.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -2273,17 +2274,40 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
     Chain = DAG.getNode(ISD::TokenFactor, getCurSDLoc(),
                         MVT::Other, Chains);
   } else if (I.getNumOperands() != 0) {
+    const Function *F = I.getParent()->getParent();
+    CallingConv::ID CC = F->getCallingConv();
+    bool GoTupleResults =
+        CC == CallingConv::Go && goabi::hasTupleResultsAttr(*F);
+
+    SmallVector<Type *, 4> TopLevelRetTys;
+    if (CC == CallingConv::Go)
+      goabi::getReturnTypes(I.getOperand(0)->getType(), GoTupleResults,
+                            TopLevelRetTys);
+    else
+      TopLevelRetTys.push_back(I.getOperand(0)->getType());
+
     SmallVector<Type *, 4> Types;
-    ComputeValueTypes(DL, I.getOperand(0)->getType(), Types);
+    SmallVector<TypeSize, 4> Offsets;
+    SmallVector<unsigned, 4> ResultIndices;
+    for (unsigned ResultIndex = 0; ResultIndex != TopLevelRetTys.size();
+         ++ResultIndex) {
+      SmallVector<Type *, 4> ResultValueTys;
+      SmallVector<TypeSize, 4> ResultOffsets;
+      ComputeValueTypes(DL, TopLevelRetTys[ResultIndex], ResultValueTys,
+                        &ResultOffsets);
+      Types.append(ResultValueTys.begin(), ResultValueTys.end());
+      Offsets.append(ResultOffsets.begin(), ResultOffsets.end());
+      ResultIndices.append(ResultValueTys.size(), ResultIndex);
+    }
+
     unsigned NumValues = Types.size();
     if (NumValues) {
       SDValue RetOp = getValue(I.getOperand(0));
-
-      const Function *F = I.getParent()->getParent();
-
-      bool NeedsRegBlock = TLI.functionArgumentNeedsConsecutiveRegisters(
-          I.getOperand(0)->getType(), F->getCallingConv(),
-          /*IsVarArg*/ false, DL);
+      bool NeedsRegBlock =
+          CC != CallingConv::Go &&
+          TLI.functionArgumentNeedsConsecutiveRegisters(
+              I.getOperand(0)->getType(), CC,
+              /*IsVarArg*/ false, DL);
 
       ISD::NodeType ExtendKind = ISD::ANY_EXTEND;
       if (F->getAttributes().hasRetAttr(Attribute::SExt))
@@ -2300,10 +2324,13 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
         if (ExtendKind != ISD::ANY_EXTEND && VT.isInteger())
           VT = TLI.getTypeForExtReturn(Context, VT, ExtendKind);
 
-        CallingConv::ID CC = F->getCallingConv();
-
-        unsigned NumParts = TLI.getNumRegistersForCallingConv(Context, CC, VT);
-        MVT PartVT = TLI.getRegisterTypeForCallingConv(Context, CC, VT);
+        unsigned NumParts = CC == CallingConv::Go
+                                ? TLI.getNumRegisters(Context, VT)
+                                : TLI.getNumRegistersForCallingConv(Context, CC,
+                                                                    VT);
+        MVT PartVT = CC == CallingConv::Go
+                         ? TLI.getRegisterType(Context, VT)
+                         : TLI.getRegisterTypeForCallingConv(Context, CC, VT);
         SmallVector<SDValue, 4> Parts(NumParts);
         getCopyToParts(DAG, getCurSDLoc(),
                        SDValue(RetOp.getNode(), RetOp.getResNo() + j),
@@ -2314,10 +2341,10 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
         if (RetInReg)
           Flags.setInReg();
 
-        if (I.getOperand(0)->getType()->isPointerTy()) {
+        if (Types[j]->isPointerTy()) {
           Flags.setPointer();
           Flags.setPointerAddrSpace(
-              cast<PointerType>(I.getOperand(0)->getType())->getAddressSpace());
+              cast<PointerType>(Types[j])->getAddressSpace());
         }
 
         if (NeedsRegBlock) {
@@ -2337,7 +2364,15 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
         for (unsigned i = 0; i < NumParts; ++i) {
           Outs.push_back(ISD::OutputArg(Flags,
                                         Parts[i].getValueType().getSimpleVT(),
-                                        VT, Types[j], 0, 0));
+                                        VT, Types[j],
+                                        CC == CallingConv::Go
+                                            ? ResultIndices[j]
+                                            : 0,
+                                        CC == CallingConv::Go
+                                            ? Offsets[j].getFixedValue() +
+                                                  i * PartVT.getStoreSize()
+                                                          .getKnownMinValue()
+                                            : 0));
           OutVals.push_back(Parts[i]);
         }
       }
@@ -11443,10 +11478,30 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
 
   // Handle the incoming return values from the call.
   CLI.Ins.clear();
+  auto &DL = CLI.DAG.getDataLayout();
+  bool GoTupleResults =
+      CLI.CallConv == CallingConv::Go && CLI.CB &&
+      goabi::hasTupleResultsAttr(*CLI.CB);
+
+  SmallVector<Type *, 4> TopLevelRetTys;
+  if (CLI.CallConv == CallingConv::Go)
+    goabi::getReturnTypes(CLI.OrigRetTy, GoTupleResults, TopLevelRetTys);
+  else
+    TopLevelRetTys.push_back(CLI.OrigRetTy);
+
   SmallVector<Type *, 4> RetOrigTys;
   SmallVector<TypeSize, 4> Offsets;
-  auto &DL = CLI.DAG.getDataLayout();
-  ComputeValueTypes(DL, CLI.OrigRetTy, RetOrigTys, &Offsets);
+  SmallVector<unsigned, 4> ResultIndices;
+  for (unsigned ResultIndex = 0; ResultIndex != TopLevelRetTys.size();
+       ++ResultIndex) {
+    SmallVector<Type *, 4> ResultValueTys;
+    SmallVector<TypeSize, 4> ResultOffsets;
+    ComputeValueTypes(DL, TopLevelRetTys[ResultIndex], ResultValueTys,
+                      &ResultOffsets);
+    RetOrigTys.append(ResultValueTys.begin(), ResultValueTys.end());
+    Offsets.append(ResultOffsets.begin(), ResultOffsets.end());
+    ResultIndices.append(ResultValueTys.size(), ResultIndex);
+  }
 
   SmallVector<EVT, 4> RetVTs;
   if (CLI.RetTy != CLI.OrigRetTy) {
@@ -11481,7 +11536,8 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
   }
 
   SmallVector<ISD::OutputArg, 4> Outs;
-  GetReturnInfo(CLI.CallConv, CLI.RetTy, getReturnAttrs(CLI), Outs, *this, DL);
+  GetReturnInfo(CLI.CallConv, CLI.RetTy, getReturnAttrs(CLI), Outs, *this, DL,
+                GoTupleResults);
 
   bool CanLowerReturn =
       this->CanLowerReturn(CLI.CallConv, CLI.DAG.getMachineFunction(),
@@ -11513,8 +11569,10 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
     // points into the callers stack frame.
     CLI.IsTailCall = false;
   } else {
-    bool NeedsRegBlock = functionArgumentNeedsConsecutiveRegisters(
-        CLI.RetTy, CLI.CallConv, CLI.IsVarArg, DL);
+    bool NeedsRegBlock =
+        CLI.CallConv != CallingConv::Go &&
+        functionArgumentNeedsConsecutiveRegisters(CLI.RetTy, CLI.CallConv,
+                                                  CLI.IsVarArg, DL);
     for (unsigned I = 0, E = RetVTs.size(); I != E; ++I) {
       ISD::ArgFlagsTy Flags;
       if (NeedsRegBlock) {
@@ -11523,16 +11581,27 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
           Flags.setInConsecutiveRegsLast();
       }
       EVT VT = RetVTs[I];
-      MVT RegisterVT = getRegisterTypeForCallingConv(Context, CLI.CallConv, VT);
-      unsigned NumRegs =
-          getNumRegistersForCallingConv(Context, CLI.CallConv, VT);
+      MVT RegisterVT = CLI.CallConv == CallingConv::Go
+                           ? getRegisterType(Context, VT)
+                           : getRegisterTypeForCallingConv(Context, CLI.CallConv,
+                                                           VT);
+      unsigned NumRegs = CLI.CallConv == CallingConv::Go
+                             ? getNumRegisters(Context, VT)
+                             : getNumRegistersForCallingConv(Context,
+                                                             CLI.CallConv, VT);
       for (unsigned i = 0; i != NumRegs; ++i) {
+        unsigned PartOffset =
+            Offsets[I].getFixedValue() +
+            i * RegisterVT.getStoreSize().getKnownMinValue();
+        unsigned OrigArgIndex = CLI.CallConv == CallingConv::Go
+                                    ? ResultIndices[I]
+                                    : ISD::InputArg::NoArgIndex;
         ISD::InputArg Ret(Flags, RegisterVT, VT, RetOrigTys[I],
-                          CLI.IsReturnValueUsed, ISD::InputArg::NoArgIndex, 0);
-        if (CLI.RetTy->isPointerTy()) {
+                          CLI.IsReturnValueUsed, OrigArgIndex, PartOffset);
+        if (RetOrigTys[I]->isPointerTy()) {
           Ret.Flags.setPointer();
           Ret.Flags.setPointerAddrSpace(
-              cast<PointerType>(CLI.RetTy)->getAddressSpace());
+              cast<PointerType>(RetOrigTys[I])->getAddressSpace());
         }
         if (CLI.RetSExt)
           Ret.Flags.setSExt();

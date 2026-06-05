@@ -1199,6 +1199,7 @@ def CSR_64_AllRegs_AVX512 : CalleeSavedRegs<(sub (add CSR_64_MostRegs, RAX,
                                                       (sequence "K%u", 0, 7)),
                                                  (sequence "XMM%u", 0, 15))>;
 def CSR_64_NoneRegs    : CalleeSavedRegs<(add RBP)>;
+def CSR_64_Go          : CalleeSavedRegs<(add R14, RBP, XMM15)>;
 
 // Standard C + YMM6-15
 def CSR_Win64_Intel_OCL_BI_AVX : CalleeSavedRegs<(add RBX, RBP, RDI, RSI, R12,

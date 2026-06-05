@@ -90,6 +90,8 @@ enum class DefinedSymbolBlock : uint8_t {
   Nonpkgdef,
 };
 
+inline constexpr uint16_t SymABI0 = 0;
+inline constexpr uint16_t SymABIInternal = 1;
 inline constexpr uint16_t SymABIstatic = UINT16_MAX;
 
 enum SymKind : uint8_t {
