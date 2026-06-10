@@ -284,7 +284,7 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     return CSR_64_RT_AllRegs_SaveList;
   case CallingConv::PreserveNone:
     return CSR_64_NoneRegs_SaveList;
-  case CallingConv::Go:
+  case CallingConv::GoABIInternal:
   case CallingConv::GoABI0:
     return CSR_64_Go_SaveList;
   case CallingConv::CXX_FAST_TLS:
@@ -428,7 +428,7 @@ X86RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
     return CSR_64_RT_AllRegs_RegMask;
   case CallingConv::PreserveNone:
     return CSR_64_NoneRegs_RegMask;
-  case CallingConv::Go:
+  case CallingConv::GoABIInternal:
   case CallingConv::GoABI0:
     return CSR_64_Go_RegMask;
   case CallingConv::CXX_FAST_TLS:

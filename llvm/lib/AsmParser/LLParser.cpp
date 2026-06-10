@@ -2352,8 +2352,8 @@ bool LLParser::parseOptionalCallingConv(unsigned &CC) {
   case lltok::kw_preserve_mostcc:CC = CallingConv::PreserveMost; break;
   case lltok::kw_preserve_allcc: CC = CallingConv::PreserveAll; break;
   case lltok::kw_preserve_nonecc:CC = CallingConv::PreserveNone; break;
-  case lltok::kw_gocc:           CC = CallingConv::Go; break;
-  case lltok::kw_goabi0cc:       CC = CallingConv::GoABI0; break;
+  case lltok::kw_goabiinternal:  CC = CallingConv::GoABIInternal; break;
+  case lltok::kw_goabi0:         CC = CallingConv::GoABI0; break;
   case lltok::kw_ghccc:          CC = CallingConv::GHC; break;
   case lltok::kw_swiftcc:        CC = CallingConv::Swift; break;
   case lltok::kw_swifttailcc:    CC = CallingConv::SwiftTail; break;

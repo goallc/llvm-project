@@ -1,6 +1,6 @@
 # This exercises a mixed Go/LLVM GoObj link through go build -toolexec. The
 # dependency package contains an LLVM IR file that llvm-goobj-toolexec discovers
-# from the package source directory. The IR definitions use gocc and goabi0cc,
+# from the package source directory. The IR definitions use goabiinternal and goabi0,
 # so their symabis declarations and GoObj symbol ABI records come directly from
 # each function's IR calling convention.
 
