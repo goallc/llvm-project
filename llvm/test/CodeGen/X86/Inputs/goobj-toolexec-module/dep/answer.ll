@@ -27,4 +27,10 @@ entry:
   ret i64 %ret
 }
 
+define goabi0cc i64 @"example.com/goobjtoolexec/dep.StackAdd"(i64 %a, i64 %b) {
+entry:
+  %sum = add i64 %a, %b
+  ret i64 %sum
+}
+
 attributes #0 = { "go_results_tuple" }

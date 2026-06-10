@@ -18,6 +18,7 @@
 #include "llvm/Analysis/RuntimeLibcallInfo.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/CodeGen/CommandFlags.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/LinkAllCodegenComponents.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/IR/DiagnosticInfo.h"
@@ -59,13 +60,6 @@ static cl::list<std::string>
                                  "selected Go package archive"),
              cl::value_desc("path"), cl::ZeroOrMore, cl::cat(GoObjToolCat));
 
-static cl::list<std::string>
-    SymabisSymbols("symabis-symbol",
-                   cl::desc("Go symbol to declare in generated symabis "
-                            "(default: infer externally visible IR functions)"),
-                   cl::value_desc("name"), cl::ZeroOrMore,
-                   cl::cat(GoObjToolCat));
-
 static cl::opt<std::string>
     PackagePath("package-path",
                 cl::desc("Go package path to record in generated Go object "
@@ -94,10 +88,6 @@ static cl::opt<char>
              cl::desc("Optimization level. [-O0, -O1, -O2, or -O3] "
                       "(default = '-O2')"),
              cl::Prefix, cl::init('2'), cl::cat(GoObjToolCat));
-
-static cl::opt<std::string>
-    GoABI("go-abi", cl::desc("ABI to use for generated symabis definitions"),
-          cl::init("ABI0"), cl::value_desc("ABI"), cl::cat(GoObjToolCat));
 
 static cl::opt<bool>
     DisableVerify("disable-verify",
@@ -201,8 +191,12 @@ static void initializeCodeGenForTool() {
   initializeScavengerTestPass(Registry);
 }
 
-static StringRef getSymabisABIForFunction(const Function &F) {
-  return F.getCallingConv() == CallingConv::Go ? "ABIInternal" : "ABI0";
+static std::optional<StringRef> getSymabisABIForFunction(const Function &F) {
+  if (goabi::isGoABIInternalCallingConv(F.getCallingConv()))
+    return StringRef("ABIInternal");
+  if (goabi::isGoABI0CallingConv(F.getCallingConv()))
+    return StringRef("ABI0");
+  return std::nullopt;
 }
 
 static void addSymabisSymbol(SmallVectorImpl<SymabisSymbol> &Symbols,
@@ -276,7 +270,8 @@ static Error collectSymabisSymbols(StringRef IRPath,
   for (const Function &F : *M) {
     if (F.isDeclaration() || F.hasLocalLinkage() || F.getName().empty())
       continue;
-    addSymabisSymbol(Symbols, Seen, F.getName(), getSymabisABIForFunction(F));
+    if (std::optional<StringRef> ABI = getSymabisABIForFunction(F))
+      addSymabisSymbol(Symbols, Seen, F.getName(), *ABI);
   }
   return Error::success();
 }
@@ -446,8 +441,6 @@ static int runAugmentedCompile(ArrayRef<std::string> ActiveIRInputs) {
 
   SmallVector<SymabisSymbol, 8> Symbols;
   StringSet<> SeenSymbols;
-  for (const std::string &Symbol : SymabisSymbols)
-    addSymabisSymbol(Symbols, SeenSymbols, Symbol, GoABI);
   for (const std::string &IR : ActiveIRInputs) {
     if (Error Err = collectSymabisSymbols(IR, Symbols, SeenSymbols)) {
       logAllUnhandledErrors(std::move(Err), errs());

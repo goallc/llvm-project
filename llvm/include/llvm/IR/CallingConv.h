@@ -92,6 +92,9 @@ namespace CallingConv {
     /// Used for Go's register-based internal ABI.
     Go = 22,
 
+    /// Used for Go's stack-based ABI0.
+    GoABI0 = 23,
+
     /// This is the start of the target-specific calling conventions, e.g.
     /// fastcall and thiscall on X86.
     FirstTargetCC = 64,

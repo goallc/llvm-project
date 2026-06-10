@@ -39,6 +39,7 @@
 #include "llvm/BinaryFormat/GoObj.h"
 #include "llvm/CodeGen/AsmPrinterAnalysis.h"
 #include "llvm/CodeGen/BasicBlockSectionsProfileReader.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/GCMetadata.h"
 #include "llvm/CodeGen/GCMetadataPrinter.h"
 #include "llvm/CodeGen/InsertCodePrefetch.h"
@@ -3209,9 +3210,12 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
     CurrentFnSym = getObjFileLowering().getFunctionEntryPointSymbol(&F, TM);
   }
 
-  if (TM.getTargetTriple().isOSBinFormatGoObj() &&
-      F.getCallingConv() == CallingConv::Go)
-    OutContext.setGoObjSymbolABI(CurrentFnSym, GoObj::SymABIInternal);
+  if (TM.getTargetTriple().isOSBinFormatGoObj()) {
+    if (goabi::isGoABIInternalCallingConv(F.getCallingConv()))
+      OutContext.setGoObjSymbolABI(CurrentFnSym, GoObj::SymABIInternal);
+    else if (goabi::isGoABI0CallingConv(F.getCallingConv()))
+      OutContext.setGoObjSymbolABI(CurrentFnSym, GoObj::SymABI0);
+  }
 
   CurrentFnSymForSize = CurrentFnSym;
   CurrentFnBegin = nullptr;

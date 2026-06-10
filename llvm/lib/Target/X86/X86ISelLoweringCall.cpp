@@ -72,8 +72,13 @@ static constexpr unsigned X86GoFPRegs[] = {
     X86::XMM5,  X86::XMM6,  X86::XMM7,  X86::XMM8,  X86::XMM9,
     X86::XMM10, X86::XMM11, X86::XMM12, X86::XMM13, X86::XMM14};
 
-static goabi::ABIConfig getX86GoABIConfig(const X86Subtarget &Subtarget) {
+static goabi::ABIConfig getX86GoABIConfig(const X86Subtarget &Subtarget,
+                                          CallingConv::ID CallConv) {
   assert(Subtarget.is64Bit() && "Go calling convention is only supported on x86-64");
+  if (goabi::isGoABI0CallingConv(CallConv))
+    return {ArrayRef<unsigned>(), ArrayRef<unsigned>(), 8, Align(8),
+            Subtarget.getFrameLowering()->getStackAlign(),
+            Subtarget.useSoftFloat()};
   return {X86GoIntRegs, X86GoFPRegs, 8, Align(8),
           Subtarget.getFrameLowering()->getStackAlign(),
           Subtarget.useSoftFloat()};
@@ -159,13 +164,16 @@ static SDValue lowerX86GoFormalArguments(
   const Function &F = MF.getFunction();
   const X86Subtarget &Subtarget = MF.getSubtarget<X86Subtarget>();
   MVT PtrVT = TLI.getPointerTy(DAG.getDataLayout());
-  int64_t IncomingStackOffset = static_cast<int64_t>(PtrVT.getStoreSize());
+  int64_t IncomingStackOffset =
+      goabi::isGoABI0CallingConv(F.getCallingConv())
+          ? 0
+          : static_cast<int64_t>(PtrVT.getStoreSize());
 
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys = getX86GoArgTypes(F, LayoutMap);
   goabi::CallLayout Layout = goabi::computeCallLayout(
       ArgTys, getX86GoReturnTypes(F.getReturnType(), F.getAttributes()),
-      DAG.getDataLayout(), getX86GoABIConfig(Subtarget));
+      DAG.getDataLayout(), getX86GoABIConfig(Subtarget, F.getCallingConv()));
 
   FuncInfo->setBytesToPopOnReturn(0);
   FuncInfo->setArgumentStackSize(Layout.TotalStackSize);
@@ -234,14 +242,18 @@ static SDValue lowerX86GoReturn(const X86TargetLowering &TLI, SDValue Chain,
   const X86Subtarget &Subtarget = MF.getSubtarget<X86Subtarget>();
   MachineFrameInfo &MFI = MF.getFrameInfo();
   int64_t IncomingStackOffset =
-      static_cast<int64_t>(TLI.getPointerTy(DAG.getDataLayout()).getStoreSize());
+      goabi::isGoABI0CallingConv(MF.getFunction().getCallingConv())
+          ? 0
+          : static_cast<int64_t>(
+                TLI.getPointerTy(DAG.getDataLayout()).getStoreSize());
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys = getX86GoArgTypes(MF.getFunction(), LayoutMap);
   SmallVector<Type *, 8> ResultTys =
       getX86GoReturnTypes(MF.getFunction().getReturnType(),
                           MF.getFunction().getAttributes());
   goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgTys, ResultTys, DAG.getDataLayout(), getX86GoABIConfig(Subtarget));
+      ArgTys, ResultTys, DAG.getDataLayout(),
+      getX86GoABIConfig(Subtarget, MF.getFunction().getCallingConv()));
 
   SmallVector<SDValue, 8> MemOps;
   SmallVector<std::pair<Register, SDValue>, 8> RetRegs;
@@ -321,11 +333,12 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
   SmallVector<Type *, 8> ArgTys = getX86GoCallArgTypes(CLI.getArgs(), ArgLayoutMap);
   SmallVector<Type *, 8> ResultTys;
   goabi::getReturnTypes(CLI.RetTy,
-                        CLI.CallConv == CallingConv::Go && CLI.CB &&
+                        goabi::isGoCallingConv(CLI.CallConv) && CLI.CB &&
                             goabi::hasTupleResultsAttr(*CLI.CB),
                         ResultTys);
   goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgTys, ResultTys, DAG.getDataLayout(), getX86GoABIConfig(Subtarget));
+      ArgTys, ResultTys, DAG.getDataLayout(),
+      getX86GoABIConfig(Subtarget, CLI.CallConv));
 
   unsigned NumBytes = Layout.TotalStackSize;
   Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, DL);
@@ -1098,7 +1111,7 @@ bool X86TargetLowering::CanLowerReturn(
     CallingConv::ID CallConv, MachineFunction &MF, bool isVarArg,
     const SmallVectorImpl<ISD::OutputArg> &Outs, LLVMContext &Context,
     const Type *RetTy) const {
-  if (CallConv == CallingConv::Go)
+  if (goabi::isGoCallingConv(CallConv))
     return !isVarArg;
 
   // Mingw64 GCC returns f128 via sret, and LLVM matches it for compatibility.
@@ -1214,7 +1227,7 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
                                const SmallVectorImpl<ISD::OutputArg> &Outs,
                                const SmallVectorImpl<SDValue> &OutVals,
                                const SDLoc &dl, SelectionDAG &DAG) const {
-  if (CallConv == CallingConv::Go)
+  if (goabi::isGoCallingConv(CallConv))
     return lowerX86GoReturn(*this, Chain, DAG.getMachineFunction(), Outs,
                             OutVals, dl, DAG);
   MachineFunction &MF = DAG.getMachineFunction();
@@ -2145,7 +2158,7 @@ SDValue X86TargetLowering::LowerFormalArguments(
     SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
     const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &dl,
     SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals) const {
-  if (CallConv == CallingConv::Go)
+  if (goabi::isGoCallingConv(CallConv))
     return lowerX86GoFormalArguments(*this, Chain, DAG.getMachineFunction(), Ins,
                                      dl, DAG, InVals);
   MachineFunction &MF = DAG.getMachineFunction();
@@ -2524,7 +2537,7 @@ X86TargetLowering::ByValCopyKind X86TargetLowering::ByValNeedsCopyForTailCall(
 SDValue
 X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
                              SmallVectorImpl<SDValue> &InVals) const {
-  if (CLI.CallConv == CallingConv::Go)
+  if (goabi::isGoCallingConv(CLI.CallConv))
     return lowerX86GoCall(*this, CLI, InVals);
   SelectionDAG &DAG                     = CLI.DAG;
   SDLoc &dl                             = CLI.DL;

@@ -1161,6 +1161,7 @@ bool llvm::CallingConv::supportsNonVoidReturnType(CallingConv::ID CC) {
   case CallingConv::SwiftTail:
   case CallingConv::PreserveNone:
   case CallingConv::Go:
+  case CallingConv::GoABI0:
   case CallingConv::X86_StdCall:
   case CallingConv::X86_FastCall:
   case CallingConv::ARM_APCS:

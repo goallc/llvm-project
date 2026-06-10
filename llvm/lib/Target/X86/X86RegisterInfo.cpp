@@ -19,6 +19,7 @@
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/LiveRegMatrix.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
@@ -284,6 +285,7 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   case CallingConv::PreserveNone:
     return CSR_64_NoneRegs_SaveList;
   case CallingConv::Go:
+  case CallingConv::GoABI0:
     return CSR_64_Go_SaveList;
   case CallingConv::CXX_FAST_TLS:
     if (Is64Bit)
@@ -427,6 +429,7 @@ X86RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
   case CallingConv::PreserveNone:
     return CSR_64_NoneRegs_RegMask;
   case CallingConv::Go:
+  case CallingConv::GoABI0:
     return CSR_64_Go_RegMask;
   case CallingConv::CXX_FAST_TLS:
     if (Is64Bit)
@@ -687,7 +690,7 @@ BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
       Reserved.set(*AI);
   }
 
-  if (MF.getFunction().getCallingConv() == CallingConv::Go) {
+  if (goabi::isGoCallingConv(MF.getFunction().getCallingConv())) {
     for (MCRegAliasIterator AI(X86::R14, this, true); AI.isValid(); ++AI)
       Reserved.set(*AI);
     for (MCRegAliasIterator AI(X86::XMM15, this, true); AI.isValid(); ++AI)

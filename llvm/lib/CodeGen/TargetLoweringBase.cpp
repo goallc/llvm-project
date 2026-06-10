@@ -2114,7 +2114,7 @@ void llvm::GetReturnInfo(CallingConv::ID CC, Type *ReturnType,
                          const TargetLowering &TLI, const DataLayout &DL,
                          bool GoTupleResults) {
   SmallVector<Type *, 4> ResultTys;
-  if (CC == CallingConv::Go)
+  if (goabi::isGoCallingConv(CC))
     goabi::getReturnTypes(ReturnType,
                           GoTupleResults || goabi::hasTupleResultsAttr(attr),
                           ResultTys);
@@ -2159,7 +2159,7 @@ void llvm::GetReturnInfo(CallingConv::ID CC, Type *ReturnType,
       for (unsigned PartIndex = 0; PartIndex != NumParts; ++PartIndex)
         Outs.push_back(ISD::OutputArg(
             Flags, PartVT, VT, Ty,
-            CC == CallingConv::Go ? ResultIndex : 0,
+            goabi::isGoCallingConv(CC) ? ResultIndex : 0,
             Offsets[TypeIndex].getFixedValue() + PartIndex * PartSize));
     }
   }

@@ -21,6 +21,7 @@
 #include "MCTargetDesc/AArch64InstPrinter.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/BinaryFormat/Dwarf.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/LiveRegMatrix.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
@@ -98,6 +99,7 @@ AArch64RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     return CSR_AArch64_NoneRegs_SaveList;
 
   case CallingConv::Go:
+  case CallingConv::GoABI0:
     return CSR_AArch64_Go_SaveList;
 
   case CallingConv::AnyReg:
@@ -280,7 +282,7 @@ AArch64RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
   if (CC == CallingConv::PreserveNone)
     return SCS ? CSR_AArch64_NoneRegs_SCS_RegMask
                : CSR_AArch64_NoneRegs_RegMask;
-  if (CC == CallingConv::Go)
+  if (goabi::isGoCallingConv(CC))
     return CSR_AArch64_Go_RegMask;
   if (CC == CallingConv::AnyReg)
     return SCS ? CSR_AArch64_AllRegs_SCS_RegMask : CSR_AArch64_AllRegs_RegMask;
@@ -544,7 +546,7 @@ AArch64RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
       markSuperRegs(Reserved, AArch64::GPR32commonRegClass.getRegister(i));
   }
 
-  if (MF.getFunction().getCallingConv() == CallingConv::Go) {
+  if (goabi::isGoCallingConv(MF.getFunction().getCallingConv())) {
     markSuperRegs(Reserved, AArch64::W18);
     markSuperRegs(Reserved, AArch64::W28);
   }

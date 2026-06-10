@@ -26,6 +26,27 @@ entry:
   ret i64 %ret
 }
 
+define goabi0cc i64 @abi0_second_int(i64 %a, i64 %b) {
+; X86-LABEL: abi0_second_int:
+; X86: movq 16(%rsp), %rax
+; X86: movq %rax, 24(%rsp)
+; X86: retq
+entry:
+  ret i64 %b
+}
+
+define goabi0cc i64 @abi0_call_second_int() {
+; X86-LABEL: abi0_call_second_int:
+; X86: movq %rsp, %rax
+; X86: movq $22, 8(%rax)
+; X86: movq $11, (%rax)
+; X86: callq abi0_second_int
+; X86: movq 16(%rax), %rax
+entry:
+  %ret = call goabi0cc i64 @abi0_second_int(i64 11, i64 22)
+  ret i64 %ret
+}
+
 define gocc { i64, [2 x i64] } @tuple_stackret(i64 %a, i64 %b, i64 %c) #0 {
 ; X86-LABEL: tuple_stackret:
 ; X86-DAG: movq %rbx, 16(%rsp)

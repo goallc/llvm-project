@@ -13,6 +13,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Attributes.h"
+#include "llvm/IR/CallingConv.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/Support/Alignment.h"
@@ -26,6 +27,18 @@ class Type;
 namespace goabi {
 
 inline constexpr StringLiteral TupleResultsAttr = "go_results_tuple";
+
+inline bool isGoABIInternalCallingConv(CallingConv::ID CC) {
+  return CC == CallingConv::Go;
+}
+
+inline bool isGoABI0CallingConv(CallingConv::ID CC) {
+  return CC == CallingConv::GoABI0;
+}
+
+inline bool isGoCallingConv(CallingConv::ID CC) {
+  return isGoABIInternalCallingConv(CC) || isGoABI0CallingConv(CC);
+}
 
 struct ABIConfig {
   ArrayRef<unsigned> IntRegs;
