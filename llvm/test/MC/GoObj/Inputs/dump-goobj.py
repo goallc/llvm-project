@@ -30,6 +30,16 @@ PKGIDX_HASHED = PKGIDX_NONE - 2
 PKGIDX_SELF = PKGIDX_NONE - 4
 SYMBOL_SIZE = 21
 RELOC_SIZE = 23
+AUX_SIZE = 9
+
+AUX_TYPES = {
+    1: "funcinfo",
+    7: "pcsp",
+    8: "pcfile",
+    9: "pcline",
+    10: "pcinline",
+    11: "pcdata",
+}
 
 
 def string_at(data, offset):
@@ -74,6 +84,13 @@ def main(path):
     nonpkgdef = read_symbols(data, offsets[6], offsets[7])
     nonpkgref = read_symbols(data, offsets[7], offsets[8])
 
+    files = []
+    for offset in range(offsets[2], offsets[3], 8):
+        files.append(string_at(data, offset))
+    print("file-count:", len(files))
+    for index, file in enumerate(files):
+        print(f"file {index}: {file}")
+
     for label, symbols in [
         ("symdef", symdef),
         ("hashed64def", hashed64def),
@@ -93,6 +110,10 @@ def main(path):
         struct.unpack_from("<I", data, offsets[11] + 4 * index)[0]
         for index in range((offsets[12] - offsets[11]) // 4)
     ]
+    aux_indexes = [
+        struct.unpack_from("<I", data, offsets[12] + 4 * index)[0]
+        for index in range((offsets[13] - offsets[12]) // 4)
+    ]
 
     def resolve_ref(pkg_index, sym_index):
         if pkg_index == PKGIDX_NONE:
@@ -108,6 +129,15 @@ def main(path):
         return f"{pkg_index}:{sym_index}"
 
     for symbol_index in range(len(defined)):
+        for aux_index in range(aux_indexes[symbol_index], aux_indexes[symbol_index + 1]):
+            offset = offsets[15] + aux_index * AUX_SIZE
+            aux_type = data[offset]
+            pkg_index, sym_index = struct.unpack_from("<II", data, offset + 1)
+            aux_name = AUX_TYPES.get(aux_type, str(aux_type))
+            print(
+                f"aux {symbol_index}.{aux_index}: type={aux_name} "
+                f"target={resolve_ref(pkg_index, sym_index)}"
+            )
         for reloc_index in range(
             reloc_indexes[symbol_index], reloc_indexes[symbol_index + 1]
         ):
