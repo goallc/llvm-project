@@ -10,9 +10,18 @@
 # RUN: cp -R %S/Inputs/goobj-toolexec-module %t.dir
 # RUN: cd %t.dir && env GOCACHE=%t.gocache /home/zgy/02.golang/stablego/go1.26/bin/go build -a -ldflags=-w -toolexec llvm-goobj-toolexec -o toolexec-linked ./cmd/app
 # RUN: %t.dir/toolexec-linked 2>&1 | FileCheck %s
+# RUN: cd %t.dir && env GOCACHE=%t.gocache /home/zgy/02.golang/stablego/go1.26/bin/go test -ldflags=-w -toolexec llvm-goobj-toolexec -run TestStringEqual -bench BenchmarkStringEqual -benchtime=1x -count=1 ./dep | FileCheck %s --check-prefix=BENCH
 
 # CHECK: 123
 # CHECK-NEXT: 42
 # CHECK-NEXT: 60 40
 # CHECK-NEXT: 4
 # CHECK-NEXT: 123
+
+# BENCH: BenchmarkStringEqualNativeDirectEqual
+# BENCH: BenchmarkStringEqualNativeFuncEqual
+# BENCH: BenchmarkStringEqualLLVMEqual
+# BENCH: BenchmarkStringEqualNativeDirectDifferent
+# BENCH: BenchmarkStringEqualNativeFuncDifferent
+# BENCH: BenchmarkStringEqualLLVMDifferent
+# BENCH: PASS
