@@ -15,6 +15,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/RuntimeLibcallInfo.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/CodeGen/CommandFlags.h"
@@ -26,10 +27,13 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Passes/OptimizationLevel.h"
+#include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
@@ -191,6 +195,51 @@ static void initializeCodeGenForTool() {
   initializeScavengerTestPass(Registry);
 }
 
+static std::optional<OptimizationLevel> getIROptimizationLevel(char Level) {
+  switch (Level) {
+  case '0':
+    return std::nullopt;
+  case '1':
+    return OptimizationLevel::O1;
+  case '2':
+    return OptimizationLevel::O2;
+  case '3':
+    return OptimizationLevel::O3;
+  default:
+    return std::nullopt;
+  }
+}
+
+static void optimizeIRModule(Module &M, TargetMachine &TM, char Level) {
+  std::optional<OptimizationLevel> IROptLevel = getIROptimizationLevel(Level);
+  if (!IROptLevel)
+    return;
+
+  LoopAnalysisManager LAM;
+  FunctionAnalysisManager FAM;
+  CGSCCAnalysisManager CGAM;
+  ModuleAnalysisManager MAM;
+
+  PassBuilder PB(&TM);
+  TargetLibraryInfoImpl TLII(M.getTargetTriple(), TM.Options.VecLib);
+  FAM.registerPass([&] { return TargetLibraryAnalysis(TLII); });
+  MAM.registerPass([&] {
+    return RuntimeLibraryAnalysis(
+        M.getTargetTriple(), TM.Options.ExceptionModel, TM.Options.FloatABIType,
+        TM.Options.EABIVersion, TM.Options.MCOptions.ABIName,
+        TM.Options.VecLib);
+  });
+
+  PB.registerModuleAnalyses(MAM);
+  PB.registerCGSCCAnalyses(CGAM);
+  PB.registerFunctionAnalyses(FAM);
+  PB.registerLoopAnalyses(LAM);
+  PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+  ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(*IROptLevel);
+  MPM.run(M, MAM);
+}
+
 static std::optional<StringRef> getSymabisABIForFunction(const Function &F) {
   if (goabi::isGoABIInternalCallingConv(F.getCallingConv()))
     return StringRef("ABIInternal");
@@ -341,6 +390,13 @@ static int compileIRToGoObj(StringRef IRPath, StringRef ObjPath,
   codegen::setFunctionAttributes(*M, codegen::getCPUStr(),
                                  codegen::getFeaturesStr(),
                                  codegen::getTuneCPUStr());
+
+  optimizeIRModule(*M, *Target, OptLevel);
+
+  if (!DisableVerify && verifyModule(*M, &errs())) {
+    reportError("optimized module cannot be verified: " + Twine(IRPath));
+    return 1;
+  }
 
   std::error_code EC;
   ToolOutputFile Out(ObjPath, EC, sys::fs::OF_None);
