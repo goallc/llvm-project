@@ -990,7 +990,7 @@ bool FastISel::lowerCallTo(const CallInst *CI, MCSymbol *Symbol,
 }
 
 bool FastISel::lowerCallTo(CallLoweringInfo &CLI) {
-  if (CLI.CallConv == CallingConv::Go)
+  if (goabi::isGoCallingConv(CLI.CallConv))
     return false;
 
   // Handle the incoming return values from the call.
@@ -999,9 +999,8 @@ bool FastISel::lowerCallTo(CallLoweringInfo &CLI) {
   ComputeValueVTs(TLI, DL, CLI.RetTy, RetTys);
 
   SmallVector<ISD::OutputArg, 4> Outs;
-  bool GoTupleResults =
-      CLI.CallConv == CallingConv::Go && CLI.CB &&
-      goabi::hasTupleResultsAttr(*CLI.CB);
+  bool GoTupleResults = goabi::isGoCallingConv(CLI.CallConv) && CLI.CB &&
+                        goabi::hasTupleResultsAttr(*CLI.CB);
   GetReturnInfo(CLI.CallConv, CLI.RetTy, getReturnAttrs(CLI), Outs, TLI, DL,
                 GoTupleResults);
 

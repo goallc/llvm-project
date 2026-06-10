@@ -8963,7 +8963,11 @@ static constexpr unsigned AArch64GoDRegs[] = {
     AArch64::D12, AArch64::D13, AArch64::D14, AArch64::D15};
 
 static goabi::ABIConfig getAArch64GoABIConfig(const AArch64TargetLowering &TLI,
-                                              const AArch64Subtarget &Subtarget) {
+                                              const AArch64Subtarget &Subtarget,
+                                              CallingConv::ID CallConv) {
+  if (goabi::isGoABI0CallingConv(CallConv))
+    return {ArrayRef<unsigned>(), ArrayRef<unsigned>(), 8, Align(8),
+            Subtarget.getFrameLowering()->getStackAlign(), TLI.useSoftFloat()};
   return {AArch64GoXRegs, AArch64GoDRegs, 8, Align(8),
           Subtarget.getFrameLowering()->getStackAlign(), TLI.useSoftFloat()};
 }
@@ -9063,7 +9067,8 @@ static SDValue lowerAArch64GoFormalArguments(
   SmallVector<Type *, 8> ArgTys = getAArch64GoArgTypes(F, LayoutMap);
   goabi::CallLayout Layout = goabi::computeCallLayout(
       ArgTys, getAArch64GoReturnTypes(F.getReturnType(), F.getAttributes()),
-      DAG.getDataLayout(), getAArch64GoABIConfig(TLI, Subtarget));
+      DAG.getDataLayout(),
+      getAArch64GoABIConfig(TLI, Subtarget, F.getCallingConv()));
   FuncInfo->setBytesInStackArgArea(Layout.TotalStackSize);
 
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
@@ -9131,7 +9136,9 @@ static SDValue lowerAArch64GoReturn(
       getAArch64GoReturnTypes(MF.getFunction().getReturnType(),
                               MF.getFunction().getAttributes());
   goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgTys, ResultTys, DAG.getDataLayout(), getAArch64GoABIConfig(TLI, Subtarget));
+      ArgTys, ResultTys, DAG.getDataLayout(),
+      getAArch64GoABIConfig(TLI, Subtarget,
+                            MF.getFunction().getCallingConv()));
 
   SmallVector<SDValue, 8> MemOps;
   SmallVector<std::pair<unsigned, SDValue>, 8> RetRegs;
@@ -9208,11 +9215,12 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
   SmallVector<Type *, 8> ArgTys = getAArch64GoCallArgTypes(CLI.getArgs(), LayoutMap);
   SmallVector<Type *, 8> ResultTys;
   goabi::getReturnTypes(CLI.RetTy,
-                        CLI.CallConv == CallingConv::Go && CLI.CB &&
+                        goabi::isGoCallingConv(CLI.CallConv) && CLI.CB &&
                             goabi::hasTupleResultsAttr(*CLI.CB),
                         ResultTys);
   goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgTys, ResultTys, DAG.getDataLayout(), getAArch64GoABIConfig(TLI, Subtarget));
+      ArgTys, ResultTys, DAG.getDataLayout(),
+      getAArch64GoABIConfig(TLI, Subtarget, CLI.CallConv));
 
   unsigned NumBytes = Layout.TotalStackSize;
   Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, DL);
@@ -9415,6 +9423,7 @@ CCAssignFn *AArch64TargetLowering::CCAssignFnForCall(CallingConv::ID CC,
   case CallingConv::C:
   case CallingConv::Fast:
   case CallingConv::Go:
+  case CallingConv::GoABI0:
   case CallingConv::PreserveMost:
   case CallingConv::PreserveAll:
   case CallingConv::CXX_FAST_TLS:
@@ -9519,7 +9528,7 @@ SDValue AArch64TargetLowering::LowerFormalArguments(
     SDValue Chain, CallingConv::ID CallConv, bool isVarArg,
     const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &DL,
     SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals) const {
-  if (CallConv == CallingConv::Go)
+  if (goabi::isGoCallingConv(CallConv))
     return lowerAArch64GoFormalArguments(*this, Chain, DAG.getMachineFunction(),
                                          Ins, DL, DAG, InVals);
   MachineFunction &MF = DAG.getMachineFunction();
@@ -10637,7 +10646,7 @@ static bool shouldLowerTailCallStackArg(const MachineFunction &MF,
 SDValue
 AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
                                  SmallVectorImpl<SDValue> &InVals) const {
-  if (CLI.CallConv == CallingConv::Go)
+  if (goabi::isGoCallingConv(CLI.CallConv))
     return lowerAArch64GoCall(*this, CLI, InVals);
   SelectionDAG &DAG = CLI.DAG;
   SDLoc &DL = CLI.DL;
@@ -11377,7 +11386,7 @@ bool AArch64TargetLowering::CanLowerReturn(
     CallingConv::ID CallConv, MachineFunction &MF, bool isVarArg,
     const SmallVectorImpl<ISD::OutputArg> &Outs, LLVMContext &Context,
     const Type *RetTy) const {
-  if (CallConv == CallingConv::Go)
+  if (goabi::isGoCallingConv(CallConv))
     return !isVarArg;
   CCAssignFn *RetCC = CCAssignFnForReturn(CallConv);
   SmallVector<CCValAssign, 16> RVLocs;
@@ -11391,7 +11400,7 @@ AArch64TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
                                    const SmallVectorImpl<ISD::OutputArg> &Outs,
                                    const SmallVectorImpl<SDValue> &OutVals,
                                    const SDLoc &DL, SelectionDAG &DAG) const {
-  if (CallConv == CallingConv::Go)
+  if (goabi::isGoCallingConv(CallConv))
     return lowerAArch64GoReturn(*this, Chain, DAG.getMachineFunction(), Outs,
                                 OutVals, DL, DAG);
   auto &MF = DAG.getMachineFunction();

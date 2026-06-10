@@ -2277,10 +2277,10 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
     const Function *F = I.getParent()->getParent();
     CallingConv::ID CC = F->getCallingConv();
     bool GoTupleResults =
-        CC == CallingConv::Go && goabi::hasTupleResultsAttr(*F);
+        goabi::isGoCallingConv(CC) && goabi::hasTupleResultsAttr(*F);
 
     SmallVector<Type *, 4> TopLevelRetTys;
-    if (CC == CallingConv::Go)
+    if (goabi::isGoCallingConv(CC))
       goabi::getReturnTypes(I.getOperand(0)->getType(), GoTupleResults,
                             TopLevelRetTys);
     else
@@ -2304,7 +2304,7 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
     if (NumValues) {
       SDValue RetOp = getValue(I.getOperand(0));
       bool NeedsRegBlock =
-          CC != CallingConv::Go &&
+          !goabi::isGoCallingConv(CC) &&
           TLI.functionArgumentNeedsConsecutiveRegisters(
               I.getOperand(0)->getType(), CC,
               /*IsVarArg*/ false, DL);
@@ -2324,11 +2324,11 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
         if (ExtendKind != ISD::ANY_EXTEND && VT.isInteger())
           VT = TLI.getTypeForExtReturn(Context, VT, ExtendKind);
 
-        unsigned NumParts = CC == CallingConv::Go
+        unsigned NumParts = goabi::isGoCallingConv(CC)
                                 ? TLI.getNumRegisters(Context, VT)
                                 : TLI.getNumRegistersForCallingConv(Context, CC,
                                                                     VT);
-        MVT PartVT = CC == CallingConv::Go
+        MVT PartVT = goabi::isGoCallingConv(CC)
                          ? TLI.getRegisterType(Context, VT)
                          : TLI.getRegisterTypeForCallingConv(Context, CC, VT);
         SmallVector<SDValue, 4> Parts(NumParts);
@@ -2365,10 +2365,10 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
           Outs.push_back(ISD::OutputArg(Flags,
                                         Parts[i].getValueType().getSimpleVT(),
                                         VT, Types[j],
-                                        CC == CallingConv::Go
+                                        goabi::isGoCallingConv(CC)
                                             ? ResultIndices[j]
                                             : 0,
-                                        CC == CallingConv::Go
+                                        goabi::isGoCallingConv(CC)
                                             ? Offsets[j].getFixedValue() +
                                                   i * PartVT.getStoreSize()
                                                           .getKnownMinValue()
@@ -11479,12 +11479,11 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
   // Handle the incoming return values from the call.
   CLI.Ins.clear();
   auto &DL = CLI.DAG.getDataLayout();
-  bool GoTupleResults =
-      CLI.CallConv == CallingConv::Go && CLI.CB &&
-      goabi::hasTupleResultsAttr(*CLI.CB);
+  bool GoTupleResults = goabi::isGoCallingConv(CLI.CallConv) && CLI.CB &&
+                        goabi::hasTupleResultsAttr(*CLI.CB);
 
   SmallVector<Type *, 4> TopLevelRetTys;
-  if (CLI.CallConv == CallingConv::Go)
+  if (goabi::isGoCallingConv(CLI.CallConv))
     goabi::getReturnTypes(CLI.OrigRetTy, GoTupleResults, TopLevelRetTys);
   else
     TopLevelRetTys.push_back(CLI.OrigRetTy);
@@ -11570,7 +11569,7 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
     CLI.IsTailCall = false;
   } else {
     bool NeedsRegBlock =
-        CLI.CallConv != CallingConv::Go &&
+        !goabi::isGoCallingConv(CLI.CallConv) &&
         functionArgumentNeedsConsecutiveRegisters(CLI.RetTy, CLI.CallConv,
                                                   CLI.IsVarArg, DL);
     for (unsigned I = 0, E = RetVTs.size(); I != E; ++I) {
@@ -11581,11 +11580,11 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
           Flags.setInConsecutiveRegsLast();
       }
       EVT VT = RetVTs[I];
-      MVT RegisterVT = CLI.CallConv == CallingConv::Go
+      MVT RegisterVT = goabi::isGoCallingConv(CLI.CallConv)
                            ? getRegisterType(Context, VT)
                            : getRegisterTypeForCallingConv(Context, CLI.CallConv,
                                                            VT);
-      unsigned NumRegs = CLI.CallConv == CallingConv::Go
+      unsigned NumRegs = goabi::isGoCallingConv(CLI.CallConv)
                              ? getNumRegisters(Context, VT)
                              : getNumRegistersForCallingConv(Context,
                                                              CLI.CallConv, VT);
@@ -11593,7 +11592,7 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
         unsigned PartOffset =
             Offsets[I].getFixedValue() +
             i * RegisterVT.getStoreSize().getKnownMinValue();
-        unsigned OrigArgIndex = CLI.CallConv == CallingConv::Go
+        unsigned OrigArgIndex = goabi::isGoCallingConv(CLI.CallConv)
                                     ? ResultIndices[I]
                                     : ISD::InputArg::NoArgIndex;
         ISD::InputArg Ret(Flags, RegisterVT, VT, RetOrigTys[I],

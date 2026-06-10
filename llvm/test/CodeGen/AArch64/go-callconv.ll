@@ -28,6 +28,30 @@ entry:
   ret i64 %ret
 }
 
+define goabi0cc i64 @abi0_second_int(i64 %a, i64 %b) {
+; A64-LABEL: abi0_second_int:
+; A64: ldr x[[REG:[0-9]+]], [sp, #8]
+; A64: str x[[REG]], [sp, #16]
+; A64: ret
+entry:
+  ret i64 %b
+}
+
+define goabi0cc i64 @abi0_call_second_int() {
+; A64-LABEL: abi0_call_second_int:
+; A64: mov x[[BASE:[0-9]+]], sp
+; A64: str x[[BASE]], [sp, #40]
+; A64: str x{{[0-9]+}}, [x[[BASE]], #8]
+; A64: str x{{[0-9]+}}, [x[[BASE]]]
+; A64: bl abi0_second_int
+; A64: ldr x[[BASE_RELOAD:[0-9]+]], [sp, #40]
+; A64: ldr x[[RET:[0-9]+]], [x[[BASE_RELOAD]], #16]
+; A64: str x[[RET]], [sp, #64]
+entry:
+  %ret = call goabi0cc i64 @abi0_second_int(i64 11, i64 22)
+  ret i64 %ret
+}
+
 define gocc { i64, [2 x i64] } @tuple_stackret(i64 %a, i64 %b, i64 %c) #0 {
 ; A64-LABEL: tuple_stackret:
 ; A64-DAG: str x1, [sp]
