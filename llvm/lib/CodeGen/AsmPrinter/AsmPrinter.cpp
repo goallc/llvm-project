@@ -135,6 +135,7 @@
 #include <cinttypes>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -3215,6 +3216,14 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
       OutContext.setGoObjSymbolABI(CurrentFnSym, GoObj::SymABIInternal);
     else if (goabi::isGoABI0CallingConv(F.getCallingConv()))
       OutContext.setGoObjSymbolABI(CurrentFnSym, GoObj::SymABI0);
+
+    const MachineFrameInfo &FrameInfo = MF.getFrameInfo();
+    uint64_t StackSize =
+        FrameInfo.getStackSize() + FrameInfo.getUnsafeStackSize();
+    if (StackSize > std::numeric_limits<uint32_t>::max())
+      report_fatal_error("GoObj function stack size exceeds uint32 limit");
+    OutContext.setGoObjSymbolStackSize(CurrentFnSym,
+                                       static_cast<uint32_t>(StackSize));
   }
 
   CurrentFnSymForSize = CurrentFnSym;

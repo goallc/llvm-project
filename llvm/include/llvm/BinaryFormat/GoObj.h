@@ -61,6 +61,24 @@ inline constexpr uint32_t RefNameSize = SymRefSize + StringRefSize;
 inline constexpr uint32_t Hash64Size = 8;
 inline constexpr uint32_t HashSize = 16;
 
+enum AuxType : uint8_t {
+  AuxGotype = 0,
+  AuxFuncInfo,
+  AuxFuncdata,
+  AuxDwarfInfo,
+  AuxDwarfLoc,
+  AuxDwarfRanges,
+  AuxDwarfLines,
+  AuxPcsp,
+  AuxPcfile,
+  AuxPcline,
+  AuxPcinline,
+  AuxPcdata,
+  AuxWasmImport,
+  AuxWasmType,
+  AuxSehUnwindInfo,
+};
+
 enum PackageIndex : uint32_t {
   PkgIdxNone = (1u << 31) - 1,
   PkgIdxHashed64 = PkgIdxNone - 1,

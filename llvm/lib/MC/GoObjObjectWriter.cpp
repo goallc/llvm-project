@@ -45,6 +45,11 @@ struct GoObjSymbol {
     uint32_t SymIdx = 0;
   };
 
+  struct Auxiliary {
+    uint8_t Type = 0;
+    uint32_t TargetSymbolIndex = 0;
+  };
+
   std::string Name;
   const MCSymbol *Symbol = nullptr;
   const MCSection *Section = nullptr;
@@ -57,6 +62,7 @@ struct GoObjSymbol {
   uint32_t Align = 0;
   SmallString<0> Data;
   std::vector<Relocation> Relocations;
+  std::vector<Auxiliary> Auxiliaries;
 };
 
 struct GoObjSymRef {
@@ -74,6 +80,16 @@ uint16_t checkedUint16(uint64_t Value, const Twine &What) {
   if (Value > std::numeric_limits<uint16_t>::max())
     report_fatal_error(What + " exceeds GoObj uint16 limit");
   return static_cast<uint16_t>(Value);
+}
+
+uint32_t getGoObjPCQuantum(const Triple &TT) {
+  switch (TT.getArch()) {
+  case Triple::x86:
+  case Triple::x86_64:
+    return 1;
+  default:
+    return 4;
+  }
 }
 
 uint8_t getGoObjSymbolType(const MCSection *Section) {
@@ -118,6 +134,62 @@ void addDefinedSymbol(std::vector<GoObjSymbol> &Symbols,
   Sym.Size = Size;
   Sym.Data.append(Data.begin(), Data.end());
   Symbols.push_back(std::move(Sym));
+}
+
+void appendUvarint(SmallVectorImpl<char> &Data, uint64_t Value) {
+  while (Value >= 0x80) {
+    Data.push_back(static_cast<char>((Value & 0x7f) | 0x80));
+    Value >>= 7;
+  }
+  Data.push_back(static_cast<char>(Value));
+}
+
+void appendVarint(SmallVectorImpl<char> &Data, int64_t Value) {
+  uint64_t UValue = static_cast<uint64_t>(Value) << 1;
+  if (Value < 0)
+    UValue = ~UValue;
+  appendUvarint(Data, UValue);
+}
+
+SmallString<0> makeConstantPCTab(int32_t Value, uint64_t CodeSize,
+                                 uint32_t PCQuantum) {
+  SmallString<0> Data;
+  appendVarint(Data, static_cast<int64_t>(Value) + 1);
+  uint64_t PCDelta = (CodeSize + PCQuantum - 1) / PCQuantum;
+  appendUvarint(Data, PCDelta);
+  appendUvarint(Data, 0);
+  return Data;
+}
+
+SmallString<0> makeFuncInfoData(uint32_t StackSize) {
+  SmallString<0> Data;
+  raw_svector_ostream OS(Data);
+  support::endian::Writer W(OS, llvm::endianness::little);
+  W.write<uint32_t>(0);         // Args.
+  W.write<uint32_t>(StackSize); // Locals.
+  W.write<uint8_t>(0);          // FuncIDNormal.
+  W.write<uint8_t>(0);          // No FuncFlag bits.
+  W.write<uint8_t>(0);
+  W.write<uint8_t>(0);
+  W.write<uint32_t>(1); // StartLine.
+  W.write<uint32_t>(1); // File count.
+  W.write<uint32_t>(0); // File index in the object file table.
+  W.write<uint32_t>(0); // Inline tree count.
+  return Data;
+}
+
+uint32_t addAuxCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
+                             ArrayRef<char> Data) {
+  GoObjSymbol Sym;
+  Sym.DefinedBlock = GoObj::DefinedSymbolBlock::Nonpkgdef;
+  Sym.ABI = GoObj::SymABIstatic;
+  Sym.Type = GoObj::SRODATA;
+  Sym.Align = 1;
+  Sym.Size = Data.size();
+  Sym.Data.append(Data.begin(), Data.end());
+  uint32_t Index = checkedUint32(Symbols.size(), "symbol count");
+  Symbols.push_back(std::move(Sym));
+  return Index;
 }
 
 int64_t getGoObjRelocAddend(const GoObjRelocationEntry &Reloc) {
@@ -360,6 +432,41 @@ uint64_t GoObjObjectWriter::writeObject() {
     }
   }
 
+  bool HasGoFuncMetadata = false;
+  uint32_t PCQuantum =
+      getGoObjPCQuantum(Asm->getContext().getTargetTriple());
+  if (Config.SourceKind == GoObj::SourceKind::Compiler) {
+    for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
+         I != E; ++I) {
+      if (Symbols[I].Type != GoObj::STEXT || Symbols[I].Size == 0 ||
+          !Symbols[I].Symbol)
+        continue;
+
+      uint32_t StackSize = Asm->getContext()
+                               .getGoObjSymbolStackSize(Symbols[I].Symbol)
+                               .value_or(0);
+      uint64_t CodeSize = Symbols[I].Size;
+
+      uint32_t FuncInfoSym =
+          addAuxCarrierSymbol(Symbols, makeFuncInfoData(StackSize));
+      uint32_t PcspSym = addAuxCarrierSymbol(
+          Symbols, makeConstantPCTab(static_cast<int32_t>(StackSize),
+                                     CodeSize, PCQuantum));
+      uint32_t PcfileSym =
+          addAuxCarrierSymbol(Symbols, makeConstantPCTab(0, CodeSize,
+                                                         PCQuantum));
+      uint32_t PclineSym =
+          addAuxCarrierSymbol(Symbols, makeConstantPCTab(1, CodeSize,
+                                                         PCQuantum));
+
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncInfo, FuncInfoSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxPcsp, PcspSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxPcfile, PcfileSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxPcline, PclineSym});
+      HasGoFuncMetadata = true;
+    }
+  }
+
   DenseMap<const MCSymbol *, uint32_t> DefinedSymbolIndexes;
   for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
        I != E; ++I) {
@@ -538,6 +645,8 @@ uint64_t GoObjObjectWriter::writeObject() {
   };
 
   AddString("");
+  if (HasGoFuncMetadata)
+    AddString("llvm-ir");
   for (const GoObjSymbol &Symbol : Symbols)
     AddString(Symbol.Name);
   for (const GoObjSymbol &Symbol : NonPkgRefs)
@@ -553,6 +662,8 @@ uint64_t GoObjObjectWriter::writeObject() {
   MarkBlock(GoObj::BlkAutolib);
   MarkBlock(GoObj::BlkPkgIdx);
   MarkBlock(GoObj::BlkFile);
+  if (HasGoFuncMetadata)
+    WriteStringRef("llvm-ir");
 
   MarkBlock(GoObj::BlkSymdef);
   WriteSymbolBlock(SymdefSymbols);
@@ -585,10 +696,13 @@ uint64_t GoObjObjectWriter::writeObject() {
   W.write<uint32_t>(RelocCount);
 
   MarkBlock(GoObj::BlkAuxIdx);
-  for (uint32_t I = 0,
-                E = checkedUint32(DefinedSymbolOrder.size(), "symbol count");
-       I != E + 1; ++I)
-    W.write<uint32_t>(0);
+  uint32_t AuxCount = 0;
+  for (uint32_t Index : DefinedSymbolOrder) {
+    const GoObjSymbol &Symbol = Symbols[Index];
+    W.write<uint32_t>(AuxCount);
+    AuxCount += checkedUint32(Symbol.Auxiliaries.size(), "symbol aux count");
+  }
+  W.write<uint32_t>(AuxCount);
 
   MarkBlock(GoObj::BlkDataIdx);
   uint32_t DataOffset = 0;
@@ -613,6 +727,17 @@ uint64_t GoObjObjectWriter::writeObject() {
   }
 
   MarkBlock(GoObj::BlkAux);
+  for (uint32_t Index : DefinedSymbolOrder) {
+    const GoObjSymbol &Symbol = Symbols[Index];
+    for (const GoObjSymbol::Auxiliary &Aux : Symbol.Auxiliaries) {
+      if (Aux.TargetSymbolIndex >= DefinedSymRefs.size())
+        report_fatal_error("GoObj auxiliary target symbol index is invalid");
+      GoObjSymRef Ref = DefinedSymRefs[Aux.TargetSymbolIndex];
+      W.write<uint8_t>(Aux.Type);
+      W.write<uint32_t>(Ref.PkgIdx);
+      W.write<uint32_t>(Ref.SymIdx);
+    }
+  }
 
   MarkBlock(GoObj::BlkData);
   for (uint32_t Index : DefinedSymbolOrder) {

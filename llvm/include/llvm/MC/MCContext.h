@@ -161,6 +161,9 @@ private:
   /// Go object symbol ABI overrides keyed by MC symbol.
   DenseMap<const MCSymbol *, uint16_t> GoObjSymbolABIs;
 
+  /// Go object symbol stack sizes keyed by MC symbol.
+  DenseMap<const MCSymbol *, uint32_t> GoObjSymbolStackSizes;
+
   /// A mapping from a local label number and an instance count to a symbol.
   /// For example, in the assembly
   ///     1:
@@ -540,6 +543,17 @@ public:
   std::optional<uint16_t> getGoObjSymbolABI(const MCSymbol *Sym) const {
     auto It = GoObjSymbolABIs.find(Sym);
     if (It == GoObjSymbolABIs.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjSymbolStackSize(const MCSymbol *Sym, uint32_t StackSize) {
+    GoObjSymbolStackSizes[Sym] = StackSize;
+  }
+
+  std::optional<uint32_t> getGoObjSymbolStackSize(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolStackSizes.find(Sym);
+    if (It == GoObjSymbolStackSizes.end())
       return std::nullopt;
     return It->second;
   }
