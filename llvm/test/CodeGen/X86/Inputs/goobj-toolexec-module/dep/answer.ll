@@ -33,4 +33,38 @@ entry:
   ret i64 %sum
 }
 
+define goabiinternal i8 @"example.com/goobjtoolexec/dep.StringEqual"({ ptr, i64 } %a, { ptr, i64 } %b) {
+entry:
+  %aptr = extractvalue { ptr, i64 } %a, 0
+  %alen = extractvalue { ptr, i64 } %a, 1
+  %bptr = extractvalue { ptr, i64 } %b, 0
+  %blen = extractvalue { ptr, i64 } %b, 1
+  %same_len = icmp eq i64 %alen, %blen
+  br i1 %same_len, label %len_equal, label %return_false
+
+len_equal:
+  %empty = icmp eq i64 %alen, 0
+  br i1 %empty, label %return_true, label %loop
+
+loop:
+  %i = phi i64 [ 0, %len_equal ], [ %next, %continue ]
+  %aelt = getelementptr inbounds i8, ptr %aptr, i64 %i
+  %belt = getelementptr inbounds i8, ptr %bptr, i64 %i
+  %abyte = load i8, ptr %aelt, align 1
+  %bbyte = load i8, ptr %belt, align 1
+  %same_byte = icmp eq i8 %abyte, %bbyte
+  br i1 %same_byte, label %continue, label %return_false
+
+continue:
+  %next = add nuw i64 %i, 1
+  %done = icmp eq i64 %next, %alen
+  br i1 %done, label %return_true, label %loop
+
+return_true:
+  ret i8 1
+
+return_false:
+  ret i8 0
+}
+
 attributes #0 = { "go_results_tuple" }
