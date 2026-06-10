@@ -1,17 +1,17 @@
 target triple = "x86_64-unknown-linux-goobj"
 
-define gocc i64 @"example.com/goobjtoolexec/dep.Answer"() {
+define goabiinternal i64 @"example.com/goobjtoolexec/dep.Answer"() {
 entry:
   ret i64 123
 }
 
-define gocc i64 @"example.com/goobjtoolexec/dep.Add"(i64 %a, i64 %b) {
+define goabiinternal i64 @"example.com/goobjtoolexec/dep.Add"(i64 %a, i64 %b) {
 entry:
   %sum = add i64 %a, %b
   ret i64 %sum
 }
 
-define gocc { i64, i64 } @"example.com/goobjtoolexec/dep.Pair"(i64 %a, i64 %b) #0 {
+define goabiinternal { i64, i64 } @"example.com/goobjtoolexec/dep.Pair"(i64 %a, i64 %b) #0 {
 entry:
   %sum = add i64 %a, %b
   %delta = sub i64 %b, %a
@@ -20,14 +20,14 @@ entry:
   ret { i64, i64 } %ret1
 }
 
-define gocc i64 @"example.com/goobjtoolexec/dep.FloatAsInt"(double %a, double %b) {
+define goabiinternal i64 @"example.com/goobjtoolexec/dep.FloatAsInt"(double %a, double %b) {
 entry:
   %sum = fadd double %a, %b
   %ret = fptosi double %sum to i64
   ret i64 %ret
 }
 
-define goabi0cc i64 @"example.com/goobjtoolexec/dep.StackAdd"(i64 %a, i64 %b) {
+define goabi0 i64 @"example.com/goobjtoolexec/dep.StackAdd"(i64 %a, i64 %b) {
 entry:
   %sum = add i64 %a, %b
   ret i64 %sum

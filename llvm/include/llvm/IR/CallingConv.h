@@ -90,7 +90,7 @@ namespace CallingConv {
     PreserveNone = 21,
 
     /// Used for Go's register-based internal ABI.
-    Go = 22,
+    GoABIInternal = 22,
 
     /// Used for Go's stack-based ABI0.
     GoABI0 = 23,

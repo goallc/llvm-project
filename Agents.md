@@ -91,7 +91,7 @@ The tests currently assume the local Go 1.26 tree at:
 - The current IR discovery is package-directory based and only scans immediate
   `.ll` files next to the package's `.go` sources.
 - Go ABI support is selected only from explicit LLVM IR calling conventions:
-  `goabi0cc` maps to Go `ABI0`, and `gocc` maps to Go `ABIInternal`.
+  `goabi0` maps to Go `ABI0`, and `goabiinternal` maps to Go `ABIInternal`.
 - The LLVM IR functions used by Go stubs need Go symbol names such as
   `example.com/module/pkg.Func`.
 - Future work toward a Go compiler backend should preserve the package-oriented

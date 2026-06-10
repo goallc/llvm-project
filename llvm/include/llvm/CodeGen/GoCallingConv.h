@@ -29,7 +29,7 @@ namespace goabi {
 inline constexpr StringLiteral TupleResultsAttr = "go_results_tuple";
 
 inline bool isGoABIInternalCallingConv(CallingConv::ID CC) {
-  return CC == CallingConv::Go;
+  return CC == CallingConv::GoABIInternal;
 }
 
 inline bool isGoABI0CallingConv(CallingConv::ID CC) {

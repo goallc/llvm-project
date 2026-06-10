@@ -98,7 +98,7 @@ AArch64RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     // FIXME: Windows likely need this to be altered for properly unwinding.
     return CSR_AArch64_NoneRegs_SaveList;
 
-  case CallingConv::Go:
+  case CallingConv::GoABIInternal:
   case CallingConv::GoABI0:
     return CSR_AArch64_Go_SaveList;
 

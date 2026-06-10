@@ -9415,7 +9415,7 @@ CCAssignFn *AArch64TargetLowering::CCAssignFnForCall(CallingConv::ID CC,
     [[fallthrough]];
   case CallingConv::C:
   case CallingConv::Fast:
-  case CallingConv::Go:
+  case CallingConv::GoABIInternal:
   case CallingConv::GoABI0:
   case CallingConv::PreserveMost:
   case CallingConv::PreserveAll:
