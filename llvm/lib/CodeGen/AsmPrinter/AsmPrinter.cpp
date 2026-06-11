@@ -543,6 +543,17 @@ bool AsmPrinter::doInitialization(Module &M) {
 
   TM.getObjFileLowering()->getModuleMetadata(M);
 
+  if (Target.isOSBinFormatGoObj()) {
+    for (const Function &F : M) {
+      if (!F.isDeclaration())
+        continue;
+      if (goabi::isGoABIInternalCallingConv(F.getCallingConv()))
+        OutContext.setGoObjSymbolABI(getSymbol(&F), GoObj::SymABIInternal);
+      else if (goabi::isGoABI0CallingConv(F.getCallingConv()))
+        OutContext.setGoObjSymbolABI(getSymbol(&F), GoObj::SymABI0);
+    }
+  }
+
   // On AIX, we delay emitting any section information until
   // after emitting the .file pseudo-op. This allows additional
   // information (such as the embedded command line) to be associated
