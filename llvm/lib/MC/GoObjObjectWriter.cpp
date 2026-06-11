@@ -179,9 +179,10 @@ SmallString<0> makeFuncInfoData(uint32_t StackSize) {
 }
 
 uint32_t addAuxCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
+                             GoObj::DefinedSymbolBlock Block,
                              ArrayRef<char> Data) {
   GoObjSymbol Sym;
-  Sym.DefinedBlock = GoObj::DefinedSymbolBlock::Nonpkgdef;
+  Sym.DefinedBlock = Block;
   Sym.ABI = GoObj::SymABIstatic;
   Sym.Type = GoObj::SRODATA;
   Sym.Align = 1;
@@ -447,17 +448,19 @@ uint64_t GoObjObjectWriter::writeObject() {
                                .value_or(0);
       uint64_t CodeSize = Symbols[I].Size;
 
-      uint32_t FuncInfoSym =
-          addAuxCarrierSymbol(Symbols, makeFuncInfoData(StackSize));
+      uint32_t FuncInfoSym = addAuxCarrierSymbol(
+          Symbols, GoObj::DefinedSymbolBlock::Symdef,
+          makeFuncInfoData(StackSize));
       uint32_t PcspSym = addAuxCarrierSymbol(
-          Symbols, makeConstantPCTab(static_cast<int32_t>(StackSize),
-                                     CodeSize, PCQuantum));
-      uint32_t PcfileSym =
-          addAuxCarrierSymbol(Symbols, makeConstantPCTab(0, CodeSize,
-                                                         PCQuantum));
-      uint32_t PclineSym =
-          addAuxCarrierSymbol(Symbols, makeConstantPCTab(1, CodeSize,
-                                                         PCQuantum));
+          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
+          makeConstantPCTab(static_cast<int32_t>(StackSize), CodeSize,
+                            PCQuantum));
+      uint32_t PcfileSym = addAuxCarrierSymbol(
+          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
+          makeConstantPCTab(0, CodeSize, PCQuantum));
+      uint32_t PclineSym = addAuxCarrierSymbol(
+          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
+          makeConstantPCTab(1, CodeSize, PCQuantum));
 
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncInfo, FuncInfoSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcsp, PcspSym});

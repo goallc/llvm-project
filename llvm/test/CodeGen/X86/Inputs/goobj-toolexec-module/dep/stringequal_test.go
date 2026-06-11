@@ -1,6 +1,9 @@
 package dep
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 var stringEqualSink bool
 
@@ -32,6 +35,22 @@ func TestStringEqual(t *testing.T) {
 			t.Fatalf("%s: StringEqual(%q, %q) = %v, want %v",
 				tt.name, tt.a, tt.b, got, tt.want)
 		}
+	}
+}
+
+func TestLLVMRuntimeStack(t *testing.T) {
+	buf := make([]byte, 4096)
+	n := FillStack(buf)
+	if n <= 0 {
+		t.Fatalf("FillStack returned %d bytes", n)
+	}
+
+	stack := string(buf[:n])
+	if !strings.Contains(stack, "example.com/goobjtoolexec/dep.FillStack") {
+		t.Fatalf("runtime.Stack did not include LLVM frame; stack:\n%s", stack)
+	}
+	if !strings.Contains(stack, "example.com/goobjtoolexec/dep.TestLLVMRuntimeStack") {
+		t.Fatalf("runtime.Stack did not include Go caller; stack:\n%s", stack)
 	}
 }
 

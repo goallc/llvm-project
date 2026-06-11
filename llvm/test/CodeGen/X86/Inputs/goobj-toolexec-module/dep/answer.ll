@@ -67,4 +67,12 @@ return_false:
   ret i8 0
 }
 
+declare goabiinternal i64 @"runtime.Stack"({ ptr, i64, i64 }, i8)
+
+define goabiinternal i64 @"example.com/goobjtoolexec/dep.FillStack"({ ptr, i64, i64 } %buf) {
+entry:
+  %n = call goabiinternal i64 @"runtime.Stack"({ ptr, i64, i64 } %buf, i8 0)
+  ret i64 %n
+}
+
 attributes #0 = { "go_results_tuple" }
