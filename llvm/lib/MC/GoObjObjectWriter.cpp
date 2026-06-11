@@ -538,20 +538,26 @@ uint64_t GoObjObjectWriter::writeObject() {
 
   std::vector<GoObjSymbol> NonPkgRefs;
   StringMap<uint32_t> NonPkgRefIndexes;
-  auto GetNonPkgRefSymIdx = [&](StringRef Name) {
+  auto GetNonPkgRefSymIdx = [&](const MCSymbol *Sym) {
+    StringRef Name = Sym->getName();
     if (Name.empty())
       report_fatal_error("GoObj relocation target has an empty name");
-    auto It = NonPkgRefIndexes.find(Name);
+
+    uint16_t ABI =
+        Asm->getContext().getGoObjSymbolABI(Sym).value_or(GoObj::SymABI0);
+    std::string Key = (Name + "#" + Twine(ABI)).str();
+    auto It = NonPkgRefIndexes.find(Key);
     if (It != NonPkgRefIndexes.end())
       return It->second;
 
     uint32_t SymIdx = checkedUint32(NonpkgdefSymbols.size() +
                                         NonPkgRefs.size(),
                                     "non-package reference index");
-    NonPkgRefIndexes[Name] = SymIdx;
+    NonPkgRefIndexes[Key] = SymIdx;
 
     GoObjSymbol Ref;
     Ref.Name = Name.str();
+    Ref.ABI = ABI;
     NonPkgRefs.push_back(std::move(Ref));
     return SymIdx;
   };
@@ -577,7 +583,7 @@ uint64_t GoObjObjectWriter::writeObject() {
 
     if (Reloc.Symbol->isUndefined())
       return GoObjSymRef{GoObj::PkgIdxNone,
-                         GetNonPkgRefSymIdx(Reloc.Symbol->getName())};
+                         GetNonPkgRefSymIdx(Reloc.Symbol)};
 
     report_fatal_error("unsupported GoObj relocation target symbol");
   };
