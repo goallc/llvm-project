@@ -2064,44 +2064,6 @@ void AsmPrinter::emitDanglingPrefetchTargets() {
 /// EmitFunctionBody - This method emits the body and trailer for a
 /// function.
 
-static int64_t getGoObjSPAdjust(const MachineInstr &MI,
-                                const TargetInstrInfo &TII,
-                                const TargetRegisterInfo *TRI,
-                                const TargetFrameLowering &TFI,
-                                const TargetLowering &TLI,
-                                unsigned PointerSize) {
-  if (!MI.getFlag(MachineInstr::FrameSetup) &&
-      !MI.getFlag(MachineInstr::FrameDestroy) && !TII.isFrameInstr(MI))
-    return 0;
-
-  int64_t SPAdjust = TII.getSPAdjust(MI);
-  if (SPAdjust != 0)
-    return SPAdjust;
-
-  Register StackPtr = TLI.getStackPointerRegisterToSaveRestore();
-  if (!StackPtr.isValid() || !MI.modifiesRegister(StackPtr, TRI))
-    return 0;
-
-  if (MI.getFlag(MachineInstr::FrameDestroy) &&
-      StringRef(TII.getName(MI.getOpcode())).starts_with("POP"))
-    return -static_cast<int64_t>(PointerSize);
-
-  int64_t Amount = 0;
-  for (const MachineOperand &MO : MI.operands()) {
-    if (!MO.isImm() || MO.getImm() <= 0)
-      continue;
-    Amount = std::max<int64_t>(Amount, MO.getImm());
-  }
-  if (Amount == 0)
-    return 0;
-
-  bool StackGrowsDown =
-      TFI.getStackGrowthDirection() == TargetFrameLowering::StackGrowsDown;
-  bool IsSetup = MI.getFlag(MachineInstr::FrameSetup);
-  if (IsSetup != StackGrowsDown)
-    Amount = -Amount;
-  return Amount;
-}
 
 void AsmPrinter::emitFunctionBody() {
   emitFunctionHeader();
@@ -2371,11 +2333,8 @@ void AsmPrinter::emitFunctionBody() {
 #endif
 
       if (TrackGoObjPCSP && MI.getOpcode() != TargetOpcode::CFI_INSTRUCTION) {
-        const TargetSubtargetInfo &STI = MF->getSubtarget();
-        int64_t SPAdjust = getGoObjSPAdjust(
-            MI, *STI.getInstrInfo(), STI.getRegisterInfo(),
-            *STI.getFrameLowering(), *STI.getTargetLowering(),
-            getPointerSize());
+        int64_t SPAdjust =
+            MF->getSubtarget().getInstrInfo()->getGoObjSPAdjust(MI);
         if (SPAdjust != 0) {
           int64_t NewSPDelta = static_cast<int64_t>(GoObjSPDelta) + SPAdjust;
           if (NewSPDelta < std::numeric_limits<int32_t>::min() ||
