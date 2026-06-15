@@ -2070,13 +2070,13 @@ static int64_t getGoObjSPAdjust(const MachineInstr &MI,
                                 const TargetFrameLowering &TFI,
                                 const TargetLowering &TLI,
                                 unsigned PointerSize) {
+  if (!MI.getFlag(MachineInstr::FrameSetup) &&
+      !MI.getFlag(MachineInstr::FrameDestroy) && !TII.isFrameInstr(MI))
+    return 0;
+
   int64_t SPAdjust = TII.getSPAdjust(MI);
   if (SPAdjust != 0)
     return SPAdjust;
-
-  if (!MI.getFlag(MachineInstr::FrameSetup) &&
-      !MI.getFlag(MachineInstr::FrameDestroy))
-    return 0;
 
   Register StackPtr = TLI.getStackPointerRegisterToSaveRestore();
   if (!StackPtr.isValid() || !MI.modifiesRegister(StackPtr, TRI))
