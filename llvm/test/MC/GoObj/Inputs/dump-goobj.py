@@ -61,6 +61,45 @@ def read_symbols(data, start, end):
     return symbols
 
 
+def read_uvarint(data, offset):
+    value = 0
+    shift = 0
+    while True:
+        byte = data[offset]
+        offset += 1
+        value |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            return value, offset
+        shift += 7
+
+
+def read_varint(data, offset):
+    value, offset = read_uvarint(data, offset)
+    signed = value >> 1
+    if value & 1:
+        signed = ~signed
+    return signed, offset
+
+
+def decode_pctab(payload):
+    ranges = []
+    offset = 0
+    pc = 0
+    value = -1
+    first = True
+    while offset < len(payload):
+        delta, offset = read_varint(payload, offset)
+        if delta == 0 and not first:
+            break
+        value += delta
+        pc_delta, offset = read_uvarint(payload, offset)
+        next_pc = pc + pc_delta
+        ranges.append(f"{pc}-{next_pc}:{value}")
+        pc = next_pc
+        first = False
+    return "[" + ",".join(ranges) + "]"
+
+
 def main(path):
     raw = open(path, "rb").read()
     magic = bytes([0]) + b"go120ld"
@@ -114,6 +153,10 @@ def main(path):
         struct.unpack_from("<I", data, offsets[12] + 4 * index)[0]
         for index in range((offsets[13] - offsets[12]) // 4)
     ]
+    data_indexes = [
+        struct.unpack_from("<I", data, offsets[13] + 4 * index)[0]
+        for index in range((offsets[14] - offsets[13]) // 4)
+    ]
 
     def resolve_ref(pkg_index, sym_index):
         if pkg_index == PKGIDX_NONE:
@@ -128,15 +171,39 @@ def main(path):
             return symdef[sym_index]["name"]
         return f"{pkg_index}:{sym_index}"
 
+    def resolve_defined_data_index(pkg_index, sym_index):
+        if pkg_index == PKGIDX_SELF and sym_index < len(symdef):
+            return sym_index
+        if pkg_index == PKGIDX_HASHED64 and sym_index < len(hashed64def):
+            return len(symdef) + sym_index
+        if pkg_index == PKGIDX_HASHED and sym_index < len(hasheddef):
+            return len(symdef) + len(hashed64def) + sym_index
+        if pkg_index == PKGIDX_NONE and sym_index < len(nonpkgdef):
+            return len(symdef) + len(hashed64def) + len(hasheddef) + sym_index
+        return None
+
+    def symbol_data(pkg_index, sym_index):
+        data_index = resolve_defined_data_index(pkg_index, sym_index)
+        if data_index is None:
+            return None
+        start = offsets[16] + data_indexes[data_index]
+        end = offsets[16] + data_indexes[data_index + 1]
+        return data[start:end]
+
     for symbol_index in range(len(defined)):
         for aux_index in range(aux_indexes[symbol_index], aux_indexes[symbol_index + 1]):
             offset = offsets[15] + aux_index * AUX_SIZE
             aux_type = data[offset]
             pkg_index, sym_index = struct.unpack_from("<II", data, offset + 1)
             aux_name = AUX_TYPES.get(aux_type, str(aux_type))
+            extra = ""
+            if aux_type in (7, 8, 9, 10, 11):
+                payload = symbol_data(pkg_index, sym_index)
+                if payload is not None:
+                    extra = f" pc={decode_pctab(payload)}"
             print(
                 f"aux {symbol_index}.{aux_index}: type={aux_name} "
-                f"target={resolve_ref(pkg_index, sym_index)}"
+                f"target={resolve_ref(pkg_index, sym_index)}{extra}"
             )
         for reloc_index in range(
             reloc_indexes[symbol_index], reloc_indexes[symbol_index + 1]
