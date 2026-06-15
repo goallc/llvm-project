@@ -1173,6 +1173,47 @@ void MCObjectFileInfo::initGoObjMCObjectFileInfo(const Triple &) {
   BSSSection = Ctx->getGoObjSection(".bss", SectionKind::getBSS());
   ReadOnlySection =
       Ctx->getGoObjSection(".rodata", SectionKind::getReadOnly());
+
+  DwarfAbbrevSection =
+      Ctx->getGoObjSection(".debug_abbrev", SectionKind::getMetadata());
+  DwarfInfoSection =
+      Ctx->getGoObjSection(".debug_info", SectionKind::getMetadata());
+  DwarfLineSection =
+      Ctx->getGoObjSection(".debug_line", SectionKind::getMetadata());
+  DwarfLineStrSection =
+      Ctx->getGoObjSection(".debug_line_str", SectionKind::getMetadata());
+  DwarfFrameSection =
+      Ctx->getGoObjSection(".debug_frame", SectionKind::getMetadata());
+  DwarfPubNamesSection =
+      Ctx->getGoObjSection(".debug_pubnames", SectionKind::getMetadata());
+  DwarfPubTypesSection =
+      Ctx->getGoObjSection(".debug_pubtypes", SectionKind::getMetadata());
+  DwarfGnuPubNamesSection =
+      Ctx->getGoObjSection(".debug_gnu_pubnames", SectionKind::getMetadata());
+  DwarfGnuPubTypesSection =
+      Ctx->getGoObjSection(".debug_gnu_pubtypes", SectionKind::getMetadata());
+  DwarfStrSection =
+      Ctx->getGoObjSection(".debug_str", SectionKind::getMetadata());
+  DwarfLocSection =
+      Ctx->getGoObjSection(".debug_loc", SectionKind::getMetadata());
+  DwarfARangesSection =
+      Ctx->getGoObjSection(".debug_aranges", SectionKind::getMetadata());
+  DwarfRangesSection =
+      Ctx->getGoObjSection(".debug_ranges", SectionKind::getMetadata());
+  DwarfMacinfoSection =
+      Ctx->getGoObjSection(".debug_macinfo", SectionKind::getMetadata());
+  DwarfMacroSection =
+      Ctx->getGoObjSection(".debug_macro", SectionKind::getMetadata());
+  DwarfDebugNamesSection =
+      Ctx->getGoObjSection(".debug_names", SectionKind::getMetadata());
+  DwarfStrOffSection =
+      Ctx->getGoObjSection(".debug_str_offsets", SectionKind::getMetadata());
+  DwarfAddrSection =
+      Ctx->getGoObjSection(".debug_addr", SectionKind::getMetadata());
+  DwarfRnglistsSection =
+      Ctx->getGoObjSection(".debug_rnglists", SectionKind::getMetadata());
+  DwarfLoclistsSection =
+      Ctx->getGoObjSection(".debug_loclists", SectionKind::getMetadata());
 }
 
 MCObjectFileInfo::~MCObjectFileInfo() = default;
