@@ -37,10 +37,10 @@ done:
 !llvm.dbg.cu = !{!0}
 !llvm.module.flags = !{!6, !7}
 
-!0 = distinct !DICompileUnit(language: DW_LANG_C11, file: !1, producer: "clang", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug, enums: !2, splitDebugInlining: false, nameTableKind: None)
+!0 = distinct !DICompileUnit(language: DW_LANG_C11, file: !1, producer: "clang", isOptimized: false, runtimeVersion: 0, emissionKind: LineTablesOnly, enums: !2, splitDebugInlining: false, nameTableKind: None)
 !1 = !DIFile(filename: "cdebug.c", directory: "/tmp/goobj-debug")
 !2 = !{}
-!6 = !{i32 7, !"Dwarf Version", i32 5}
+!6 = !{i32 7, !"Dwarf Version", i32 4}
 !7 = !{i32 2, !"Debug Info Version", i32 3}
 !10 = distinct !DISubprogram(name: "cdebug", scope: !1, file: !1, line: 1, type: !11, scopeLine: 1, flags: DIFlagPrototyped, spFlags: DISPFlagDefinition, unit: !0, retainedNodes: !2)
 !11 = !DISubroutineType(types: !12)
