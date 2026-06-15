@@ -151,12 +151,45 @@ void appendVarint(SmallVectorImpl<char> &Data, int64_t Value) {
   appendUvarint(Data, UValue);
 }
 
+uint64_t getPCDeltaUnits(uint64_t Delta, uint32_t PCQuantum) {
+  return (Delta + PCQuantum - 1) / PCQuantum;
+}
+
 SmallString<0> makeConstantPCTab(int32_t Value, uint64_t CodeSize,
                                  uint32_t PCQuantum) {
   SmallString<0> Data;
   appendVarint(Data, static_cast<int64_t>(Value) + 1);
-  uint64_t PCDelta = (CodeSize + PCQuantum - 1) / PCQuantum;
-  appendUvarint(Data, PCDelta);
+  appendUvarint(Data, getPCDeltaUnits(CodeSize, PCQuantum));
+  appendUvarint(Data, 0);
+  return Data;
+}
+
+SmallString<0> makePCSPTab(ArrayRef<std::pair<uint64_t, int32_t>> Entries,
+                           uint64_t CodeSize, uint32_t PCQuantum) {
+  SmallString<0> Data;
+  int32_t OldValue = -1;
+  uint64_t PC = 0;
+  bool Started = false;
+
+  auto Emit = [&](uint64_t EventPC, int32_t Value) {
+    if (EventPC > CodeSize)
+      report_fatal_error("GoObj pcsp event exceeds function size");
+    if (Started)
+      appendUvarint(Data, getPCDeltaUnits(EventPC - PC, PCQuantum));
+    appendVarint(Data, static_cast<int64_t>(Value) - OldValue);
+    OldValue = Value;
+    PC = EventPC;
+    Started = true;
+  };
+
+  Emit(0, 0);
+  for (const auto &[EventPC, Value] : Entries) {
+    if (Value == OldValue)
+      continue;
+    Emit(EventPC, Value);
+  }
+
+  appendUvarint(Data, getPCDeltaUnits(CodeSize - PC, PCQuantum));
   appendUvarint(Data, 0);
   return Data;
 }
@@ -448,13 +481,31 @@ uint64_t GoObjObjectWriter::writeObject() {
                                .value_or(0);
       uint64_t CodeSize = Symbols[I].Size;
 
+      SmallVector<std::pair<uint64_t, int32_t>, 8> PCSPEntries;
+      if (const auto *Entries = Asm->getContext().getGoObjSymbolPCSPEntries(
+              Symbols[I].Symbol)) {
+        for (const MCContext::GoObjPCSPEntry &Entry : *Entries) {
+          if (!Entry.Label->isInSection())
+            continue;
+          uint64_t EventPC = Asm->getSymbolOffset(*Entry.Label) -
+                             Symbols[I].SectionBegin;
+          if (EventPC <= CodeSize)
+            PCSPEntries.push_back({EventPC, Entry.Value});
+        }
+        llvm::stable_sort(PCSPEntries, [](const auto &LHS, const auto &RHS) {
+          return LHS.first < RHS.first;
+        });
+      }
+
       uint32_t FuncInfoSym = addAuxCarrierSymbol(
           Symbols, GoObj::DefinedSymbolBlock::Symdef,
           makeFuncInfoData(StackSize));
       uint32_t PcspSym = addAuxCarrierSymbol(
           Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
-          makeConstantPCTab(static_cast<int32_t>(StackSize), CodeSize,
-                            PCQuantum));
+          PCSPEntries.empty()
+              ? makeConstantPCTab(static_cast<int32_t>(StackSize), CodeSize,
+                                  PCQuantum)
+              : makePCSPTab(PCSPEntries, CodeSize, PCQuantum));
       uint32_t PcfileSym = addAuxCarrierSymbol(
           Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
           makeConstantPCTab(0, CodeSize, PCQuantum));

@@ -100,6 +100,11 @@ public:
     IsGoObj
   };
 
+  struct GoObjPCSPEntry {
+    const MCSymbol *Label;
+    int32_t Value;
+  };
+
 private:
   Environment Env;
 
@@ -163,6 +168,10 @@ private:
 
   /// Go object symbol stack sizes keyed by MC symbol.
   DenseMap<const MCSymbol *, uint32_t> GoObjSymbolStackSizes;
+
+  /// Go object pcsp entries keyed by MC symbol.
+  DenseMap<const MCSymbol *, std::vector<GoObjPCSPEntry>>
+      GoObjSymbolPCSPEntries;
 
   /// A mapping from a local label number and an instance count to a symbol.
   /// For example, in the assembly
@@ -556,6 +565,19 @@ public:
     if (It == GoObjSymbolStackSizes.end())
       return std::nullopt;
     return It->second;
+  }
+
+  void setGoObjSymbolPCSPEntries(const MCSymbol *Sym,
+                                 std::vector<GoObjPCSPEntry> Entries) {
+    GoObjSymbolPCSPEntries[Sym] = std::move(Entries);
+  }
+
+  const std::vector<GoObjPCSPEntry> *
+  getGoObjSymbolPCSPEntries(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolPCSPEntries.find(Sym);
+    if (It == GoObjSymbolPCSPEntries.end())
+      return nullptr;
+    return &It->second;
   }
 
   /// Allocates and returns a new `WasmSignature` instance (with empty parameter
