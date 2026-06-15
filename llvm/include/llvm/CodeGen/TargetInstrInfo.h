@@ -306,6 +306,11 @@ public:
   /// to enable more fine-grained adjustment, or adjust by a different value.
   virtual int getSPAdjust(const MachineInstr &MI) const;
 
+  /// Returns the stack pointer adjustment made by an instruction for Go object
+  /// pcsp table generation. Targets may override this to account for concrete
+  /// prologue/epilogue instructions that are not covered by getSPAdjust().
+  virtual int64_t getGoObjSPAdjust(const MachineInstr &MI) const;
+
   /// Return true if the instruction is a "coalescable" extension instruction.
   /// That is, it's like a copy where it's legal for the source to overlap the
   /// destination. e.g. X86::MOVSX64rr32. If this returns true, then it's

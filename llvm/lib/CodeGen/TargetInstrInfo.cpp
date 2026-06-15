@@ -1697,6 +1697,41 @@ int TargetInstrInfo::getSPAdjust(const MachineInstr &MI) const {
   return SPAdj;
 }
 
+int64_t TargetInstrInfo::getGoObjSPAdjust(const MachineInstr &MI) const {
+  if (!MI.getFlag(MachineInstr::FrameSetup) &&
+      !MI.getFlag(MachineInstr::FrameDestroy) && !isFrameInstr(MI))
+    return 0;
+
+  int64_t SPAdjust = getSPAdjust(MI);
+  if (SPAdjust != 0)
+    return SPAdjust;
+
+  const MachineFunction *MF = MI.getMF();
+  const TargetSubtargetInfo &STI = MF->getSubtarget();
+  const TargetFrameLowering *TFI = STI.getFrameLowering();
+  const TargetLowering *TLI = STI.getTargetLowering();
+
+  Register StackPtr = TLI->getStackPointerRegisterToSaveRestore();
+  if (!StackPtr.isValid() || !MI.modifiesRegister(StackPtr, &TRI))
+    return 0;
+
+  int64_t Amount = 0;
+  for (const MachineOperand &MO : MI.operands()) {
+    if (!MO.isImm() || MO.getImm() <= 0)
+      continue;
+    Amount = std::max<int64_t>(Amount, MO.getImm());
+  }
+  if (Amount == 0)
+    return 0;
+
+  bool StackGrowsDown =
+      TFI->getStackGrowthDirection() == TargetFrameLowering::StackGrowsDown;
+  bool IsSetup = MI.getFlag(MachineInstr::FrameSetup);
+  if (IsSetup != StackGrowsDown)
+    Amount = -Amount;
+  return Amount;
+}
+
 /// isSchedulingBoundary - Test if the given instruction should be
 /// considered a scheduling boundary. This primarily includes labels
 /// and terminators.

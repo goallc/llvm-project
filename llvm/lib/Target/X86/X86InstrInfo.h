@@ -282,6 +282,8 @@ public:
   /// sequences involving PUSHes.
   int getSPAdjust(const MachineInstr &MI) const override;
 
+  int64_t getGoObjSPAdjust(const MachineInstr &MI) const override;
+
   /// isCoalescableExtInstr - Return true if the instruction is a "coalescable"
   /// extension instruction. That is, it's like a copy where it's legal for the
   /// source to overlap the destination. e.g. X86::MOVSX64rr32. If this returns

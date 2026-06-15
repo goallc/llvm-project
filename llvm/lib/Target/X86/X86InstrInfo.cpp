@@ -458,6 +458,33 @@ int X86InstrInfo::getSPAdjust(const MachineInstr &MI) const {
   }
 }
 
+int64_t X86InstrInfo::getGoObjSPAdjust(const MachineInstr &MI) const {
+  if (MI.getFlag(MachineInstr::FrameDestroy)) {
+    switch (MI.getOpcode()) {
+    default:
+      break;
+    case X86::POP16r:
+    case X86::POP16rmr:
+    case X86::POP16rmm:
+      return -2;
+    case X86::POP32r:
+    case X86::POP32rmr:
+    case X86::POP32rmm:
+      return -4;
+    case X86::POP64r:
+    case X86::POP64rmr:
+    case X86::POP64rmm:
+    case X86::POPP64r:
+      return -8;
+    case X86::POP2:
+    case X86::POP2P:
+      return -16;
+    }
+  }
+
+  return TargetInstrInfo::getGoObjSPAdjust(MI);
+}
+
 /// Return true and the FrameIndex if the specified
 /// operand and follow operands form a reference to the stack frame.
 bool X86InstrInfo::isFrameOperand(const MachineInstr &MI, unsigned int Op,
