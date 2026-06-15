@@ -1490,6 +1490,11 @@ void DwarfDebug::endModule() {
   assert(CurFn == nullptr);
   assert(CurMI == nullptr);
 
+  // Go object files use DWARF line entries to build Go pcfile/pcline tables,
+  // but do not emit the conventional DWARF debug sections here.
+  if (Asm->TM.getTargetTriple().getObjectFormat() == Triple::GoObj)
+    return;
+
   const Module *M = MMI->getModule();
 
   // Collect global variables info.
