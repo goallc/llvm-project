@@ -2063,6 +2063,46 @@ void AsmPrinter::emitDanglingPrefetchTargets() {
 
 /// EmitFunctionBody - This method emits the body and trailer for a
 /// function.
+
+static int64_t getGoObjSPAdjust(const MachineInstr &MI,
+                                const TargetInstrInfo &TII,
+                                const TargetRegisterInfo *TRI,
+                                const TargetFrameLowering &TFI,
+                                const TargetLowering &TLI,
+                                unsigned PointerSize) {
+  int64_t SPAdjust = TII.getSPAdjust(MI);
+  if (SPAdjust != 0)
+    return SPAdjust;
+
+  if (!MI.getFlag(MachineInstr::FrameSetup) &&
+      !MI.getFlag(MachineInstr::FrameDestroy))
+    return 0;
+
+  Register StackPtr = TLI.getStackPointerRegisterToSaveRestore();
+  if (!StackPtr.isValid() || !MI.modifiesRegister(StackPtr, TRI))
+    return 0;
+
+  if (MI.getFlag(MachineInstr::FrameDestroy) &&
+      StringRef(TII.getName(MI.getOpcode())).starts_with("POP"))
+    return -static_cast<int64_t>(PointerSize);
+
+  int64_t Amount = 0;
+  for (const MachineOperand &MO : MI.operands()) {
+    if (!MO.isImm() || MO.getImm() <= 0)
+      continue;
+    Amount = std::max<int64_t>(Amount, MO.getImm());
+  }
+  if (Amount == 0)
+    return 0;
+
+  bool StackGrowsDown =
+      TFI.getStackGrowthDirection() == TargetFrameLowering::StackGrowsDown;
+  bool IsSetup = MI.getFlag(MachineInstr::FrameSetup);
+  if (IsSetup != StackGrowsDown)
+    Amount = -Amount;
+  return Amount;
+}
+
 void AsmPrinter::emitFunctionBody() {
   emitFunctionHeader();
 
@@ -2097,6 +2137,10 @@ void AsmPrinter::emitFunctionBody() {
     STI = &getSubtargetInfo();
   else
     STI = &TM.getMCSubtargetInfo();
+
+  bool TrackGoObjPCSP = TM.getTargetTriple().isOSBinFormatGoObj();
+  SmallVector<MCContext::GoObjPCSPEntry, 8> GoObjPCSPEntries;
+  int32_t GoObjSPDelta = 0;
 
   bool CanDoExtraAnalysis = ORE->allowExtraAnalysis(DEBUG_TYPE);
   // Create a slot for the entry basic block section so that the section
@@ -2326,6 +2370,27 @@ void AsmPrinter::emitFunctionBody() {
       }
 #endif
 
+      if (TrackGoObjPCSP && MI.getOpcode() != TargetOpcode::CFI_INSTRUCTION) {
+        const TargetSubtargetInfo &STI = MF->getSubtarget();
+        int64_t SPAdjust = getGoObjSPAdjust(
+            MI, *STI.getInstrInfo(), STI.getRegisterInfo(),
+            *STI.getFrameLowering(), *STI.getTargetLowering(),
+            getPointerSize());
+        if (SPAdjust != 0) {
+          int64_t NewSPDelta = static_cast<int64_t>(GoObjSPDelta) + SPAdjust;
+          if (NewSPDelta < std::numeric_limits<int32_t>::min() ||
+              NewSPDelta > std::numeric_limits<int32_t>::max())
+            report_fatal_error("GoObj pcsp value exceeds int32 range");
+          GoObjSPDelta = static_cast<int32_t>(NewSPDelta);
+          if (GoObjPCSPEntries.empty() ||
+              GoObjPCSPEntries.back().Value != GoObjSPDelta) {
+            MCSymbol *Label = OutContext.createTempSymbol("goobj_pcsp");
+            OutStreamer->emitLabel(Label);
+            GoObjPCSPEntries.push_back({Label, GoObjSPDelta});
+          }
+        }
+      }
+
       if (MI.isCall()) {
         if (MF->getTarget().Options.BBAddrMap)
           OutStreamer->emitLabel(createCallsiteEndSymbol(MBB));
@@ -2458,6 +2523,11 @@ void AsmPrinter::emitFunctionBody() {
   }
 
   // Emit target-specific gunk after the function body.
+  if (TrackGoObjPCSP && CurrentFnSym)
+    OutContext.setGoObjSymbolPCSPEntries(
+        CurrentFnSym, std::vector<MCContext::GoObjPCSPEntry>(
+                          GoObjPCSPEntries.begin(), GoObjPCSPEntries.end()));
+
   emitFunctionBodyEnd();
 
   // Even though wasm supports .type and .size in general, function symbols
