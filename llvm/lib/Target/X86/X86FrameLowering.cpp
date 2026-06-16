@@ -18,6 +18,7 @@
 #include "X86Subtarget.h"
 #include "X86TargetMachine.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -27,6 +28,7 @@
 #include "llvm/CodeGen/RegisterScavenging.h"
 #include "llvm/CodeGen/WinEHFuncInfo.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/EHPersonalities.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
@@ -139,6 +141,280 @@ static unsigned getLEArOpcode(bool IsLP64) {
   return IsLP64 ? X86::LEA64r : X86::LEA32r;
 }
 
+namespace {
+constexpr uint64_t GoStackSmall = 128;
+constexpr uint64_t GoStackBig = 4096;
+constexpr int64_t GoGStackGuard0Offset = 16;
+
+static constexpr unsigned X86GoIntArgRegs[] = {X86::RAX, X86::RBX, X86::RCX,
+                                               X86::RDI, X86::RSI, X86::R8,
+                                               X86::R9,  X86::R10, X86::R11};
+static constexpr unsigned X86GoFPArgRegs[] = {
+    X86::XMM0,  X86::XMM1,  X86::XMM2,  X86::XMM3,  X86::XMM4,
+    X86::XMM5,  X86::XMM6,  X86::XMM7,  X86::XMM8,  X86::XMM9,
+    X86::XMM10, X86::XMM11, X86::XMM12, X86::XMM13, X86::XMM14};
+
+struct GoRegSpill {
+  MCPhysReg Reg = 0;
+  uint64_t Offset = 0;
+  unsigned Size = 0;
+  bool IsFP = false;
+};
+
+static unsigned getIntegerStoreOpcode(unsigned Size) {
+  switch (Size) {
+  case 1:
+    return X86::MOV8mr;
+  case 2:
+    return X86::MOV16mr;
+  case 4:
+    return X86::MOV32mr;
+  case 8:
+    return X86::MOV64mr;
+  default:
+    report_fatal_error("unsupported Go ABI integer spill size");
+  }
+}
+
+static unsigned getIntegerLoadOpcode(unsigned Size) {
+  switch (Size) {
+  case 1:
+    return X86::MOV8rm;
+  case 2:
+    return X86::MOV16rm;
+  case 4:
+    return X86::MOV32rm;
+  case 8:
+    return X86::MOV64rm;
+  default:
+    report_fatal_error("unsupported Go ABI integer reload size");
+  }
+}
+
+static MCPhysReg getIntegerSpillReg(MCPhysReg Reg, unsigned Size) {
+  return getX86SubSuperRegister(Reg, Size * 8);
+}
+
+static void collectGoRegSpills(Type *Ty, uint64_t BaseOffset,
+                               const DataLayout &DL, unsigned &NextInt,
+                               unsigned &NextFP,
+                               SmallVectorImpl<GoRegSpill> &Spills) {
+  if (Ty->isVoidTy() || DL.getTypeAllocSize(Ty) == 0)
+    return;
+
+  if (auto *AT = dyn_cast<ArrayType>(Ty)) {
+    if (AT->getNumElements() == 1)
+      collectGoRegSpills(AT->getElementType(), BaseOffset, DL, NextInt, NextFP,
+                         Spills);
+    return;
+  }
+
+  if (auto *ST = dyn_cast<StructType>(Ty)) {
+    const StructLayout *SL = DL.getStructLayout(ST);
+    for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I)
+      collectGoRegSpills(ST->getElementType(I),
+                         BaseOffset + SL->getElementOffset(I), DL, NextInt,
+                         NextFP, Spills);
+    return;
+  }
+
+  if (Ty->isPointerTy()) {
+    Spills.push_back({static_cast<MCPhysReg>(X86GoIntArgRegs[NextInt++]),
+                      BaseOffset, 8, false});
+    return;
+  }
+
+  if (Ty->isIntegerTy()) {
+    unsigned Bytes = std::max<uint64_t>(1, DL.getTypeAllocSize(Ty));
+    if (Bytes <= 8) {
+      Spills.push_back({static_cast<MCPhysReg>(X86GoIntArgRegs[NextInt++]),
+                        BaseOffset, Bytes, false});
+      return;
+    }
+    if (Bytes <= 16) {
+      Spills.push_back({static_cast<MCPhysReg>(X86GoIntArgRegs[NextInt++]),
+                        BaseOffset, 8, false});
+      Spills.push_back({static_cast<MCPhysReg>(X86GoIntArgRegs[NextInt++]),
+                        BaseOffset + 8, 8, false});
+      return;
+    }
+  }
+
+  if (Ty->isFloatTy()) {
+    Spills.push_back({static_cast<MCPhysReg>(X86GoFPArgRegs[NextFP++]),
+                      BaseOffset, 4, true});
+    return;
+  }
+
+  if (Ty->isDoubleTy()) {
+    Spills.push_back({static_cast<MCPhysReg>(X86GoFPArgRegs[NextFP++]),
+                      BaseOffset, 8, true});
+    return;
+  }
+}
+
+static SmallVector<Type *, 8> getGoArgTypes(const Function &F) {
+  SmallVector<Type *, 8> ArgTys;
+  for (const Argument &Arg : F.args())
+    if (!Arg.hasNestAttr())
+      ArgTys.push_back(Arg.getType());
+  return ArgTys;
+}
+
+static SmallVector<Type *, 8> getGoResultTypes(const Function &F) {
+  SmallVector<Type *, 8> ResultTys;
+  goabi::getReturnTypes(F.getReturnType(), goabi::hasTupleResultsAttr(F),
+                        ResultTys);
+  return ResultTys;
+}
+
+static SmallVector<GoRegSpill, 16>
+getGoABIInternalRegSpills(const Function &F, const DataLayout &DL) {
+  SmallVector<GoRegSpill, 16> Spills;
+  if (!goabi::isGoABIInternalCallingConv(F.getCallingConv()))
+    return Spills;
+
+  goabi::ABIConfig Config = {X86GoIntArgRegs, X86GoFPArgRegs, 8,
+                             Align(8),        Align(8),       false};
+  SmallVector<Type *, 8> ArgTys = getGoArgTypes(F);
+  goabi::CallLayout Layout =
+      goabi::computeCallLayout(ArgTys, getGoResultTypes(F), DL, Config);
+
+  uint64_t SpillOffset = Layout.SpillAreaOffset;
+  for (unsigned I = 0, E = ArgTys.size(); I != E; ++I) {
+    const goabi::ValueLayout &ArgLayout = Layout.Args[I];
+    if (!ArgLayout.InRegs)
+      continue;
+    SpillOffset = alignTo(SpillOffset, ArgLayout.Alignment.value());
+    unsigned NextInt = ArgLayout.IntRegStart;
+    unsigned NextFP = ArgLayout.FPRegStart;
+    collectGoRegSpills(ArgTys[I], SpillOffset, DL, NextInt, NextFP, Spills);
+    SpillOffset += ArgLayout.Size;
+  }
+  return Spills;
+}
+
+static void emitGoRegSpills(MachineFunction &MF, MachineBasicBlock &MBB,
+                            ArrayRef<GoRegSpill> Spills, bool Reload) {
+  const DebugLoc DL;
+  const X86InstrInfo &TII = *MF.getSubtarget<X86Subtarget>().getInstrInfo();
+  for (const GoRegSpill &Spill : Spills) {
+    int64_t Offset = static_cast<int64_t>(8 + Spill.Offset);
+    if (Spill.IsFP) {
+      unsigned Opc =
+          Reload ? (Spill.Size == 4 ? X86::MOVSSrm_alt : X86::MOVSDrm_alt)
+                 : (Spill.Size == 4 ? X86::MOVSSmr : X86::MOVSDmr);
+      if (Reload)
+        addRegOffset(BuildMI(&MBB, DL, TII.get(Opc), Spill.Reg), X86::RSP,
+                     false, Offset);
+      else
+        addRegOffset(BuildMI(&MBB, DL, TII.get(Opc)), X86::RSP, false, Offset)
+            .addReg(Spill.Reg);
+      continue;
+    }
+
+    MCPhysReg Reg = getIntegerSpillReg(Spill.Reg, Spill.Size);
+    if (Reload)
+      addRegOffset(
+          BuildMI(&MBB, DL, TII.get(getIntegerLoadOpcode(Spill.Size)), Reg),
+          X86::RSP, false, Offset);
+    else
+      addRegOffset(
+          BuildMI(&MBB, DL, TII.get(getIntegerStoreOpcode(Spill.Size))),
+          X86::RSP, false, Offset)
+          .addReg(Reg);
+  }
+}
+
+static bool shouldEmitGoStackCheck(const MachineFunction &MF) {
+  const Function &F = MF.getFunction();
+  return MF.getTarget().getTargetTriple().isOSBinFormatGoObj() &&
+         MF.getTarget().getTargetTriple().getArch() == Triple::x86_64 &&
+         goabi::isGoCallingConv(F.getCallingConv()) && !F.isVarArg();
+}
+
+static MachineBasicBlock &
+getGoStackCheckEntryMBB(MachineFunction &MF, MachineBasicBlock &FallbackMBB) {
+  const BasicBlock &EntryBB = MF.getFunction().getEntryBlock();
+  for (MachineBasicBlock &MBB : MF)
+    if (MBB.getBasicBlock() == &EntryBB)
+      return MBB;
+
+  if (MachineBasicBlock *MBB = MF.getBlockNumbered(0))
+    return *MBB;
+  return FallbackMBB;
+}
+
+static void emitGoStackCheck(MachineFunction &MF,
+                             MachineBasicBlock &PrologueMBB) {
+  if (!shouldEmitGoStackCheck(MF))
+    return;
+
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  if (MFI.hasVarSizedObjects())
+    report_fatal_error("GoObj stack growth does not support dynamic allocas");
+
+  uint64_t StackSize = MFI.getStackSize() + MFI.getUnsafeStackSize();
+  const DebugLoc DL;
+  const X86InstrInfo &TII = *MF.getSubtarget<X86Subtarget>().getInstrInfo();
+  SmallVector<GoRegSpill, 16> Spills =
+      getGoABIInternalRegSpills(MF.getFunction(), MF.getDataLayout());
+  MachineBasicBlock &EntryMBB = getGoStackCheckEntryMBB(MF, PrologueMBB);
+
+  MachineBasicBlock *CheckMBB = MF.CreateMachineBasicBlock();
+  MachineBasicBlock *MorestackMBB = MF.CreateMachineBasicBlock();
+  for (const auto &LI : EntryMBB.liveins()) {
+    CheckMBB->addLiveIn(LI);
+    MorestackMBB->addLiveIn(LI);
+  }
+  CheckMBB->addLiveIn(X86::R14);
+  MorestackMBB->addLiveIn(X86::R14);
+
+  MF.push_front(MorestackMBB);
+  MF.push_front(CheckMBB);
+
+  unsigned ScratchReg = X86::R12;
+  if (StackSize <= GoStackSmall) {
+    ScratchReg = X86::RSP;
+  } else if (StackSize <= GoStackBig) {
+    BuildMI(CheckMBB, DL, TII.get(X86::LEA64r), ScratchReg)
+        .addReg(X86::RSP)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(-static_cast<int64_t>(StackSize - GoStackSmall))
+        .addReg(X86::NoRegister);
+  } else {
+    BuildMI(CheckMBB, DL, TII.get(X86::MOV64rr), ScratchReg).addReg(X86::RSP);
+    BuildMI(CheckMBB, DL, TII.get(X86::SUB64ri32), ScratchReg)
+        .addReg(ScratchReg)
+        .addImm(static_cast<int64_t>(StackSize - GoStackSmall));
+    BuildMI(CheckMBB, DL, TII.get(X86::JCC_1))
+        .addMBB(MorestackMBB)
+        .addImm(X86::COND_B);
+  }
+
+  BuildMI(CheckMBB, DL, TII.get(X86::CMP64rm))
+      .addReg(ScratchReg)
+      .addReg(X86::R14)
+      .addImm(1)
+      .addReg(X86::NoRegister)
+      .addImm(GoGStackGuard0Offset)
+      .addReg(X86::NoRegister);
+  BuildMI(CheckMBB, DL, TII.get(X86::JCC_1))
+      .addMBB(&EntryMBB)
+      .addImm(X86::COND_A);
+
+  emitGoRegSpills(MF, *MorestackMBB, Spills, /*Reload=*/false);
+  BuildMI(MorestackMBB, DL, TII.get(X86::CALL64pcrel32))
+      .addExternalSymbol("runtime.morestack_noctxt");
+  emitGoRegSpills(MF, *MorestackMBB, Spills, /*Reload=*/true);
+  BuildMI(MorestackMBB, DL, TII.get(X86::JMP_1)).addMBB(&EntryMBB);
+
+  CheckMBB->addSuccessor(MorestackMBB, BranchProbability::getZero());
+  CheckMBB->addSuccessor(&EntryMBB, BranchProbability::getOne());
+  MorestackMBB->addSuccessor(&EntryMBB);
+}
+} // namespace
 // Push-Pop Acceleration (PPX) hint is used to indicate that the POP reads the
 // value written by the PUSH from the stack. The processor tracks these marked
 // instructions internally and fast-forwards register data between matching PUSH
@@ -1658,6 +1934,8 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF,
   // to determine the end of the prologue.
   DebugLoc DL;
   Register ArgBaseReg;
+
+  emitGoStackCheck(MF, MBB);
 
   // Emit extra prolog for argument stack slot reference.
   if (auto *MI = X86FI->getStackPtrSaveMI()) {

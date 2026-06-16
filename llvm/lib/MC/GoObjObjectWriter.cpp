@@ -6,7 +6,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/MC/MCGoObjObjectWriter.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
@@ -17,6 +16,7 @@
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDwarf.h"
 #include "llvm/MC/MCFixup.h"
+#include "llvm/MC/MCGoObjObjectWriter.h"
 #include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCValue.h"
 #include "llvm/Support/Alignment.h"
@@ -134,12 +134,12 @@ void appendSectionContents(SmallVectorImpl<char> &Contents,
   Asm.writeSectionData(ContentsOS, &Section);
 }
 
-void addDefinedSymbol(std::vector<GoObjSymbol> &Symbols,
-                      const MCSymbol *MCSym, const MCSection *Section,
-                      uint64_t SectionBegin, uint64_t SectionEnd,
-                      GoObj::DefinedSymbolBlock DefinedBlock,
-                      StringRef Name, uint8_t Type, uint16_t ABI,
-                      uint64_t Size, ArrayRef<char> Data) {
+void addDefinedSymbol(std::vector<GoObjSymbol> &Symbols, const MCSymbol *MCSym,
+                      const MCSection *Section, uint64_t SectionBegin,
+                      uint64_t SectionEnd,
+                      GoObj::DefinedSymbolBlock DefinedBlock, StringRef Name,
+                      uint8_t Type, uint16_t ABI, uint64_t Size,
+                      ArrayRef<char> Data) {
   GoObjSymbol Sym;
   Sym.Name = Name.str();
   Sym.Symbol = MCSym;
@@ -174,8 +174,8 @@ uint64_t getPCDeltaUnits(uint64_t Delta, uint32_t PCQuantum) {
 }
 
 SmallString<0> makePCTab(int32_t InitialValue,
-                          ArrayRef<GoObjPCTabEntry> Entries, uint64_t CodeSize,
-                          uint32_t PCQuantum) {
+                         ArrayRef<GoObjPCTabEntry> Entries, uint64_t CodeSize,
+                         uint32_t PCQuantum) {
   SmallString<0> Data;
   int32_t OldValue = -1;
   uint64_t PC = 0;
@@ -209,13 +209,12 @@ SmallString<0> makeConstantPCTab(int32_t Value, uint64_t CodeSize,
   return makePCTab(Value, {}, CodeSize, PCQuantum);
 }
 
-SmallString<0> makeFuncInfoData(uint32_t StackSize,
-                                ArrayRef<uint32_t> Files,
-                                int32_t StartLine) {
+SmallString<0> makeFuncInfoData(uint32_t ArgSize, uint32_t StackSize,
+                                ArrayRef<uint32_t> Files, int32_t StartLine) {
   SmallString<0> Data;
   raw_svector_ostream OS(Data);
   support::endian::Writer W(OS, llvm::endianness::little);
-  W.write<uint32_t>(0);         // Args.
+  W.write<uint32_t>(ArgSize);   // Args.
   W.write<uint32_t>(StackSize); // Locals.
   W.write<uint8_t>(0);          // FuncIDNormal.
   W.write<uint8_t>(0);          // No FuncFlag bits.
@@ -226,6 +225,15 @@ SmallString<0> makeFuncInfoData(uint32_t StackSize,
   for (uint32_t File : Files)
     W.write<uint32_t>(File);
   W.write<uint32_t>(0); // Inline tree count.
+  return Data;
+}
+
+SmallString<0> makeEmptyStackMap() {
+  SmallString<0> Data;
+  raw_svector_ostream OS(Data);
+  support::endian::Writer W(OS, llvm::endianness::little);
+  W.write<uint32_t>(1); // One bitmap, selected by PCDATA_StackMapIndex 0.
+  W.write<uint32_t>(0); // Zero pointer bits.
   return Data;
 }
 
@@ -251,10 +259,9 @@ std::string getDwarfFilePath(const MCDwarfLineTable &Table, unsigned FileNum) {
 }
 
 uint32_t getOrAddFileIndex(StringMap<uint32_t> &FileIndexes,
-                           std::vector<std::string> &Files,
-                           StringRef Path) {
-  auto Insert = FileIndexes.insert({Path, checkedUint32(Files.size(),
-                                                        "GoObj file count")});
+                           std::vector<std::string> &Files, StringRef Path) {
+  auto Insert = FileIndexes.insert(
+      {Path, checkedUint32(Files.size(), "GoObj file count")});
   if (Insert.second)
     Files.push_back(Path.str());
   return Insert.first->second;
@@ -424,8 +431,8 @@ bool GoObjObjectWriter::isSymbolRefDifferenceFullyResolvedImpl(
     bool IsPCRel) const {
   if (IsPCRel && !SymA.isTemporary())
     return false;
-  return MCObjectWriter::isSymbolRefDifferenceFullyResolvedImpl(
-      SymA, FB, InSet, IsPCRel);
+  return MCObjectWriter::isSymbolRefDifferenceFullyResolvedImpl(SymA, FB, InSet,
+                                                                IsPCRel);
 }
 
 void GoObjObjectWriter::recordRelocation(const MCFragment &F,
@@ -501,10 +508,10 @@ uint64_t GoObjObjectWriter::writeObject() {
         Data = ArrayRef<char>(Contents.data() + Begin, Size);
       }
       uint8_t Type = getGoObjSymbolType(&Section);
-      uint16_t ABI = MCSym ? Asm->getContext()
-                                 .getGoObjSymbolABI(MCSym)
-                                 .value_or(GoObj::SymABI0)
-                           : GoObj::SymABI0;
+      uint16_t ABI = MCSym
+                         ? Asm->getContext().getGoObjSymbolABI(MCSym).value_or(
+                               GoObj::SymABI0)
+                         : GoObj::SymABI0;
       addDefinedSymbol(Symbols, MCSym, &Section, Begin, End,
                        Config.DefaultDefinedSymbolBlock, Name, Type, ABI, Size,
                        Data);
@@ -527,8 +534,7 @@ uint64_t GoObjObjectWriter::writeObject() {
     }
   }
 
-  uint32_t PCQuantum =
-      getGoObjPCQuantum(Asm->getContext().getTargetTriple());
+  uint32_t PCQuantum = getGoObjPCQuantum(Asm->getContext().getTargetTriple());
   std::vector<GoObjFuncDebugLines> FuncDebugLines(Symbols.size());
   std::vector<std::string> FilePaths;
   StringMap<uint32_t> FileIndexes;
@@ -548,7 +554,8 @@ uint64_t GoObjObjectWriter::writeObject() {
           if (!Label || !Label->isInSection())
             continue;
           uint64_t LabelOffset = Asm->getSymbolOffset(*Label);
-          for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
+          for (uint32_t I = 0,
+                        E = checkedUint32(Symbols.size(), "symbol count");
                I != E; ++I) {
             GoObjSymbol &Sym = Symbols[I];
             if (LineEntry.getLine() == 0 || Sym.Type != GoObj::STEXT ||
@@ -584,11 +591,14 @@ uint64_t GoObjObjectWriter::writeObject() {
       uint32_t StackSize = Asm->getContext()
                                .getGoObjSymbolStackSize(Symbols[I].Symbol)
                                .value_or(0);
+      uint32_t ArgSize = Asm->getContext()
+                             .getGoObjSymbolArgSize(Symbols[I].Symbol)
+                             .value_or(0);
       uint64_t CodeSize = Symbols[I].Size;
 
       SmallVector<GoObjPCTabEntry, 8> PCSPEntries;
-      if (const auto *Entries = Asm->getContext().getGoObjSymbolPCSPEntries(
-              Symbols[I].Symbol)) {
+      if (const auto *Entries =
+              Asm->getContext().getGoObjSymbolPCSPEntries(Symbols[I].Symbol)) {
         for (const MCContext::GoObjPCSPEntry &Entry : *Entries) {
           if (!Entry.Label->isInSection())
             continue;
@@ -616,7 +626,8 @@ uint64_t GoObjObjectWriter::writeObject() {
 
       uint32_t FuncInfoSym = addAuxCarrierSymbol(
           Symbols, GoObj::DefinedSymbolBlock::Symdef,
-          makeFuncInfoData(StackSize, LineInfo.Files, LineInfo.StartLine));
+          makeFuncInfoData(ArgSize, StackSize, LineInfo.Files,
+                           LineInfo.StartLine));
       uint32_t PcspSym = addAuxCarrierSymbol(
           Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
           PCSPEntries.empty()
@@ -633,11 +644,21 @@ uint64_t GoObjObjectWriter::writeObject() {
       uint32_t PclineSym = addAuxCarrierSymbol(
           Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
           makePCTab(InitialLine, LineInfo.PCLine, CodeSize, PCQuantum));
+      uint32_t EmptyArgsMapSym = addAuxCarrierSymbol(
+          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef, makeEmptyStackMap());
+      uint32_t EmptyLocalsMapSym = addAuxCarrierSymbol(
+          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef, makeEmptyStackMap());
+      uint32_t StackMapIndexSym =
+          addAuxCarrierSymbol(Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
+                              makeConstantPCTab(0, CodeSize, PCQuantum));
 
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncInfo, FuncInfoSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, EmptyArgsMapSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, EmptyLocalsMapSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcsp, PcspSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcfile, PcfileSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcline, PclineSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, StackMapIndexSym});
     }
   }
 
@@ -674,7 +695,8 @@ uint64_t GoObjObjectWriter::writeObject() {
   DefinedSymbolOrder.reserve(Symbols.size());
   DefinedSymbolOrder.insert(DefinedSymbolOrder.end(), SymdefSymbols.begin(),
                             SymdefSymbols.end());
-  DefinedSymbolOrder.insert(DefinedSymbolOrder.end(), Hashed64defSymbols.begin(),
+  DefinedSymbolOrder.insert(DefinedSymbolOrder.end(),
+                            Hashed64defSymbols.begin(),
                             Hashed64defSymbols.end());
   DefinedSymbolOrder.insert(DefinedSymbolOrder.end(), HasheddefSymbols.begin(),
                             HasheddefSymbols.end());
@@ -694,8 +716,8 @@ uint64_t GoObjObjectWriter::writeObject() {
   SetDefinedSymRefs(HasheddefSymbols, GoObj::PkgIdxHashed);
   SetDefinedSymRefs(NonpkgdefSymbols, GoObj::PkgIdxNone);
 
-  auto FindContainingSymbol =
-      [&](const MCSection *Section, uint64_t Offset) -> std::optional<uint32_t> {
+  auto FindContainingSymbol = [&](const MCSection *Section,
+                                  uint64_t Offset) -> std::optional<uint32_t> {
     for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
          I != E; ++I) {
       const GoObjSymbol &Sym = Symbols[I];
@@ -721,8 +743,7 @@ uint64_t GoObjObjectWriter::writeObject() {
     if (It != NonPkgRefIndexes.end())
       return It->second;
 
-    uint32_t SymIdx = checkedUint32(NonpkgdefSymbols.size() +
-                                        NonPkgRefs.size(),
+    uint32_t SymIdx = checkedUint32(NonpkgdefSymbols.size() + NonPkgRefs.size(),
                                     "non-package reference index");
     NonPkgRefIndexes[Key] = SymIdx;
 
@@ -746,15 +767,14 @@ uint64_t GoObjObjectWriter::writeObject() {
       uint64_t TargetOffset = Asm->getSymbolOffset(*Reloc.Symbol);
       if (std::optional<uint32_t> SymIdx =
               FindContainingSymbol(&Reloc.Symbol->getSection(), TargetOffset)) {
-        Addend += static_cast<int64_t>(TargetOffset -
-                                       Symbols[*SymIdx].SectionBegin);
+        Addend +=
+            static_cast<int64_t>(TargetOffset - Symbols[*SymIdx].SectionBegin);
         return DefinedSymRefs[*SymIdx];
       }
     }
 
     if (Reloc.Symbol->isUndefined())
-      return GoObjSymRef{GoObj::PkgIdxNone,
-                         GetNonPkgRefSymIdx(Reloc.Symbol)};
+      return GoObjSymRef{GoObj::PkgIdxNone, GetNonPkgRefSymIdx(Reloc.Symbol)};
 
     report_fatal_error("unsupported GoObj relocation target symbol");
   };
@@ -833,7 +853,9 @@ uint64_t GoObjObjectWriter::writeObject() {
     AddString(Symbol.Name);
 
   std::array<uint32_t, GoObj::NBlk> Offsets = {};
-  auto MarkBlock = [&](GoObj::Block Block) { Offsets[Block] = CurrentOffset(); };
+  auto MarkBlock = [&](GoObj::Block Block) {
+    Offsets[Block] = CurrentOffset();
+  };
   auto WriteSymbolBlock = [&](ArrayRef<uint32_t> SymbolIndexes) {
     for (uint32_t Index : SymbolIndexes)
       WriteSymbolRecord(Symbols[Index]);
@@ -870,8 +892,8 @@ uint64_t GoObjObjectWriter::writeObject() {
   for (uint32_t Index : DefinedSymbolOrder) {
     const GoObjSymbol &Symbol = Symbols[Index];
     W.write<uint32_t>(RelocCount);
-    RelocCount += checkedUint32(Symbol.Relocations.size(),
-                                "symbol relocation count");
+    RelocCount +=
+        checkedUint32(Symbol.Relocations.size(), "symbol relocation count");
   }
   W.write<uint32_t>(RelocCount);
 
@@ -947,14 +969,16 @@ uint64_t GoObjObjectWriter::writeObject() {
   return OS.tell() - StartOffset;
 }
 
-std::unique_ptr<MCObjectWriter> llvm::createGoObjObjectWriter(
-    std::unique_ptr<MCGoObjObjectTargetWriter> MOTW, raw_pwrite_stream &OS) {
+std::unique_ptr<MCObjectWriter>
+llvm::createGoObjObjectWriter(std::unique_ptr<MCGoObjObjectTargetWriter> MOTW,
+                              raw_pwrite_stream &OS) {
   return std::make_unique<GoObjObjectWriter>(std::move(MOTW), OS);
 }
 
-std::unique_ptr<MCObjectWriter> llvm::createGoObjObjectWriter(
-    std::unique_ptr<MCGoObjObjectTargetWriter> MOTW, raw_pwrite_stream &OS,
-    MCGoObjObjectWriterConfig Config) {
+std::unique_ptr<MCObjectWriter>
+llvm::createGoObjObjectWriter(std::unique_ptr<MCGoObjObjectTargetWriter> MOTW,
+                              raw_pwrite_stream &OS,
+                              MCGoObjObjectWriterConfig Config) {
   return std::make_unique<GoObjObjectWriter>(std::move(MOTW), OS,
                                              std::move(Config));
 }
