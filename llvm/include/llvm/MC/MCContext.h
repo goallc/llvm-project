@@ -169,6 +169,9 @@ private:
   /// Go object symbol stack sizes keyed by MC symbol.
   DenseMap<const MCSymbol *, uint32_t> GoObjSymbolStackSizes;
 
+  /// Go object symbol argument sizes keyed by MC symbol.
+  DenseMap<const MCSymbol *, uint32_t> GoObjSymbolArgSizes;
+
   /// Go object pcsp entries keyed by MC symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjPCSPEntry>>
       GoObjSymbolPCSPEntries;
@@ -563,6 +566,17 @@ public:
   std::optional<uint32_t> getGoObjSymbolStackSize(const MCSymbol *Sym) const {
     auto It = GoObjSymbolStackSizes.find(Sym);
     if (It == GoObjSymbolStackSizes.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjSymbolArgSize(const MCSymbol *Sym, uint32_t ArgSize) {
+    GoObjSymbolArgSizes[Sym] = ArgSize;
+  }
+
+  std::optional<uint32_t> getGoObjSymbolArgSize(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolArgSizes.find(Sym);
+    if (It == GoObjSymbolArgSizes.end())
       return std::nullopt;
     return It->second;
   }

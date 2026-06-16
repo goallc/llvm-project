@@ -34,6 +34,7 @@ AUX_SIZE = 9
 
 AUX_TYPES = {
     1: "funcinfo",
+    2: "funcdata",
     7: "pcsp",
     8: "pcfile",
     9: "pcline",
@@ -197,10 +198,14 @@ def main(path):
             pkg_index, sym_index = struct.unpack_from("<II", data, offset + 1)
             aux_name = AUX_TYPES.get(aux_type, str(aux_type))
             extra = ""
-            if aux_type in (7, 8, 9, 10, 11):
-                payload = symbol_data(pkg_index, sym_index)
-                if payload is not None:
-                    extra = f" pc={decode_pctab(payload)}"
+            payload = symbol_data(pkg_index, sym_index)
+            if aux_type == 1 and payload is not None and len(payload) >= 8:
+                args, locals_ = struct.unpack_from("<II", payload, 0)
+                extra = f" args={args} locals={locals_}"
+            if aux_type == 2 and payload is not None:
+                extra = f" data={payload.hex()}"
+            if aux_type in (7, 8, 9, 10, 11) and payload is not None:
+                extra = f" pc={decode_pctab(payload)}"
             print(
                 f"aux {symbol_index}.{aux_index}: type={aux_name} "
                 f"target={resolve_ref(pkg_index, sym_index)}{extra}"
