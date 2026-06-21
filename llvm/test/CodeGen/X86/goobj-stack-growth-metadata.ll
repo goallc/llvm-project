@@ -1,5 +1,7 @@
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj < %s -o %t.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | FileCheck %s
+; RUN: llc -mtriple=x86_64-unknown-linux-goobj -stop-after=finalize-isel < %s -o - | FileCheck %s --check-prefix=MIR
+; RUN: llc -mtriple=x86_64-unknown-linux-goobj -stop-after=prolog-epilog < %s -o - | FileCheck %s --check-prefix=PEI
 
 ; The fixed alloca forces a frame larger than Go StackBig, which requires the
 ; Go stack-growth slow path. The argument is register-passed, so the generated
@@ -29,3 +31,14 @@ entry:
 ; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc=[0-
 ; CHECK-SAME: :0
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.morestack_noctxt
+
+; MIR-LABEL: name: big_frame
+; MIR: fixedStack:
+; MIR-NEXT: - { id: 0, type: spill-slot, offset: 8, size: 8
+
+; PEI-LABEL: name: big_frame
+; PEI: fixedStack:
+; PEI-NEXT: - { id: 0, type: spill-slot, offset: 8, size: 8
+; PEI: MOV64mr {{.*rsp}}, 1, {{.*noreg}}, 8, {{.*noreg}}, {{.*rax}}
+; PEI: CALL64pcrel32 &runtime.morestack_noctxt
+; PEI: {{.*rax}} = MOV64rm {{.*rsp}}, 1, {{.*noreg}}, 8, {{.*noreg}}

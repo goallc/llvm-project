@@ -175,9 +175,21 @@ static SDValue lowerX86GoFormalArguments(
       ArgTys, getX86GoReturnTypes(F.getReturnType(), F.getAttributes()),
       DAG.getDataLayout(), getX86GoABIConfig(Subtarget, F.getCallingConv()));
 
+  SmallVector<uint64_t, 8> ArgSpillOffsets(ArgTys.size(), 0);
+  uint64_t SpillOffset = Layout.SpillAreaOffset;
+  for (unsigned I = 0, E = ArgTys.size(); I != E; ++I) {
+    const goabi::ValueLayout &ArgLayout = Layout.Args[I];
+    if (!ArgLayout.InRegs)
+      continue;
+    SpillOffset = alignTo(SpillOffset, ArgLayout.Alignment.value());
+    ArgSpillOffsets[I] = SpillOffset;
+    SpillOffset += ArgLayout.Size;
+  }
+
   FuncInfo->setBytesToPopOnReturn(0);
   FuncInfo->setArgumentStackSize(Layout.TotalStackSize);
   FuncInfo->setRegSaveFrameIndex(0xAAAAAAA);
+  FuncInfo->clearGoRegArgSpillSlots();
 
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
     if (Group.Index == ISD::InputArg::NoArgIndex)
@@ -209,10 +221,20 @@ static SDValue lowerX86GoFormalArguments(
             ArgLayout.FPRegStart + FPPiece);
         Register VReg = MF.addLiveIn(PReg, getX86GoRegClass(CopyVT, Subtarget));
         SDValue Val = DAG.getCopyFromReg(Chain, DL, VReg, CopyVT);
-        if (isX86GoFloatPiece(In.OrigTy))
+        bool IsFP = isX86GoFloatPiece(In.OrigTy);
+        if (IsFP)
           ++FPPiece;
         else
           ++IntPiece;
+
+        unsigned Size = static_cast<unsigned>(
+            std::max<uint64_t>(1, CopyVT.getStoreSize().getKnownMinValue()));
+        uint64_t ArgSpillOffset = ArgSpillOffsets[LayoutMap[Group.Index]];
+        int FI = MFI.CreateFixedSpillStackObject(
+            Size, IncomingStackOffset + ArgSpillOffset + In.PartOffset,
+            /*IsImmutable=*/false);
+        FuncInfo->addGoRegArgSpillSlot(PReg, FI, Size, IsFP);
+
         if (In.VT != CopyVT)
           Val = DAG.getNode(ISD::TRUNCATE, DL, In.VT, Val);
         InVals.push_back(Val);

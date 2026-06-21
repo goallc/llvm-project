@@ -29,7 +29,6 @@
 #include "llvm/CodeGen/RegisterScavenging.h"
 #include "llvm/CodeGen/WinEHFuncInfo.h"
 #include "llvm/IR/DataLayout.h"
-#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/EHPersonalities.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
@@ -164,21 +163,6 @@ constexpr uint64_t GoStackSmall = 128;
 constexpr uint64_t GoStackBig = 4096;
 constexpr int64_t GoGStackGuard0Offset = 16;
 
-static constexpr unsigned X86GoIntArgRegs[] = {X86::RAX, X86::RBX, X86::RCX,
-                                               X86::RDI, X86::RSI, X86::R8,
-                                               X86::R9,  X86::R10, X86::R11};
-static constexpr unsigned X86GoFPArgRegs[] = {
-    X86::XMM0,  X86::XMM1,  X86::XMM2,  X86::XMM3,  X86::XMM4,
-    X86::XMM5,  X86::XMM6,  X86::XMM7,  X86::XMM8,  X86::XMM9,
-    X86::XMM10, X86::XMM11, X86::XMM12, X86::XMM13, X86::XMM14};
-
-struct GoRegSpill {
-  MCPhysReg Reg = 0;
-  uint64_t Offset = 0;
-  unsigned Size = 0;
-  bool IsFP = false;
-};
-
 static unsigned getIntegerStoreOpcode(unsigned Size) {
   switch (Size) {
   case 1:
@@ -209,115 +193,17 @@ static unsigned getIntegerLoadOpcode(unsigned Size) {
   }
 }
 
-static MCPhysReg getIntegerSpillReg(MCPhysReg Reg, unsigned Size) {
-  return getX86SubSuperRegister(Reg, Size * 8);
-}
-
-static void collectGoRegSpills(Type *Ty, uint64_t BaseOffset,
-                               const DataLayout &DL, unsigned &NextInt,
-                               unsigned &NextFP,
-                               SmallVectorImpl<GoRegSpill> &Spills) {
-  if (Ty->isVoidTy() || DL.getTypeAllocSize(Ty) == 0)
-    return;
-
-  if (auto *AT = dyn_cast<ArrayType>(Ty)) {
-    if (AT->getNumElements() == 1)
-      collectGoRegSpills(AT->getElementType(), BaseOffset, DL, NextInt, NextFP,
-                         Spills);
-    return;
-  }
-
-  if (auto *ST = dyn_cast<StructType>(Ty)) {
-    const StructLayout *SL = DL.getStructLayout(ST);
-    for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I)
-      collectGoRegSpills(ST->getElementType(I),
-                         BaseOffset + SL->getElementOffset(I), DL, NextInt,
-                         NextFP, Spills);
-    return;
-  }
-
-  if (Ty->isPointerTy()) {
-    Spills.push_back({static_cast<MCPhysReg>(X86GoIntArgRegs[NextInt++]),
-                      BaseOffset, 8, false});
-    return;
-  }
-
-  if (Ty->isIntegerTy()) {
-    unsigned Bytes = std::max<uint64_t>(1, DL.getTypeAllocSize(Ty));
-    if (Bytes <= 8) {
-      Spills.push_back({static_cast<MCPhysReg>(X86GoIntArgRegs[NextInt++]),
-                        BaseOffset, Bytes, false});
-      return;
-    }
-    if (Bytes <= 16) {
-      Spills.push_back({static_cast<MCPhysReg>(X86GoIntArgRegs[NextInt++]),
-                        BaseOffset, 8, false});
-      Spills.push_back({static_cast<MCPhysReg>(X86GoIntArgRegs[NextInt++]),
-                        BaseOffset + 8, 8, false});
-      return;
-    }
-  }
-
-  if (Ty->isFloatTy()) {
-    Spills.push_back({static_cast<MCPhysReg>(X86GoFPArgRegs[NextFP++]),
-                      BaseOffset, 4, true});
-    return;
-  }
-
-  if (Ty->isDoubleTy()) {
-    Spills.push_back({static_cast<MCPhysReg>(X86GoFPArgRegs[NextFP++]),
-                      BaseOffset, 8, true});
-    return;
-  }
-}
-
-static SmallVector<Type *, 8> getGoArgTypes(const Function &F) {
-  SmallVector<Type *, 8> ArgTys;
-  for (const Argument &Arg : F.args())
-    if (!Arg.hasNestAttr())
-      ArgTys.push_back(Arg.getType());
-  return ArgTys;
-}
-
-static SmallVector<Type *, 8> getGoResultTypes(const Function &F) {
-  SmallVector<Type *, 8> ResultTys;
-  goabi::getReturnTypes(F.getReturnType(), goabi::hasTupleResultsAttr(F),
-                        ResultTys);
-  return ResultTys;
-}
-
-static SmallVector<GoRegSpill, 16>
-getGoABIInternalRegSpills(const Function &F, const DataLayout &DL) {
-  SmallVector<GoRegSpill, 16> Spills;
-  if (!goabi::isGoABIInternalCallingConv(F.getCallingConv()))
-    return Spills;
-
-  goabi::ABIConfig Config = {X86GoIntArgRegs, X86GoFPArgRegs, 8,
-                             Align(8),        Align(8),       false};
-  SmallVector<Type *, 8> ArgTys = getGoArgTypes(F);
-  goabi::CallLayout Layout =
-      goabi::computeCallLayout(ArgTys, getGoResultTypes(F), DL, Config);
-
-  uint64_t SpillOffset = Layout.SpillAreaOffset;
-  for (unsigned I = 0, E = ArgTys.size(); I != E; ++I) {
-    const goabi::ValueLayout &ArgLayout = Layout.Args[I];
-    if (!ArgLayout.InRegs)
-      continue;
-    SpillOffset = alignTo(SpillOffset, ArgLayout.Alignment.value());
-    unsigned NextInt = ArgLayout.IntRegStart;
-    unsigned NextFP = ArgLayout.FPRegStart;
-    collectGoRegSpills(ArgTys[I], SpillOffset, DL, NextInt, NextFP, Spills);
-    SpillOffset += ArgLayout.Size;
-  }
-  return Spills;
-}
-
-static void emitGoRegSpills(MachineFunction &MF, MachineBasicBlock &MBB,
-                            ArrayRef<GoRegSpill> Spills, bool Reload) {
+static void
+emitGoRegSpills(MachineFunction &MF, MachineBasicBlock &MBB,
+                ArrayRef<X86MachineFunctionInfo::GoRegArgSpillSlot> Spills,
+                bool Reload) {
   const DebugLoc DL;
   const X86InstrInfo &TII = *MF.getSubtarget<X86Subtarget>().getInstrInfo();
-  for (const GoRegSpill &Spill : Spills) {
-    int64_t Offset = static_cast<int64_t>(8 + Spill.Offset);
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  for (const X86MachineFunctionInfo::GoRegArgSpillSlot &Spill : Spills) {
+    assert(MFI.isFixedObjectIndex(Spill.FrameIndex) &&
+           "Go register argument spill slot must be a fixed object");
+    int64_t Offset = MFI.getObjectOffset(Spill.FrameIndex);
     if (Spill.IsFP) {
       unsigned Opc =
           Reload ? (Spill.Size == 4 ? X86::MOVSSrm_alt : X86::MOVSDrm_alt)
@@ -331,16 +217,15 @@ static void emitGoRegSpills(MachineFunction &MF, MachineBasicBlock &MBB,
       continue;
     }
 
-    MCPhysReg Reg = getIntegerSpillReg(Spill.Reg, Spill.Size);
     if (Reload)
-      addRegOffset(
-          BuildMI(&MBB, DL, TII.get(getIntegerLoadOpcode(Spill.Size)), Reg),
-          X86::RSP, false, Offset);
+      addRegOffset(BuildMI(&MBB, DL, TII.get(getIntegerLoadOpcode(Spill.Size)),
+                           Spill.Reg),
+                   X86::RSP, false, Offset);
     else
       addRegOffset(
           BuildMI(&MBB, DL, TII.get(getIntegerStoreOpcode(Spill.Size))),
           X86::RSP, false, Offset)
-          .addReg(Reg);
+          .addReg(Spill.Reg);
   }
 }
 
@@ -375,8 +260,9 @@ static void emitGoStackCheck(MachineFunction &MF,
   uint64_t StackSize = MFI.getStackSize() + MFI.getUnsafeStackSize();
   const DebugLoc DL;
   const X86InstrInfo &TII = *MF.getSubtarget<X86Subtarget>().getInstrInfo();
-  SmallVector<GoRegSpill, 16> Spills =
-      getGoABIInternalRegSpills(MF.getFunction(), MF.getDataLayout());
+  const X86MachineFunctionInfo *X86FI = MF.getInfo<X86MachineFunctionInfo>();
+  ArrayRef<X86MachineFunctionInfo::GoRegArgSpillSlot> Spills =
+      X86FI->getGoRegArgSpillSlots();
   MachineBasicBlock &EntryMBB = getGoStackCheckEntryMBB(MF, PrologueMBB);
 
   MachineBasicBlock *CheckMBB = MF.CreateMachineBasicBlock();

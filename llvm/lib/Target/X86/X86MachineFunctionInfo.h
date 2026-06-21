@@ -114,6 +114,19 @@ class X86MachineFunctionInfo : public MachineFunctionInfo {
   /// ArgumentStackSize - The number of bytes on stack consumed by the arguments
   /// being passed on the stack.
   unsigned ArgumentStackSize = 0;
+
+public:
+  struct GoRegArgSpillSlot {
+    unsigned Reg = 0;
+    int FrameIndex = 0;
+    unsigned Size = 0;
+    bool IsFP = false;
+  };
+
+private:
+  /// Fixed frame objects for Go ABIInternal register argument home slots.
+  SmallVector<GoRegArgSpillSlot, 16> GoRegArgSpillSlots;
+
   /// NumLocalDynamics - Number of local-dynamic TLS accesses.
   unsigned NumLocalDynamics = 0;
   /// HasPushSequences - Keeps track of whether this function uses sequences
@@ -243,6 +256,15 @@ public:
 
   unsigned getArgumentStackSize() const { return ArgumentStackSize; }
   void setArgumentStackSize(unsigned size) { ArgumentStackSize = size; }
+
+  void clearGoRegArgSpillSlots() { GoRegArgSpillSlots.clear(); }
+  void addGoRegArgSpillSlot(unsigned Reg, int FrameIndex, unsigned Size,
+                            bool IsFP) {
+    GoRegArgSpillSlots.push_back({Reg, FrameIndex, Size, IsFP});
+  }
+  ArrayRef<GoRegArgSpillSlot> getGoRegArgSpillSlots() const {
+    return GoRegArgSpillSlots;
+  }
 
   unsigned getNumLocalDynamicTLSAccesses() const { return NumLocalDynamics; }
   void incNumLocalDynamicTLSAccesses() { ++NumLocalDynamics; }
