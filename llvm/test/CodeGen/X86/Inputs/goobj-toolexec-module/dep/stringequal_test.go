@@ -54,6 +54,13 @@ func TestLLVMRuntimeStack(t *testing.T) {
 	}
 }
 
+func TestLLVMTriggerGC(t *testing.T) {
+	for i := 0; i < 3; i++ {
+		_ = make([]byte, 1<<20)
+		TriggerGC()
+	}
+}
+
 func BenchmarkStringEqualNativeDirectEqual(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		stringEqualSink = equalLeft == equalRight
