@@ -141,6 +141,26 @@ enum SymKind : uint8_t {
   SSEHUNWINDINFO = 25,
 };
 
+enum SymFlag : uint8_t {
+  SymFlagDupok = 1u << 0,
+  SymFlagLocal = 1u << 1,
+  SymFlagTypelink = 1u << 2,
+  SymFlagLeaf = 1u << 3,
+  SymFlagNoSplit = 1u << 4,
+  SymFlagReflectMethod = 1u << 5,
+  SymFlagGoType = 1u << 6,
+};
+
+enum SymFlag2 : uint8_t {
+  SymFlagUsedInIface = 1u << 0,
+  SymFlagItab = 1u << 1,
+  SymFlagDict = 1u << 2,
+  SymFlagPkgInit = 1u << 3,
+  SymFlagLinkname = 1u << 4,
+  SymFlagABIWrapper = 1u << 5,
+  SymFlagWasmExport = 1u << 6,
+};
+
 enum RelocType : uint16_t {
   R_ADDR = 1,
   R_ADDRPOWER = 2,

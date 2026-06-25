@@ -1,6 +1,7 @@
 package dep
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -58,6 +59,41 @@ func TestLLVMTriggerGC(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		_ = make([]byte, 1<<20)
 		TriggerGC()
+	}
+}
+
+func TestLLVMTypeDescriptor(t *testing.T) {
+	value := MakeLLVMDescriptorBox(77)
+	typ := reflect.TypeOf(value)
+	if typ.Name() != "LLVMDescriptorBox" {
+		t.Fatalf("type name = %q, want LLVMDescriptorBox", typ.Name())
+	}
+	if typ.PkgPath() != "example.com/goobjtoolexec/dep" {
+		t.Fatalf("type package path = %q, want example.com/goobjtoolexec/dep", typ.PkgPath())
+	}
+	if typ.Kind() != reflect.Struct {
+		t.Fatalf("type kind = %v, want struct", typ.Kind())
+	}
+
+	field, ok := typ.FieldByName("V")
+	if !ok {
+		t.Fatalf("LLVMDescriptorBox is missing field V")
+	}
+	if field.Type.Kind() != reflect.Int64 {
+		t.Fatalf("field V kind = %v, want int64", field.Type.Kind())
+	}
+
+	gotField := reflect.ValueOf(value).FieldByName("V").Int()
+	if gotField != 77 {
+		t.Fatalf("reflected V = %d, want 77", gotField)
+	}
+
+	boxer, ok := value.(descriptorBoxer)
+	if !ok {
+		t.Fatalf("LLVMDescriptorBox did not satisfy descriptorBoxer")
+	}
+	if got := boxer.BoxValue(); got != 77 {
+		t.Fatalf("BoxValue() = %d, want 77", got)
 	}
 }
 
