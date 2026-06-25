@@ -839,6 +839,25 @@ MCSymbol *AsmPrinter::getSymbolPreferLocal(const GlobalValue &GV) const {
   return TM.getSymbol(&GV);
 }
 
+static std::optional<std::pair<uint8_t, uint8_t>>
+getGoObjSymbolFlagsMetadata(const GlobalObject *GO) {
+  const MDNode *MD = GO->getMetadata("goobj.symbol.flags");
+  if (!MD)
+    return std::nullopt;
+
+  if (MD->getNumOperands() != 2)
+    report_fatal_error("expected !goobj.symbol.flags to have two operands");
+
+  auto ReadFlag = [&](unsigned I) -> uint8_t {
+    const auto *CI = mdconst::dyn_extract<ConstantInt>(MD->getOperand(I));
+    if (!CI || CI->getValue().ugt(UINT8_MAX))
+      report_fatal_error("expected !goobj.symbol.flags operands to be i8");
+    return static_cast<uint8_t>(CI->getZExtValue());
+  };
+
+  return std::make_pair(ReadFlag(0), ReadFlag(1));
+}
+
 /// EmitGlobalVariable - Emit the specified global variable to the .s file.
 void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
   bool IsEmuTLSVar = TM.useEmulatedTLS() && GV->isThreadLocal();
@@ -871,6 +890,12 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
 
   MCSymbol *GVSym = getSymbol(GV);
   MCSymbol *EmittedSym = GVSym;
+
+  if (TM.getTargetTriple().isOSBinFormatGoObj()) {
+    if (std::optional<std::pair<uint8_t, uint8_t>> Flags =
+            getGoObjSymbolFlagsMetadata(GV))
+      OutContext.setGoObjSymbolFlags(GVSym, Flags->first, Flags->second);
+  }
 
   // getOrCreateEmuTLSControlSym only creates the symbol with name and default
   // attributes.
