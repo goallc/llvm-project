@@ -15,6 +15,7 @@
 #include "llvm/MC/MCAssembler.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCELFObjectWriter.h"
+#include "llvm/MC/MCGoObjObjectWriter.h"
 #include "llvm/MC/MCObjectWriter.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
@@ -37,7 +38,6 @@ public:
       : MCAsmBackend(IsLittleEndian ? llvm::endianness::little
                                     : llvm::endianness::big),
         TheTriple(TT) {}
-
 
   std::optional<MCFixupKind> getFixupKind(StringRef Name) const override;
 
@@ -348,7 +348,7 @@ AArch64AsmBackend::getFixupKind(StringRef Name) const {
     return std::nullopt;
 
   unsigned Type = llvm::StringSwitch<unsigned>(Name)
-#define ELF_RELOC(X, Y)  .Case(#X, Y)
+#define ELF_RELOC(X, Y) .Case(#X, Y)
 #include "llvm/BinaryFormat/ELFRelocs/AArch64.def"
 #undef ELF_RELOC
                       .Case("BFD_RELOC_NONE", ELF::R_AARCH64_NONE)
@@ -363,7 +363,8 @@ AArch64AsmBackend::getFixupKind(StringRef Name) const {
 
 /// getFixupKindContainereSizeInBytes - The number of bytes of the
 /// container involved in big endian or 0 if the item is little endian
-unsigned AArch64AsmBackend::getFixupKindContainereSizeInBytes(unsigned Kind) const {
+unsigned
+AArch64AsmBackend::getFixupKindContainereSizeInBytes(unsigned Kind) const {
   if (Endian == llvm::endianness::little)
     return 0;
 
@@ -460,7 +461,8 @@ void AArch64AsmBackend::applyFixup(const MCFragment &F, const MCFixup &Fixup,
          "Invalid fixup offset!");
 
   // Used to point to big endian bytes.
-  unsigned FulleSizeInBytes = getFixupKindContainereSizeInBytes(Fixup.getKind());
+  unsigned FulleSizeInBytes =
+      getFixupKindContainereSizeInBytes(Fixup.getKind());
 
   // For each byte of the fragment that the fixup touches, mask in the
   // bits from the fixup value.
@@ -546,7 +548,7 @@ enum CompactUnwindEncodings {
   UNWIND_ARM64_FRAME_D14_D15_PAIR = 0x00000800
 };
 
-} // end CU namespace
+} // namespace CU
 
 // FIXME: This should be in a separate file.
 class DarwinAArch64AsmBackend : public AArch64AsmBackend {
@@ -761,7 +763,20 @@ public:
   }
 };
 
-}
+} // namespace
+
+namespace {
+class GoObjAArch64AsmBackend : public AArch64AsmBackend {
+public:
+  GoObjAArch64AsmBackend(const Target &T, const Triple &TT)
+      : AArch64AsmBackend(T, TT, /*IsLittleEndian=*/true) {}
+
+  std::unique_ptr<MCObjectTargetWriter>
+  createObjectTargetWriter() const override {
+    return createAArch64GoObjObjectWriter();
+  }
+};
+} // namespace
 
 namespace {
 class COFFAArch64AsmBackend : public AArch64AsmBackend {
@@ -774,7 +789,7 @@ public:
     return createAArch64WinCOFFObjectWriter(TheTriple);
   }
 };
-}
+} // namespace
 
 MCAsmBackend *llvm::createAArch64leAsmBackend(const Target &T,
                                               const MCSubtargetInfo &STI,
@@ -787,6 +802,9 @@ MCAsmBackend *llvm::createAArch64leAsmBackend(const Target &T,
 
   if (TheTriple.isOSBinFormatCOFF())
     return new COFFAArch64AsmBackend(T, TheTriple);
+
+  if (TheTriple.isOSBinFormatGoObj())
+    return new GoObjAArch64AsmBackend(T, TheTriple);
 
   assert(TheTriple.isOSBinFormatELF() && "Invalid target");
 

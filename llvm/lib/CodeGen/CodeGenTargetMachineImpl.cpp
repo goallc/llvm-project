@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/CodeGenTargetMachineImpl.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/RuntimeLibcallInfo.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/CodeGen/AsmPrinter.h"
@@ -51,6 +52,18 @@ static cl::opt<bool> EnableNoTrapAfterNoreturn(
 static cl::opt<std::string>
     GoObjPackagePath("goobj-package-path", cl::Hidden,
                      cl::desc("Package path to record in Go object files"));
+
+static cl::opt<std::string>
+    GoObjVersion("goobj-version", cl::Hidden,
+                 cl::desc("Go toolchain version to record in Go object files"));
+
+static cl::opt<std::string> GoObjExperiments(
+    "goobj-experiments", cl::Hidden,
+    cl::desc("Comma-separated Go experiments to record in Go object files"));
+
+static cl::opt<bool>
+    GoObjShared("goobj-shared", cl::Hidden,
+                cl::desc("Mark generated Go object files as shared"));
 
 void CodeGenTargetMachineImpl::initAsmInfo() {
   MRI.reset(TheTarget.createMCRegInfo(getTargetTriple()));
@@ -225,6 +238,17 @@ CodeGenTargetMachineImpl::createMCStreamer(raw_pwrite_stream &Out,
       MCGoObjObjectWriterConfig Config;
       Config.SourceKind = GoObj::SourceKind::Compiler;
       Config.PackagePath = GoObjPackagePath;
+      if (!GoObjVersion.empty())
+        Config.Version = GoObjVersion;
+      if (!GoObjExperiments.empty()) {
+        Config.Experiments.clear();
+        SmallVector<StringRef, 8> Experiments;
+        StringRef(GoObjExperiments)
+            .split(Experiments, ',', -1, /*KeepEmpty=*/false);
+        for (StringRef Experiment : Experiments)
+          Config.Experiments.push_back(Experiment.str());
+      }
+      Config.IsShared = GoObjShared;
       OW = createGoObjObjectWriter(
           cast<MCGoObjObjectTargetWriter>(MAB->createObjectTargetWriter()), Out,
           std::move(Config));

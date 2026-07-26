@@ -19,8 +19,7 @@
 namespace llvm {
 namespace GoObj {
 
-inline constexpr char Magic[] = {'\0', 'g', 'o', '1',
-                                 '2',  '0', 'l', 'd'};
+inline constexpr char Magic[] = {'\0', 'g', 'o', '1', '2', '0', 'l', 'd'};
 inline constexpr uint32_t MagicSize = sizeof(Magic);
 inline constexpr uint32_t FingerprintSize = 8;
 
@@ -191,6 +190,22 @@ enum RelocType : uint16_t {
   R_KEEP = 27,
   R_POWER_TOC = 28,
   R_GOTPCREL = 29,
+  R_JMPMIPS = 30,
+  R_DWARFSECREF = 31,
+  R_ARM64_TLS_LE = 32,
+  R_ARM64_TLS_IE = 33,
+  R_ARM64_GOTPCREL = 34,
+  R_ARM64_GOT = 35,
+  R_ARM64_PCREL = 36,
+  R_ARM64_PCREL_LDST8 = 37,
+  R_ARM64_PCREL_LDST16 = 38,
+  R_ARM64_PCREL_LDST32 = 39,
+  R_ARM64_PCREL_LDST64 = 40,
+  R_ARM64_LDST8 = 41,
+  R_ARM64_LDST16 = 42,
+  R_ARM64_LDST32 = 43,
+  R_ARM64_LDST64 = 44,
+  R_ARM64_LDST128 = 45,
 };
 
 } // end namespace GoObj

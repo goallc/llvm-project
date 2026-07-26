@@ -38,6 +38,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/InitLLVM.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/SourceMgr.h"
@@ -60,8 +61,9 @@ static codegen::RegisterMTuneFlag MTF;
 static cl::OptionCategory GoObjToolCat("llvm-goobj-toolexec options");
 
 static cl::list<std::string>
-    IRInputs("llvm-ir", cl::desc("Additional LLVM IR file to compile for the "
-                                 "selected Go package archive"),
+    IRInputs("llvm-ir",
+             cl::desc("Additional LLVM IR file to compile for the "
+                      "selected Go package archive"),
              cl::value_desc("path"), cl::ZeroOrMore, cl::cat(GoObjToolCat));
 
 static cl::opt<std::string>
@@ -82,10 +84,11 @@ static cl::opt<std::string>
                         "tool being wrapped, or go tool pack)"),
                cl::value_desc("path"), cl::cat(GoObjToolCat));
 
-static cl::opt<std::string> TargetTriple(
-    "mtriple", cl::desc("Override target triple for LLVM IR compilation"),
-    cl::init("x86_64-unknown-linux-goobj"), cl::value_desc("triple"),
-    cl::cat(GoObjToolCat));
+static cl::opt<std::string>
+    TargetTriple("mtriple",
+                 cl::desc("Override target triple for LLVM IR compilation "
+                          "(default: infer from the wrapped Go compiler)"),
+                 cl::value_desc("triple"), cl::cat(GoObjToolCat));
 
 static cl::opt<char>
     OptLevel("O",
@@ -124,6 +127,13 @@ public:
 struct SymabisSymbol {
   std::string Name;
   std::string ABI;
+};
+
+struct GoObjectHeader {
+  std::string GOOS;
+  std::string GOARCH;
+  std::string Version;
+  std::string Experiments;
 };
 } // namespace
 
@@ -172,6 +182,85 @@ static bool ensureGoObjPackagePath(StringRef Path) {
   if (It->second->getNumOccurrences() != 0)
     return true;
   return !It->second->addOccurrence(0, "goobj-package-path", Path);
+}
+
+static bool setCodeGenOption(StringRef Name, StringRef Value) {
+  auto &Options = cl::getRegisteredOptions();
+  auto It = Options.find(Name);
+  if (It == Options.end())
+    return false;
+  if (It->second->getNumOccurrences() != 0)
+    return true;
+  return !It->second->addOccurrence(0, Name, Value);
+}
+
+static Expected<GoObjectHeader> readGoObjectHeader(StringRef ArchivePath) {
+  ErrorOr<std::unique_ptr<MemoryBuffer>> BufferOrErr =
+      MemoryBuffer::getFile(ArchivePath, /*IsText=*/false,
+                            /*RequiresNullTerminator=*/false);
+  if (!BufferOrErr)
+    return createStringError(BufferOrErr.getError(),
+                             "cannot read Go archive '" + ArchivePath + "'");
+
+  StringRef Buffer = (*BufferOrErr)->getBuffer();
+  size_t HeaderPos = Buffer.find("go object ");
+  if (HeaderPos == StringRef::npos)
+    return createStringError(inconvertibleErrorCode(),
+                             "Go archive has no object header: " + ArchivePath);
+
+  StringRef HeaderLine = Buffer.drop_front(HeaderPos).take_until(
+      [](char C) { return C == '\n' || C == '\r'; });
+  SmallVector<StringRef, 8> Fields;
+  HeaderLine.split(Fields, ' ', /*MaxSplit=*/-1, /*KeepEmpty=*/false);
+  if (Fields.size() < 5 || Fields[0] != "go" || Fields[1] != "object")
+    return createStringError(inconvertibleErrorCode(),
+                             "malformed Go object header in '" + ArchivePath +
+                                 "'");
+
+  GoObjectHeader Header{Fields[2].str(), Fields[3].str(), Fields[4].str(), ""};
+  for (StringRef Field : drop_begin(Fields, 5))
+    if (Field.consume_front("X:"))
+      Header.Experiments = Field.str();
+  return Header;
+}
+
+static Expected<std::string> getGoObjTriple(const GoObjectHeader &Header) {
+  StringRef Arch;
+  if (Header.GOARCH == "amd64")
+    Arch = "x86_64";
+  else if (Header.GOARCH == "arm64")
+    Arch = "aarch64";
+  else
+    return createStringError(inconvertibleErrorCode(),
+                             "unsupported Go architecture: " + Header.GOARCH);
+
+  StringRef Vendor = Header.GOOS == "darwin" ? "apple" : "unknown";
+  return (Arch + "-" + Vendor + "-" + Header.GOOS + "-goobj").str();
+}
+
+static Error configureGoObjForArchive(StringRef ArchivePath) {
+  Expected<GoObjectHeader> HeaderOrErr = readGoObjectHeader(ArchivePath);
+  if (!HeaderOrErr)
+    return HeaderOrErr.takeError();
+  const GoObjectHeader &Header = *HeaderOrErr;
+
+  if (TargetTriple.empty()) {
+    Expected<std::string> TripleOrErr = getGoObjTriple(Header);
+    if (!TripleOrErr)
+      return TripleOrErr.takeError();
+    TargetTriple = *TripleOrErr;
+  }
+
+  if (!setCodeGenOption("goobj-version", Header.Version) ||
+      !setCodeGenOption("goobj-experiments", Header.Experiments))
+    return createStringError(inconvertibleErrorCode(),
+                             "GoObj code generation options are unavailable");
+
+  if (llvm::is_contained(GoToolArgs, "-shared") &&
+      !setCodeGenOption("goobj-shared", "true"))
+    return createStringError(inconvertibleErrorCode(),
+                             "GoObj shared option is unavailable");
+  return Error::success();
 }
 
 static void initializeCodeGenForTool() {
@@ -365,8 +454,7 @@ static int compileIRToGoObj(StringRef IRPath, StringRef ObjPath,
 
   M->setTargetTriple(TT);
 
-  std::optional<CodeGenOptLevel> CGOptLevel =
-      CodeGenOpt::parseLevel(OptLevel);
+  std::optional<CodeGenOptLevel> CGOptLevel = CodeGenOpt::parseLevel(OptLevel);
   if (!CGOptLevel) {
     reportError("invalid optimization level");
     return 1;
@@ -428,8 +516,7 @@ static int compileIRToGoObj(StringRef IRPath, StringRef ObjPath,
   MCCtx.setDiagnosticHandler([&](const SMDiagnostic &SMD, bool,
                                  const SourceMgr &,
                                  std::vector<const MDNode *> &) {
-    WithColor::error(errs(), "llvm-goobj-toolexec") << SMD.getMessage()
-                                                    << '\n';
+    WithColor::error(errs(), "llvm-goobj-toolexec") << SMD.getMessage() << '\n';
     HasMCErrors = true;
   });
 
@@ -518,8 +605,7 @@ static int runAugmentedCompile(ArrayRef<std::string> ActiveIRInputs) {
     std::error_code EC;
     raw_fd_ostream SymabisOS(SymabisPath, EC, sys::fs::OF_Text);
     if (EC) {
-      reportError("cannot write '" + Twine(SymabisPath) + "': " +
-                  EC.message());
+      reportError("cannot write '" + Twine(SymabisPath) + "': " + EC.message());
       return 1;
     }
     for (const SymabisSymbol &Symbol : Symbols)
@@ -542,6 +628,11 @@ static int runAugmentedCompile(ArrayRef<std::string> ActiveIRInputs) {
 
   if (int RC = execute(CompileArgs))
     return RC;
+
+  if (Error Err = configureGoObjForArchive(*Output)) {
+    logAllUnhandledErrors(std::move(Err), errs(), "llvm-goobj-toolexec: ");
+    return 1;
+  }
 
   SmallVector<std::string, 8> ObjectPaths;
   for (size_t I = 0; I != ActiveIRInputs.size(); ++I) {

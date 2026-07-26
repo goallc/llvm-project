@@ -49,6 +49,18 @@ enum class SignReturnAddress {
 /// AArch64FunctionInfo - This class is derived from MachineFunctionInfo and
 /// contains private AArch64-specific information for each MachineFunction.
 class AArch64FunctionInfo final : public MachineFunctionInfo {
+public:
+  struct GoRegArgSpillSlot {
+    unsigned Reg = 0;
+    int FrameIndex = 0;
+    unsigned Size = 0;
+    bool IsFP = false;
+  };
+
+private:
+  /// Fixed frame objects for Go ABIInternal register argument home slots.
+  SmallVector<GoRegArgSpillSlot, 16> GoRegArgSpillSlots;
+
   /// Number of bytes of arguments this function has on the stack. If the callee
   /// is expected to restore the argument stack this should be a multiple of 16,
   /// all usable during a tail call.
@@ -274,6 +286,15 @@ public:
   unsigned getBytesInStackArgArea() const { return BytesInStackArgArea; }
   void setBytesInStackArgArea(unsigned bytes) { BytesInStackArgArea = bytes; }
 
+  void clearGoRegArgSpillSlots() { GoRegArgSpillSlots.clear(); }
+  void addGoRegArgSpillSlot(unsigned Reg, int FrameIndex, unsigned Size,
+                            bool IsFP) {
+    GoRegArgSpillSlots.push_back({Reg, FrameIndex, Size, IsFP});
+  }
+  ArrayRef<GoRegArgSpillSlot> getGoRegArgSpillSlots() const {
+    return GoRegArgSpillSlots;
+  }
+
   unsigned getArgumentStackToRestore() const { return ArgumentStackToRestore; }
   void setArgumentStackToRestore(unsigned bytes) {
     ArgumentStackToRestore = bytes;
@@ -486,7 +507,7 @@ public:
   }
   void setJumpTableEntryInfo(int Idx, unsigned Size, MCSymbol *PCRelSym) {
     if ((unsigned)Idx >= JumpTableEntryInfo.size())
-      JumpTableEntryInfo.resize(Idx+1);
+      JumpTableEntryInfo.resize(Idx + 1);
     JumpTableEntryInfo[Idx] = std::make_pair(Size, PCRelSym);
   }
 
@@ -590,9 +611,7 @@ public:
   }
   bool hasSwiftAsyncContext() const { return HasSwiftAsyncContext; }
 
-  void setSwiftAsyncContextFrameIdx(int FI) {
-    SwiftAsyncContextFrameIdx = FI;
-  }
+  void setSwiftAsyncContextFrameIdx(int FI) { SwiftAsyncContextFrameIdx = FI; }
   int getSwiftAsyncContextFrameIdx() const { return SwiftAsyncContextFrameIdx; }
 
   bool needsDwarfUnwindInfo(const MachineFunction &MF) const;

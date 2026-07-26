@@ -37,6 +37,11 @@
 
 using namespace llvm;
 
+int64_t MCGoObjObjectTargetWriter::getRelocAddend(const MCValue &Target,
+                                                  const MCFixup &) const {
+  return Target.getConstant();
+}
+
 namespace {
 
 struct GoObjSymbol {
@@ -444,12 +449,16 @@ void GoObjObjectWriter::recordRelocation(const MCFragment &F,
                                          uint64_t &FixedValue) {
   const MCFixupKindInfo &Info =
       Asm->getBackend().getFixupKindInfo(Fixup.getKind());
-  assert(Info.TargetSize % 8 == 0 && "Target size must be byte-aligned");
-  Relocations.push_back(
-      {Target.getAddSym(), Target.getSubSym(), F.getParent(),
-       Asm->getFragmentOffset(F) + Fixup.getOffset(), Target.getConstant(),
-       TargetObjectWriter->getRelocType(Target, Fixup),
-       static_cast<uint8_t>(Info.TargetSize / 8), Fixup.isPCRel()});
+  uint8_t RelocSize = TargetObjectWriter->getRelocSize(Fixup);
+  if (!RelocSize) {
+    assert(Info.TargetSize % 8 == 0 && "Target size must be byte-aligned");
+    RelocSize = Info.TargetSize / 8;
+  }
+  Relocations.push_back({Target.getAddSym(), Target.getSubSym(), F.getParent(),
+                         Asm->getFragmentOffset(F) + Fixup.getOffset(),
+                         TargetObjectWriter->getRelocAddend(Target, Fixup),
+                         TargetObjectWriter->getRelocType(Target, Fixup),
+                         RelocSize, Fixup.isPCRel()});
   FixedValue = 0;
 }
 
@@ -816,16 +825,15 @@ uint64_t GoObjObjectWriter::writeObject() {
       if (Reloc.Symbol && Reloc.Symbol->isInSection() &&
           getGoObjSymbolType(&Reloc.Symbol->getSection()) == GoObj::STEXT)
         RelocType = GoObj::R_METHODOFF;
-      else if (Reloc.Symbol &&
-               Reloc.Symbol->getName().starts_with("type:func"))
+      else if (Reloc.Symbol && Reloc.Symbol->getName().starts_with("type:func"))
         RelocType = GoObj::R_METHODOFF;
       else
         RelocType = GoObj::R_ADDROFF;
     }
 
-    Source.Relocations.push_back(
-        {static_cast<uint32_t>(LocalOffset), Reloc.Size, RelocType, Addend,
-         TargetSymRef.PkgIdx, TargetSymRef.SymIdx});
+    Source.Relocations.push_back({static_cast<uint32_t>(LocalOffset),
+                                  Reloc.Size, RelocType, Addend,
+                                  TargetSymRef.PkgIdx, TargetSymRef.SymIdx});
   }
 
   for (GoObjSymbol &Symbol : Symbols) {
