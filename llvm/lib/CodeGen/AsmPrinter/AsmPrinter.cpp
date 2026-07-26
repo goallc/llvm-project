@@ -243,6 +243,21 @@ static uint32_t getGoObjArgSize(const Function &F, const DataLayout &DL,
                 false};
     else
       Config = {X86GoIntRegs, X86GoFPRegs, 8, Align(8), Align(8), false};
+  } else if (TT.getArch() == Triple::aarch64) {
+    static constexpr unsigned AArch64GoIntRegs[] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    static constexpr unsigned AArch64GoFPRegs[] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    if (goabi::isGoABI0CallingConv(F.getCallingConv()))
+      Config = {ArrayRef<unsigned>(),
+                ArrayRef<unsigned>(),
+                8,
+                Align(8),
+                Align(16),
+                false};
+    else
+      Config = {AArch64GoIntRegs, AArch64GoFPRegs, 8,
+                Align(8),         Align(16),       false};
   } else {
     return 0;
   }

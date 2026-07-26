@@ -28,9 +28,9 @@ struct MCGoObjObjectWriterConfig {
   GoObj::DefinedSymbolBlock DefaultDefinedSymbolBlock =
       GoObj::DefinedSymbolBlock::Symdef;
   std::string Version = "go1.26.3";
-  std::vector<std::string> Experiments = {
-      "regabiwrappers", "regabiargs", "dwarf5", "greenteagc",
-      "randomizedheapbase64"};
+  std::vector<std::string> Experiments = {"regabiwrappers", "regabiargs",
+                                          "dwarf5", "greenteagc",
+                                          "randomizedheapbase64"};
   std::string PackagePath;
   std::array<uint8_t, GoObj::FingerprintSize> Fingerprint = {};
   bool IsShared = false;
@@ -53,6 +53,16 @@ public:
 
   virtual unsigned getRelocType(const MCValue &Target,
                                 const MCFixup &Fixup) const = 0;
+
+  /// Return the byte width encoded in the Go relocation. Targets whose fixups
+  /// occupy an instruction container rather than a byte-aligned bit field can
+  /// override this. Returning zero uses the generic fixup size.
+  virtual uint8_t getRelocSize(const MCFixup &Fixup) const { return 0; }
+
+  /// Return the addend encoded in the Go relocation. Targets may account for
+  /// architectural PC biases introduced while evaluating MC fixups.
+  virtual int64_t getRelocAddend(const MCValue &Target,
+                                 const MCFixup &Fixup) const;
 };
 
 struct GoObjRelocationEntry {

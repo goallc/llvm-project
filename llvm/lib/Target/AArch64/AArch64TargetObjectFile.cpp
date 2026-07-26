@@ -103,7 +103,7 @@ MCSymbol *AArch64_MachoTargetObjectFile::getCFIPersonalitySymbol(
 const MCExpr *AArch64_MachoTargetObjectFile::getIndirectSymViaGOTPCRel(
     const GlobalValue *GV, const MCSymbol *Sym, const MCValue &MV,
     int64_t Offset, MachineModuleInfo *MMI, MCStreamer &Streamer) const {
-  assert((Offset+MV.getConstant() == 0) &&
+  assert((Offset + MV.getConstant() == 0) &&
          "Arch64 does not support GOT PC rel with extra offset");
   // On ARM64 Darwin, we can reference symbols with foo@GOT-., which
   // is an indirect pc-relative reference.
@@ -174,6 +174,11 @@ static bool isExecuteOnlyFunction(const GlobalObject *GO, SectionKind Kind,
 
 MCSection *AArch64_ELFTargetObjectFile::getExplicitSectionGlobal(
     const GlobalObject *GO, SectionKind Kind, const TargetMachine &TM) const {
+  // Go object files carry relocations in read-only type data directly; do not
+  // split an explicit .rodata section merely because the host OS is Darwin.
+  if (TM.getTargetTriple().isOSBinFormatGoObj() && Kind.isReadOnlyWithRel())
+    Kind = SectionKind::getReadOnly();
+
   // Set execute-only access for the explicit section
   if (isExecuteOnlyFunction(GO, Kind, TM))
     Kind = SectionKind::getExecuteOnly();
@@ -183,6 +188,9 @@ MCSection *AArch64_ELFTargetObjectFile::getExplicitSectionGlobal(
 
 MCSection *AArch64_ELFTargetObjectFile::SelectSectionForGlobal(
     const GlobalObject *GO, SectionKind Kind, const TargetMachine &TM) const {
+  if (TM.getTargetTriple().isOSBinFormatGoObj() && Kind.isReadOnlyWithRel())
+    Kind = SectionKind::getReadOnly();
+
   // Set execute-only access for the explicit section
   if (isExecuteOnlyFunction(GO, Kind, TM))
     Kind = SectionKind::getExecuteOnly();
