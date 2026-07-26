@@ -6,9 +6,9 @@ files and integrating LLVM IR into the Go toolchain through `go build
 
 ## Current Branch State
 
-- Working branch: `codex/goobj-support`
+- Working and default branch: `llvm23.1.master`
 - Remote repository used for this work:
-  `git@github.com:zhouguangyuan0718/llvm-project.git`
+  `https://github.com/goallc/llvm-project.git`
 - Important commits:
   - `c94609213323` - Add Go object file support
   - `fbfd2a9d3c98` - Support GoObj emission from LLVM IR
