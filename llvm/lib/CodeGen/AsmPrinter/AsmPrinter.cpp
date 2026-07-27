@@ -922,6 +922,19 @@ getGoObjKeepMetadata(const GlobalObject *GO) {
   return Result;
 }
 
+static std::optional<std::string>
+getGoObjGotypeMetadata(const GlobalObject *GO) {
+  const MDNode *MD = GO->getMetadata("goobj.gotype");
+  if (!MD)
+    return std::nullopt;
+  if (MD->getNumOperands() != 1)
+    report_fatal_error("expected !goobj.gotype to have one operand");
+  const auto *Name = dyn_cast<MDString>(MD->getOperand(0));
+  if (!Name || Name->getString().empty())
+    report_fatal_error("expected !goobj.gotype operand to be a symbol name");
+  return Name->getString().str();
+}
+
 struct GoObjMarkerRelocMetadata {
   std::string Target;
   uint16_t Type = 0;
@@ -1009,6 +1022,14 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
       }
       OutContext.setGoObjKeepTargets(GVSym, std::move(Targets));
     }
+    if (std::optional<std::string> Gotype = getGoObjGotypeMetadata(GV)) {
+      const auto *Target = dyn_cast_or_null<GlobalValue>(
+          GV->getParent()->getNamedValue(*Gotype));
+      if (!Target)
+        report_fatal_error(
+            Twine("!goobj.gotype target is not an LLVM global: ") + *Gotype);
+      OutContext.setGoObjGotypeTarget(GVSym, getSymbol(Target));
+    }
   }
 
   // getOrCreateEmuTLSControlSym only creates the symbol with name and default
@@ -1046,9 +1067,11 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
   // with a specified alignment is a prompt way to break globals emitted to
   // sections and expected to be contiguous (e.g. ObjC metadata).
   const Align Alignment = getGVAlignment(GV, DL);
-  if (TM.getTargetTriple().isOSBinFormatGoObj())
+  if (TM.getTargetTriple().isOSBinFormatGoObj()) {
     OutContext.setGoObjSymbolAlignment(
         GVSym, static_cast<uint32_t>(Alignment.value()));
+    OutContext.setGoObjSymbolSize(GVSym, Size);
+  }
 
   for (auto &Handler : Handlers)
     Handler->setSymbolSize(GVSym, Size);

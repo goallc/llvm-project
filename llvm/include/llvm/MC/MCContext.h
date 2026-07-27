@@ -201,6 +201,12 @@ private:
   /// Explicit LLVM global alignments for Go object data symbols.
   DenseMap<const MCSymbol *, uint32_t> GoObjSymbolAlignments;
 
+  /// Exact LLVM global sizes for Go object data symbols.
+  DenseMap<const MCSymbol *, uint64_t> GoObjSymbolSizes;
+
+  /// Go type auxiliary targets for data symbols.
+  DenseMap<const MCSymbol *, const MCSymbol *> GoObjGotypeTargets;
+
   /// Go object pcsp entries keyed by MC symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjPCSPEntry>>
       GoObjSymbolPCSPEntries;
@@ -670,6 +676,28 @@ public:
     auto It = GoObjSymbolAlignments.find(Sym);
     if (It == GoObjSymbolAlignments.end())
       return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjSymbolSize(const MCSymbol *Sym, uint64_t Size) {
+    GoObjSymbolSizes[Sym] = Size;
+  }
+
+  std::optional<uint64_t> getGoObjSymbolSize(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolSizes.find(Sym);
+    if (It == GoObjSymbolSizes.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjGotypeTarget(const MCSymbol *Sym, const MCSymbol *Target) {
+    GoObjGotypeTargets[Sym] = Target;
+  }
+
+  const MCSymbol *getGoObjGotypeTarget(const MCSymbol *Sym) const {
+    auto It = GoObjGotypeTargets.find(Sym);
+    if (It == GoObjGotypeTargets.end())
+      return nullptr;
     return It->second;
   }
 

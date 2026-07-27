@@ -559,13 +559,24 @@ uint64_t GoObjObjectWriter::writeObject() {
       continue;
     }
 
-    if (SectionSymbols.front().Offset != 0)
-      AddSectionSymbol(nullptr, Section.getName(), 0,
-                       SectionSymbols.front().Offset);
-
     for (size_t I = 0, E = SectionSymbols.size(); I != E; ++I) {
       uint64_t Begin = SectionSymbols[I].Offset;
-      uint64_t End = I + 1 == E ? SectionSize : SectionSymbols[I + 1].Offset;
+      uint64_t End = SectionSize;
+      for (size_t J = I + 1; J != E; ++J) {
+        if (SectionSymbols[J].Offset > Begin) {
+          End = SectionSymbols[J].Offset;
+          break;
+        }
+      }
+      if (std::optional<uint64_t> ExactSize =
+              Asm->getContext().getGoObjSymbolSize(
+                  SectionSymbols[I].Symbol)) {
+        if (*ExactSize > SectionSize - Begin ||
+            Begin + *ExactSize > End)
+          report_fatal_error(
+              "GoObj global size overlaps the next section symbol");
+        End = Begin + *ExactSize;
+      }
       AddSectionSymbol(SectionSymbols[I].Symbol,
                        SectionSymbols[I].Symbol->getName(), Begin, End);
     }
@@ -897,6 +908,19 @@ uint64_t GoObjObjectWriter::writeObject() {
       Source.Relocations.push_back(
           {0, 0, Marker.Type, Addend, TargetSymRef.PkgIdx, TargetSymRef.SymIdx});
     }
+  }
+
+  for (GoObjSymbol &Source : Symbols) {
+    if (!Source.Symbol)
+      continue;
+    const MCSymbol *Target =
+        Asm->getContext().getGoObjGotypeTarget(Source.Symbol);
+    if (!Target)
+      continue;
+    auto It = DefinedSymbolIndexes.find(Target);
+    if (It == DefinedSymbolIndexes.end())
+      report_fatal_error("GoObj gotype target is not a defined symbol");
+    Source.Auxiliaries.push_back({GoObj::AuxGotype, It->second});
   }
 
   for (GoObjSymbol &Symbol : Symbols) {

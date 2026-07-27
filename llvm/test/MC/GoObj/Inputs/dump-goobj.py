@@ -33,6 +33,7 @@ RELOC_SIZE = 23
 AUX_SIZE = 9
 
 AUX_TYPES = {
+    0: "gotype",
     1: "funcinfo",
     2: "funcdata",
     7: "pcsp",
