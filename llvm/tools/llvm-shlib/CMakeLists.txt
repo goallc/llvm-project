@@ -104,6 +104,89 @@ if(LLVM_BUILD_LLVM_DYLIB)
   endif()
 endif()
 
+if(LLVM_BUILD_GOALLC_STATIC)
+  if(BUILD_SHARED_LIBS)
+    message(FATAL_ERROR "LLVM_BUILD_GOALLC_STATIC requires static LLVM component libraries")
+  endif()
+  if(NOT CMAKE_SYSTEM_NAME MATCHES "Darwin|Linux")
+    message(FATAL_ERROR "LLVM_BUILD_GOALLC_STATIC currently supports Darwin and Linux")
+  endif()
+
+  set(LLVM_GOALLC_COMPONENTS
+    core
+    analysis
+    bitreader
+    bitwriter
+    irreader
+    linker
+    passes
+    ${LLVM_TARGETS_TO_BUILD}
+    AllTargetsMCAs
+    executionengine
+    mcjit
+    interpreter
+    target
+  )
+  llvm_map_components_to_libnames(LLVM_GOALLC_LIBS ${LLVM_GOALLC_COMPONENTS})
+  llvm_expand_dependencies(LLVM_GOALLC_LIBS ${LLVM_GOALLC_LIBS})
+  list(REMOVE_DUPLICATES LLVM_GOALLC_LIBS)
+
+  set(LLVM_GOALLC_ARCHIVES)
+  foreach(library IN LISTS LLVM_GOALLC_LIBS)
+    list(APPEND LLVM_GOALLC_ARCHIVES "$<TARGET_FILE:${library}>")
+  endforeach()
+  set(LLVM_GOALLC_ARCHIVE_DEPENDS ${LLVM_GOALLC_LIBS})
+  if(LLVM_ENABLE_ZSTD)
+    if(NOT TARGET zstd::libzstd_static)
+      message(FATAL_ERROR
+        "LLVM_BUILD_GOALLC_STATIC requires a static zstd library when LLVM_ENABLE_ZSTD is enabled")
+    endif()
+    list(APPEND LLVM_GOALLC_ARCHIVES "$<TARGET_FILE:zstd::libzstd_static>")
+    list(APPEND LLVM_GOALLC_ARCHIVE_DEPENDS zstd::libzstd_static)
+  endif()
+
+  set(LLVM_GOALLC_STATIC_LIBRARY
+    "${LLVM_LIBRARY_OUTPUT_INTDIR}/${CMAKE_STATIC_LIBRARY_PREFIX}LLVMGoALLC${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  set(LLVM_GOALLC_MERGE_SCRIPT
+    "${LLVM_MAIN_SRC_DIR}/utils/goallc/merge_static_archives.py")
+
+  if(APPLE)
+    set(LLVM_GOALLC_ARCHIVE_FORMAT darwin)
+    set(LLVM_GOALLC_ARCHIVER_ARGS
+      --ar "$<TARGET_FILE:llvm-ar>"
+      --libtool "$<TARGET_FILE:llvm-libtool-darwin>")
+    set(LLVM_GOALLC_ARCHIVER_DEPENDS llvm-ar llvm-libtool-darwin)
+  else()
+    set(LLVM_GOALLC_ARCHIVE_FORMAT gnu)
+    set(LLVM_GOALLC_ARCHIVER_ARGS --ar "$<TARGET_FILE:llvm-ar>")
+    set(LLVM_GOALLC_ARCHIVER_DEPENDS llvm-ar)
+  endif()
+
+  add_custom_command(
+    OUTPUT "${LLVM_GOALLC_STATIC_LIBRARY}"
+    COMMAND "${Python3_EXECUTABLE}" "${LLVM_GOALLC_MERGE_SCRIPT}"
+      --format "${LLVM_GOALLC_ARCHIVE_FORMAT}"
+      --output "${LLVM_GOALLC_STATIC_LIBRARY}"
+      ${LLVM_GOALLC_ARCHIVER_ARGS}
+      ${LLVM_GOALLC_ARCHIVES}
+    DEPENDS
+      ${LLVM_GOALLC_ARCHIVE_DEPENDS}
+      ${LLVM_GOALLC_ARCHIVER_DEPENDS}
+      "${LLVM_GOALLC_MERGE_SCRIPT}"
+    COMMAND_EXPAND_LISTS
+    COMMENT "Merging LLVM components into libLLVMGoALLC"
+    VERBATIM
+  )
+  add_custom_target(LLVMGoALLC ALL DEPENDS "${LLVM_GOALLC_STATIC_LIBRARY}")
+  set_target_properties(LLVMGoALLC PROPERTIES FOLDER "LLVM/Libraries")
+
+  install(
+    FILES "${LLVM_GOALLC_STATIC_LIBRARY}"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}${LLVM_LIBDIR_SUFFIX}"
+    COMPONENT LLVMGoALLC
+  )
+endif()
+
 if(LLVM_BUILD_LLVM_C_DYLIB AND NOT MSVC)
   if(NOT APPLE)
     message(FATAL_ERROR "Generating libLLVM-c is only supported on Darwin")
