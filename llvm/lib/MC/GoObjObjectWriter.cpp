@@ -44,6 +44,11 @@ int64_t MCGoObjObjectTargetWriter::getRelocAddend(const MCValue &Target,
 
 namespace {
 
+struct GoObjSymRef {
+  uint32_t PkgIdx = GoObj::PkgIdxInvalid;
+  uint32_t SymIdx = 0;
+};
+
 struct GoObjSymbol {
   struct Relocation {
     uint32_t Offset = 0;
@@ -55,8 +60,14 @@ struct GoObjSymbol {
   };
 
   struct Auxiliary {
-    uint8_t Type = 0;
+    Auxiliary(uint8_t Type, uint32_t TargetSymbolIndex)
+        : Type(Type), TargetSymbolIndex(TargetSymbolIndex) {}
+    Auxiliary(uint8_t Type, GoObjSymRef DirectTarget)
+        : Type(Type), DirectTarget(DirectTarget) {}
+
+    uint8_t Type;
     uint32_t TargetSymbolIndex = 0;
+    std::optional<GoObjSymRef> DirectTarget;
   };
 
   std::string Name;
@@ -74,11 +85,6 @@ struct GoObjSymbol {
   SmallString<0> Data;
   std::vector<Relocation> Relocations;
   std::vector<Auxiliary> Auxiliaries;
-};
-
-struct GoObjSymRef {
-  uint32_t PkgIdx = GoObj::PkgIdxInvalid;
-  uint32_t SymIdx = 0;
 };
 
 struct GoObjPCTabEntry {
@@ -917,10 +923,13 @@ uint64_t GoObjObjectWriter::writeObject() {
         Asm->getContext().getGoObjGotypeTarget(Source.Symbol);
     if (!Target)
       continue;
-    auto It = DefinedSymbolIndexes.find(Target);
-    if (It == DefinedSymbolIndexes.end())
-      report_fatal_error("GoObj gotype target is not a defined symbol");
-    Source.Auxiliaries.push_back({GoObj::AuxGotype, It->second});
+    GoObjRelocationEntry Reloc;
+    Reloc.Symbol = Target;
+    int64_t Addend = 0;
+    GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
+    if (Addend != 0)
+      report_fatal_error("GoObj gotype auxiliary target has an addend");
+    Source.Auxiliaries.emplace_back(GoObj::AuxGotype, TargetSymRef);
   }
 
   for (GoObjSymbol &Symbol : Symbols) {
@@ -1052,9 +1061,14 @@ uint64_t GoObjObjectWriter::writeObject() {
   for (uint32_t Index : DefinedSymbolOrder) {
     const GoObjSymbol &Symbol = Symbols[Index];
     for (const GoObjSymbol::Auxiliary &Aux : Symbol.Auxiliaries) {
-      if (Aux.TargetSymbolIndex >= DefinedSymRefs.size())
-        report_fatal_error("GoObj auxiliary target symbol index is invalid");
-      GoObjSymRef Ref = DefinedSymRefs[Aux.TargetSymbolIndex];
+      GoObjSymRef Ref;
+      if (Aux.DirectTarget) {
+        Ref = *Aux.DirectTarget;
+      } else {
+        if (Aux.TargetSymbolIndex >= DefinedSymRefs.size())
+          report_fatal_error("GoObj auxiliary target symbol index is invalid");
+        Ref = DefinedSymRefs[Aux.TargetSymbolIndex];
+      }
       W.write<uint8_t>(Aux.Type);
       W.write<uint32_t>(Ref.PkgIdx);
       W.write<uint32_t>(Ref.SymIdx);
