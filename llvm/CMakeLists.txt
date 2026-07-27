@@ -993,9 +993,6 @@ endif()
 cmake_dependent_option(LLVM_BUILD_LLVM_DYLIB "Build libllvm dynamic library" ${LLVM_BUILD_LLVM_DYLIB_default}
                        "CAN_BUILD_LLVM_DYLIB" OFF)
 
-option(LLVM_BUILD_GOALLC_STATIC
-  "Build the monolithic libLLVMGoALLC static library for GoALLC" OFF)
-
 cmake_dependent_option(LLVM_DYLIB_EXPORT_INLINES "Force inline members of classes to be DLL exported when
                        building with clang-cl so the libllvm DLL is compatible with MSVC"
                        OFF
