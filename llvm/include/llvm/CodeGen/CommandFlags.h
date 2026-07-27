@@ -33,6 +33,25 @@ class TargetMachine;
 
 namespace codegen {
 
+// GoObjConfig is decoded from !goobj.config in a Go frontend's LLVM module.
+// It is intentionally distinct from command-line flags: the IR is the
+// reproducible handoff between the frontend and llc.
+struct GoObjConfig {
+  std::string GOOS;
+  std::string GOARCH;
+  std::string GOARCHSettingKey;
+  std::string GOARCHSettingValue;
+  std::string Version;
+  std::string BuildID;
+  std::string PackagePath;
+  std::vector<std::string> Experiments;
+  bool IsMain = false;
+  bool IsShared = false;
+};
+
+LLVM_ABI void setGoObjConfig(GoObjConfig Config);
+LLVM_ABI std::optional<GoObjConfig> getGoObjConfig();
+
 LLVM_ABI std::string getMArch();
 
 LLVM_ABI std::string getMCPU();

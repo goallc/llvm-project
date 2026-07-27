@@ -39,6 +39,16 @@
 
 using namespace llvm;
 
+static std::optional<codegen::GoObjConfig> IRGoObjConfig;
+
+void codegen::setGoObjConfig(GoObjConfig Config) {
+  IRGoObjConfig = std::move(Config);
+}
+
+std::optional<codegen::GoObjConfig> codegen::getGoObjConfig() {
+  return IRGoObjConfig;
+}
+
 #define CGOPT(TY, NAME)                                                        \
   static cl::opt<TY> *NAME##View;                                              \
   TY codegen::get##NAME() {                                                    \
