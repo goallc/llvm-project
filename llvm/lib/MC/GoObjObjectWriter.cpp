@@ -146,7 +146,7 @@ void addDefinedSymbol(std::vector<GoObjSymbol> &Symbols, const MCSymbol *MCSym,
                       uint64_t SectionEnd,
                       GoObj::DefinedSymbolBlock DefinedBlock, StringRef Name,
                       uint8_t Type, uint8_t Flag, uint8_t Flag2, uint16_t ABI,
-                      uint64_t Size, ArrayRef<char> Data) {
+                      uint64_t Size, uint32_t Align, ArrayRef<char> Data) {
   GoObjSymbol Sym;
   Sym.Name = Name.str();
   Sym.Symbol = MCSym;
@@ -159,6 +159,7 @@ void addDefinedSymbol(std::vector<GoObjSymbol> &Symbols, const MCSymbol *MCSym,
   Sym.Flag2 = Flag2;
   Sym.ABI = ABI;
   Sym.Size = Size;
+  Sym.Align = Align;
   Sym.Data.append(Data.begin(), Data.end());
   Symbols.push_back(std::move(Sym));
 }
@@ -508,7 +509,8 @@ uint64_t GoObjObjectWriter::writeObject() {
     std::vector<SectionSymbol> SectionSymbols;
     for (const MCSymbol &Symbol : Asm->symbols()) {
       if (Symbol.isTemporary() || !Symbol.isInSection() ||
-          &Symbol.getSection() != &Section)
+          &Symbol.getSection() != &Section ||
+          &Symbol == Section.getBeginSymbol())
         continue;
       uint64_t Offset = Asm->getSymbolOffset(Symbol);
       if (Offset > SectionSize)
@@ -537,16 +539,19 @@ uint64_t GoObjObjectWriter::writeObject() {
                          : GoObj::SymABI0;
       uint8_t Flag = 0;
       uint8_t Flag2 = 0;
+      uint32_t Align = 0;
       if (MCSym) {
         if (std::optional<std::pair<uint8_t, uint8_t>> Flags =
                 Asm->getContext().getGoObjSymbolFlags(MCSym)) {
           Flag = Flags->first;
           Flag2 = Flags->second;
         }
+        Align =
+            Asm->getContext().getGoObjSymbolAlignment(MCSym).value_or(0);
       }
       addDefinedSymbol(Symbols, MCSym, &Section, Begin, End,
                        Config.DefaultDefinedSymbolBlock, Name, Type, Flag,
-                       Flag2, ABI, Size, Data);
+                       Flag2, ABI, Size, Align, Data);
     };
 
     if (SectionSymbols.empty()) {
@@ -874,6 +879,23 @@ uint64_t GoObjObjectWriter::writeObject() {
       GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
       Source.Relocations.push_back({0, 0, GoObj::R_KEEP, Addend,
                                     TargetSymRef.PkgIdx, TargetSymRef.SymIdx});
+    }
+  }
+
+  for (GoObjSymbol &Source : Symbols) {
+    if (!Source.Symbol)
+      continue;
+    const auto *Markers =
+        Asm->getContext().getGoObjMarkerRelocs(Source.Symbol);
+    if (!Markers)
+      continue;
+    for (const MCContext::GoObjMarkerReloc &Marker : *Markers) {
+      GoObjRelocationEntry Reloc;
+      Reloc.Symbol = Marker.Target;
+      int64_t Addend = Marker.Addend;
+      GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
+      Source.Relocations.push_back(
+          {0, 0, Marker.Type, Addend, TargetSymRef.PkgIdx, TargetSymRef.SymIdx});
     }
   }
 

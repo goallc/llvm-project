@@ -110,6 +110,12 @@ public:
     uint16_t Type;
   };
 
+  struct GoObjMarkerReloc {
+    const MCSymbol *Target = nullptr;
+    uint16_t Type = 0;
+    int64_t Addend = 0;
+  };
+
 private:
   Environment Env;
 
@@ -187,6 +193,13 @@ private:
 
   /// Go object zero-width R_KEEP targets keyed by their source symbol.
   DenseMap<const MCSymbol *, std::vector<const MCSymbol *>> GoObjKeepTargets;
+
+  /// Go object zero-width linker marker relocations keyed by source function.
+  DenseMap<const MCSymbol *, std::vector<GoObjMarkerReloc>>
+      GoObjMarkerRelocs;
+
+  /// Explicit LLVM global alignments for Go object data symbols.
+  DenseMap<const MCSymbol *, uint32_t> GoObjSymbolAlignments;
 
   /// Go object pcsp entries keyed by MC symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjPCSPEntry>>
@@ -633,6 +646,31 @@ public:
     if (It == GoObjKeepTargets.end())
       return nullptr;
     return &It->second;
+  }
+
+  void setGoObjMarkerRelocs(const MCSymbol *Sym,
+                            std::vector<GoObjMarkerReloc> Relocs) {
+    GoObjMarkerRelocs[Sym] = std::move(Relocs);
+  }
+
+  const std::vector<GoObjMarkerReloc> *
+  getGoObjMarkerRelocs(const MCSymbol *Sym) const {
+    auto It = GoObjMarkerRelocs.find(Sym);
+    if (It == GoObjMarkerRelocs.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void setGoObjSymbolAlignment(const MCSymbol *Sym, uint32_t Alignment) {
+    GoObjSymbolAlignments[Sym] = Alignment;
+  }
+
+  std::optional<uint32_t>
+  getGoObjSymbolAlignment(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolAlignments.find(Sym);
+    if (It == GoObjSymbolAlignments.end())
+      return std::nullopt;
+    return It->second;
   }
 
   void setGoObjSymbolPCSPEntries(const MCSymbol *Sym,

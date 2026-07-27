@@ -922,6 +922,39 @@ getGoObjKeepMetadata(const GlobalObject *GO) {
   return Result;
 }
 
+struct GoObjMarkerRelocMetadata {
+  std::string Target;
+  uint16_t Type = 0;
+  int64_t Addend = 0;
+};
+
+static std::optional<std::vector<GoObjMarkerRelocMetadata>>
+getGoObjMarkerRelocsMetadata(const GlobalObject *GO) {
+  const MDNode *MD = GO->getMetadata("goobj.marker_relocs");
+  if (!MD)
+    return std::nullopt;
+
+  std::vector<GoObjMarkerRelocMetadata> Result;
+  Result.reserve(MD->getNumOperands());
+  for (const MDOperand &Operand : MD->operands()) {
+    const auto *Entry = dyn_cast<MDNode>(Operand);
+    if (!Entry || Entry->getNumOperands() != 3)
+      report_fatal_error(
+          "expected !goobj.marker_relocs entries to have three operands");
+    const auto *Type = mdconst::dyn_extract<ConstantInt>(Entry->getOperand(0));
+    const auto *Addend =
+        mdconst::dyn_extract<ConstantInt>(Entry->getOperand(1));
+    const auto *Target = dyn_cast<MDString>(Entry->getOperand(2));
+    if (!Type || Type->getValue().ugt(UINT16_MAX) || !Addend || !Target ||
+        Target->getString().empty())
+      report_fatal_error("invalid !goobj.marker_relocs entry");
+    Result.push_back({Target->getString().str(),
+                      static_cast<uint16_t>(Type->getZExtValue()),
+                      Addend->getSExtValue()});
+  }
+  return Result;
+}
+
 /// EmitGlobalVariable - Emit the specified global variable to the .s file.
 void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
   bool IsEmuTLSVar = TM.useEmulatedTLS() && GV->isThreadLocal();
@@ -1013,6 +1046,9 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
   // with a specified alignment is a prompt way to break globals emitted to
   // sections and expected to be contiguous (e.g. ObjC metadata).
   const Align Alignment = getGVAlignment(GV, DL);
+  if (TM.getTargetTriple().isOSBinFormatGoObj())
+    OutContext.setGoObjSymbolAlignment(
+        GVSym, static_cast<uint32_t>(Alignment.value()));
 
   for (auto &Handler : Handlers)
     Handler->setSymbolSize(GVSym, Size);
@@ -3413,6 +3449,22 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
     OutContext.setGoObjSymbolArgSize(
         CurrentFnSym,
         getGoObjArgSize(F, MF.getDataLayout(), TM.getTargetTriple()));
+
+    if (std::optional<std::vector<GoObjMarkerRelocMetadata>> Markers =
+            getGoObjMarkerRelocsMetadata(&F)) {
+      std::vector<MCContext::GoObjMarkerReloc> Relocs;
+      Relocs.reserve(Markers->size());
+      for (const GoObjMarkerRelocMetadata &Marker : *Markers) {
+        const auto *Target = dyn_cast_or_null<GlobalValue>(
+            F.getParent()->getNamedValue(Marker.Target));
+        if (!Target)
+          report_fatal_error(
+              Twine("!goobj.marker_relocs target is not an LLVM global: ") +
+              Marker.Target);
+        Relocs.push_back({getSymbol(Target), Marker.Type, Marker.Addend});
+      }
+      OutContext.setGoObjMarkerRelocs(CurrentFnSym, std::move(Relocs));
+    }
   }
 
   CurrentFnSymForSize = CurrentFnSym;
