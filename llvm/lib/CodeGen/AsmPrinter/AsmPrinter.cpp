@@ -873,6 +873,55 @@ getGoObjSymbolFlagsMetadata(const GlobalObject *GO) {
   return std::make_pair(ReadFlag(0), ReadFlag(1));
 }
 
+static std::optional<std::vector<MCContext::GoObjRelocOverride>>
+getGoObjRelocsMetadata(const GlobalObject *GO) {
+  const MDNode *MD = GO->getMetadata("goobj.relocs");
+  if (!MD)
+    return std::nullopt;
+
+  std::vector<MCContext::GoObjRelocOverride> Result;
+  Result.reserve(MD->getNumOperands());
+  for (const MDOperand &Operand : MD->operands()) {
+    const auto *Entry = dyn_cast<MDNode>(Operand);
+    if (!Entry || Entry->getNumOperands() != 2)
+      report_fatal_error("expected !goobj.relocs entries to have two operands");
+
+    const auto *Offset =
+        mdconst::dyn_extract<ConstantInt>(Entry->getOperand(0));
+    const auto *Type = mdconst::dyn_extract<ConstantInt>(Entry->getOperand(1));
+    if (!Offset || !Type || Offset->getValue().ugt(UINT32_MAX) ||
+        Type->getValue().ugt(UINT16_MAX))
+      report_fatal_error("expected !goobj.relocs entries to be i32 values");
+    Result.push_back({static_cast<uint32_t>(Offset->getZExtValue()),
+                      static_cast<uint16_t>(Type->getZExtValue())});
+  }
+
+  llvm::sort(Result, [](const auto &LHS, const auto &RHS) {
+    return LHS.Offset < RHS.Offset;
+  });
+  for (size_t I = 1; I < Result.size(); ++I)
+    if (Result[I - 1].Offset == Result[I].Offset)
+      report_fatal_error("duplicate !goobj.relocs offset");
+  return Result;
+}
+
+static std::optional<std::vector<std::string>>
+getGoObjKeepMetadata(const GlobalObject *GO) {
+  const MDNode *MD = GO->getMetadata("goobj.keep");
+  if (!MD)
+    return std::nullopt;
+
+  std::vector<std::string> Result;
+  Result.reserve(MD->getNumOperands());
+  for (const MDOperand &Operand : MD->operands()) {
+    const auto *Name = dyn_cast<MDString>(Operand);
+    if (!Name || Name->getString().empty())
+      report_fatal_error("expected !goobj.keep entries to be symbol names");
+    Result.push_back(Name->getString().str());
+  }
+  return Result;
+}
+
 /// EmitGlobalVariable - Emit the specified global variable to the .s file.
 void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
   bool IsEmuTLSVar = TM.useEmulatedTLS() && GV->isThreadLocal();
@@ -910,6 +959,23 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
     if (std::optional<std::pair<uint8_t, uint8_t>> Flags =
             getGoObjSymbolFlagsMetadata(GV))
       OutContext.setGoObjSymbolFlags(GVSym, Flags->first, Flags->second);
+    if (std::optional<std::vector<MCContext::GoObjRelocOverride>> Relocs =
+            getGoObjRelocsMetadata(GV))
+      OutContext.setGoObjRelocOverrides(GVSym, std::move(*Relocs));
+    if (std::optional<std::vector<std::string>> Keep =
+            getGoObjKeepMetadata(GV)) {
+      std::vector<const MCSymbol *> Targets;
+      Targets.reserve(Keep->size());
+      for (const std::string &Name : *Keep) {
+        const auto *Target =
+            dyn_cast_or_null<GlobalValue>(GV->getParent()->getNamedValue(Name));
+        if (!Target)
+          report_fatal_error(Twine("!goobj.keep target is not an LLVM global: ") +
+                             Name);
+        Targets.push_back(getSymbol(Target));
+      }
+      OutContext.setGoObjKeepTargets(GVSym, std::move(Targets));
+    }
   }
 
   // getOrCreateEmuTLSControlSym only creates the symbol with name and default

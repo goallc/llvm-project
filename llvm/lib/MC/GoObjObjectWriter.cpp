@@ -840,10 +840,41 @@ uint64_t GoObjObjectWriter::writeObject() {
       else
         RelocType = GoObj::R_ADDROFF;
     }
+    if (Source.Symbol) {
+      if (const auto *Overrides =
+              Asm->getContext().getGoObjRelocOverrides(Source.Symbol)) {
+        auto It = std::lower_bound(
+            Overrides->begin(), Overrides->end(),
+            static_cast<uint32_t>(LocalOffset),
+            [](const MCContext::GoObjRelocOverride &Override, uint32_t Offset) {
+              return Override.Offset < Offset;
+            });
+        if (It != Overrides->end() && It->Offset == LocalOffset)
+          RelocType = It->Type;
+      }
+    }
 
     Source.Relocations.push_back({static_cast<uint32_t>(LocalOffset),
                                   Reloc.Size, RelocType, Addend,
                                   TargetSymRef.PkgIdx, TargetSymRef.SymIdx});
+  }
+
+  // R_KEEP has no bytes or MC fixup. It is a Go linker reachability edge
+  // carried separately from normal LLVM relocations by !goobj.keep.
+  for (GoObjSymbol &Source : Symbols) {
+    if (!Source.Symbol)
+      continue;
+    const auto *Targets = Asm->getContext().getGoObjKeepTargets(Source.Symbol);
+    if (!Targets)
+      continue;
+    for (const MCSymbol *Target : *Targets) {
+      GoObjRelocationEntry Reloc;
+      Reloc.Symbol = Target;
+      int64_t Addend = 0;
+      GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
+      Source.Relocations.push_back({0, 0, GoObj::R_KEEP, Addend,
+                                    TargetSymRef.PkgIdx, TargetSymRef.SymIdx});
+    }
   }
 
   for (GoObjSymbol &Symbol : Symbols) {

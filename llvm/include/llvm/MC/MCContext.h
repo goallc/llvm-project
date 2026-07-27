@@ -105,6 +105,11 @@ public:
     int32_t Value;
   };
 
+  struct GoObjRelocOverride {
+    uint32_t Offset;
+    uint16_t Type;
+  };
+
 private:
   Environment Env;
 
@@ -174,6 +179,14 @@ private:
 
   /// Go object symbol flags keyed by MC symbol.
   DenseMap<const MCSymbol *, std::pair<uint8_t, uint8_t>> GoObjSymbolFlags;
+
+  /// Go object data-relocation type overrides keyed by MC symbol. LLVM IR
+  /// constants describe an address but not Go's weak-address variants.
+  DenseMap<const MCSymbol *, std::vector<GoObjRelocOverride>>
+      GoObjRelocOverrides;
+
+  /// Go object zero-width R_KEEP targets keyed by their source symbol.
+  DenseMap<const MCSymbol *, std::vector<const MCSymbol *>> GoObjKeepTargets;
 
   /// Go object pcsp entries keyed by MC symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjPCSPEntry>>
@@ -594,6 +607,32 @@ public:
     if (It == GoObjSymbolFlags.end())
       return std::nullopt;
     return It->second;
+  }
+
+  void setGoObjRelocOverrides(const MCSymbol *Sym,
+                              std::vector<GoObjRelocOverride> Overrides) {
+    GoObjRelocOverrides[Sym] = std::move(Overrides);
+  }
+
+  const std::vector<GoObjRelocOverride> *
+  getGoObjRelocOverrides(const MCSymbol *Sym) const {
+    auto It = GoObjRelocOverrides.find(Sym);
+    if (It == GoObjRelocOverrides.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void setGoObjKeepTargets(const MCSymbol *Sym,
+                           std::vector<const MCSymbol *> Targets) {
+    GoObjKeepTargets[Sym] = std::move(Targets);
+  }
+
+  const std::vector<const MCSymbol *> *
+  getGoObjKeepTargets(const MCSymbol *Sym) const {
+    auto It = GoObjKeepTargets.find(Sym);
+    if (It == GoObjKeepTargets.end())
+      return nullptr;
+    return &It->second;
   }
 
   void setGoObjSymbolPCSPEntries(const MCSymbol *Sym,

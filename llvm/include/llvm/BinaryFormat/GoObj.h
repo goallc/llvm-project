@@ -206,6 +206,10 @@ enum RelocType : uint16_t {
   R_ARM64_LDST32 = 43,
   R_ARM64_LDST64 = 44,
   R_ARM64_LDST128 = 45,
+
+  R_WEAK = 1u << 15,
+  R_WEAKADDR = R_WEAK | R_ADDR,
+  R_WEAKADDROFF = R_WEAK | R_ADDROFF,
 };
 
 } // end namespace GoObj
