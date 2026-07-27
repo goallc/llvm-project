@@ -70,6 +70,89 @@ static codegen::RegisterCodeGenFlags CGF;
 static codegen::RegisterMTuneFlag MTF;
 static codegen::RegisterSaveStatsFlag SSF;
 
+static Expected<std::string> getGoObjConfigField(const MDNode &Node,
+                                                 unsigned Index) {
+  if (const auto *Value = dyn_cast<MDString>(Node.getOperand(Index)))
+    return Value->getString().str();
+  return createStringError(inconvertibleErrorCode(),
+                           "!goobj.config field %u must be a string", Index);
+}
+
+// Read the Go frontend's self-describing GoObj configuration before object
+// emission constructs its writer. This is deliberately driver plumbing rather
+// than a normal optimization pass: the writer configuration is required while
+// the code-generation pipeline is being assembled.
+static Error configureGoObjFromModule(const Module &M) {
+  const NamedMDNode *Named = M.getNamedMetadata("goobj.config");
+  if (!Named)
+    return Error::success();
+  if (Named->getNumOperands() != 1)
+    return createStringError(inconvertibleErrorCode(),
+                             "!goobj.config must contain one operand");
+
+  const MDNode &Node = *Named->getOperand(0);
+  if (Node.getNumOperands() != 11)
+    return createStringError(inconvertibleErrorCode(),
+                             "!goobj.config must contain eleven fields");
+
+  SmallVector<std::string, 10> Fields;
+  for (unsigned I = 0; I != 10; ++I) {
+    Expected<std::string> Field = getGoObjConfigField(Node, I);
+    if (!Field)
+      return Field.takeError();
+    Fields.push_back(std::move(*Field));
+  }
+  const auto *ExperimentNode = dyn_cast<MDNode>(Node.getOperand(10));
+  if (!ExperimentNode)
+    return createStringError(inconvertibleErrorCode(),
+                             "!goobj.config experiments must be a metadata node");
+  SmallVector<std::string, 8> Experiments;
+  for (const MDOperand &Operand : ExperimentNode->operands()) {
+    const auto *Experiment = dyn_cast<MDString>(Operand.get());
+    if (!Experiment)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "!goobj.config experiment entries must be strings");
+    Experiments.push_back(Experiment->getString().str());
+  }
+
+  if (Fields[0] != "goallc.goobj")
+    return createStringError(inconvertibleErrorCode(),
+                             "unsupported !goobj.config schema %s",
+                             Fields[0].c_str());
+  if (Fields[1].empty() || Fields[2].empty() || Fields[3].empty())
+    return createStringError(inconvertibleErrorCode(),
+                             "!goobj.config GOOS, GOARCH, and version must be set");
+  if (Fields[7].empty())
+    return createStringError(inconvertibleErrorCode(),
+                             "!goobj.config package path is empty");
+  if ((Fields[4].empty()) != (Fields[5].empty()))
+    return createStringError(
+        inconvertibleErrorCode(),
+        "!goobj.config GOARCH setting key and value must be both present or absent");
+  if ((Fields[8] != "0" && Fields[8] != "1") ||
+      (Fields[9] != "0" && Fields[9] != "1"))
+    return createStringError(inconvertibleErrorCode(),
+                             "!goobj.config main and shared flags must be 0 or 1");
+  if (!Triple(M.getTargetTriple()).isOSBinFormatGoObj())
+    return createStringError(inconvertibleErrorCode(),
+                             "!goobj.config requires a GoObj target triple");
+
+  codegen::GoObjConfig Config;
+  Config.GOOS = std::move(Fields[1]);
+  Config.GOARCH = std::move(Fields[2]);
+  Config.Version = std::move(Fields[3]);
+  Config.GOARCHSettingKey = std::move(Fields[4]);
+  Config.GOARCHSettingValue = std::move(Fields[5]);
+  Config.BuildID = std::move(Fields[6]);
+  Config.PackagePath = std::move(Fields[7]);
+  Config.IsMain = Fields[8] == "1";
+  Config.IsShared = Fields[9] == "1";
+  Config.Experiments.assign(Experiments.begin(), Experiments.end());
+  codegen::setGoObjConfig(std::move(Config));
+  return Error::success();
+}
+
 // General options for llc.  Other pass-specific options are specified
 // within the corresponding llc passes, and target-specific options
 // and back-end code generation options are specified with the target machine.
@@ -677,6 +760,8 @@ static int compileModule(char **argv, SmallVectorImpl<PassPlugin> &PluginList,
   }
   if (!TargetTriple.empty())
     M->setTargetTriple(Triple(Triple::normalize(TargetTriple)));
+  if (Error E = configureGoObjFromModule(*M))
+    reportError(std::move(E), InputFilename);
 
   std::optional<CodeModel::Model> CM_IR = M->getCodeModel();
   if (!CM && CM_IR)

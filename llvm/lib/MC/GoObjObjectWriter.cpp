@@ -370,33 +370,38 @@ StringRef getGoArch(const Triple &TT) {
 
 void writeGoObjectTextHeader(raw_ostream &OS, const Triple &TT,
                              const MCGoObjObjectWriterConfig &Config) {
-  OS << "go object " << getGoOS(TT) << ' ' << getGoArch(TT) << ' '
-     << Config.Version;
+  StringRef GOOS = Config.GOOS.empty() ? getGoOS(TT) : Config.GOOS;
+  StringRef GOARCH = Config.GOARCH.empty() ? getGoArch(TT) : Config.GOARCH;
+  OS << "go object " << GOOS << ' ' << GOARCH << ' ' << Config.Version;
 
-  switch (TT.getArch()) {
-  case Triple::x86:
-    OS << " GO386=sse2";
-    break;
-  case Triple::x86_64:
-    OS << " GOAMD64=v1";
-    break;
-  case Triple::arm:
-  case Triple::armeb:
-    OS << " GOARM=7";
-    break;
-  case Triple::aarch64:
-  case Triple::aarch64_be:
-    OS << " GOARM64=v8.0";
-    break;
-  case Triple::ppc64:
-  case Triple::ppc64le:
-    OS << " GOPPC64=power8";
-    break;
-  case Triple::riscv64:
-    OS << " GORISCV64=rva20u64";
-    break;
-  default:
-    break;
+  if (!Config.GOARCHSettingKey.empty()) {
+    OS << ' ' << Config.GOARCHSettingKey << '=' << Config.GOARCHSettingValue;
+  } else {
+    switch (TT.getArch()) {
+    case Triple::x86:
+      OS << " GO386=sse2";
+      break;
+    case Triple::x86_64:
+      OS << " GOAMD64=v1";
+      break;
+    case Triple::arm:
+    case Triple::armeb:
+      OS << " GOARM=7";
+      break;
+    case Triple::aarch64:
+    case Triple::aarch64_be:
+      OS << " GOARM64=v8.0";
+      break;
+    case Triple::ppc64:
+    case Triple::ppc64le:
+      OS << " GOPPC64=power8";
+      break;
+    case Triple::riscv64:
+      OS << " GORISCV64=rva20u64";
+      break;
+    default:
+      break;
+    }
   }
 
   OS << " X:";
@@ -406,6 +411,11 @@ void writeGoObjectTextHeader(raw_ostream &OS, const Triple &TT,
     OS << Config.Experiments[I];
   }
   OS << '\n';
+
+  if (!Config.BuildID.empty())
+    OS << "build id \"" << Config.BuildID << "\"\n";
+  if (Config.IsMain)
+    OS << "main\n";
 
   if (Config.SourceKind == GoObj::SourceKind::Compiler)
     OS << '\n';

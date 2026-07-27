@@ -16,6 +16,7 @@
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/BasicTTIImpl.h"
+#include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
@@ -237,18 +238,32 @@ CodeGenTargetMachineImpl::createMCStreamer(raw_pwrite_stream &Out,
     } else if (T.isOSBinFormatGoObj()) {
       MCGoObjObjectWriterConfig Config;
       Config.SourceKind = GoObj::SourceKind::Compiler;
-      Config.PackagePath = GoObjPackagePath;
-      if (!GoObjVersion.empty())
-        Config.Version = GoObjVersion;
-      if (!GoObjExperiments.empty()) {
-        Config.Experiments.clear();
-        SmallVector<StringRef, 8> Experiments;
-        StringRef(GoObjExperiments)
-            .split(Experiments, ',', -1, /*KeepEmpty=*/false);
-        for (StringRef Experiment : Experiments)
-          Config.Experiments.push_back(Experiment.str());
+      if (std::optional<codegen::GoObjConfig> IRConfig =
+              codegen::getGoObjConfig()) {
+        Config.GOOS = std::move(IRConfig->GOOS);
+        Config.GOARCH = std::move(IRConfig->GOARCH);
+        Config.GOARCHSettingKey = std::move(IRConfig->GOARCHSettingKey);
+        Config.GOARCHSettingValue = std::move(IRConfig->GOARCHSettingValue);
+        Config.Version = std::move(IRConfig->Version);
+        Config.BuildID = std::move(IRConfig->BuildID);
+        Config.PackagePath = std::move(IRConfig->PackagePath);
+        Config.Experiments = std::move(IRConfig->Experiments);
+        Config.IsMain = IRConfig->IsMain;
+        Config.IsShared = IRConfig->IsShared;
+      } else {
+        Config.PackagePath = GoObjPackagePath;
+        if (!GoObjVersion.empty())
+          Config.Version = GoObjVersion;
+        if (!GoObjExperiments.empty()) {
+          Config.Experiments.clear();
+          SmallVector<StringRef, 8> Experiments;
+          StringRef(GoObjExperiments)
+              .split(Experiments, ',', -1, /*KeepEmpty=*/false);
+          for (StringRef Experiment : Experiments)
+            Config.Experiments.push_back(Experiment.str());
+        }
+        Config.IsShared = GoObjShared;
       }
-      Config.IsShared = GoObjShared;
       OW = createGoObjObjectWriter(
           cast<MCGoObjObjectTargetWriter>(MAB->createObjectTargetWriter()), Out,
           std::move(Config));

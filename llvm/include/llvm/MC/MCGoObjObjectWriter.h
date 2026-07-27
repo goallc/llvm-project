@@ -31,8 +31,14 @@ struct MCGoObjObjectWriterConfig {
   std::vector<std::string> Experiments = {"regabiwrappers", "regabiargs",
                                           "dwarf5", "greenteagc",
                                           "randomizedheapbase64"};
+  std::string GOOS;
+  std::string GOARCH;
+  std::string GOARCHSettingKey;
+  std::string GOARCHSettingValue;
+  std::string BuildID;
   std::string PackagePath;
   std::array<uint8_t, GoObj::FingerprintSize> Fingerprint = {};
+  bool IsMain = false;
   bool IsShared = false;
   bool IsStd = false;
   bool IsUnlinkable = false;
