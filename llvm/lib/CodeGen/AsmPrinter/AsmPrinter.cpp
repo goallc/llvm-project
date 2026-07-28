@@ -922,9 +922,17 @@ getGoObjRelocsMetadata(const GlobalObject *GO) {
   llvm::sort(Result, [](const auto &LHS, const auto &RHS) {
     return LHS.Offset < RHS.Offset;
   });
-  for (size_t I = 1; I < Result.size(); ++I)
-    if (Result[I - 1].Offset == Result[I].Offset)
-      report_fatal_error("duplicate !goobj.relocs offset");
+  auto NewEnd = std::unique(
+      Result.begin(), Result.end(), [](const auto &LHS, const auto &RHS) {
+        if (LHS.Offset != RHS.Offset)
+          return false;
+        if (LHS.Type != RHS.Type)
+          report_fatal_error("conflicting LLVM GoObj relocation semantics");
+        return true;
+      });
+  Result.erase(NewEnd, Result.end());
+  if (Result.empty())
+    return std::nullopt;
   return Result;
 }
 

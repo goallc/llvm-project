@@ -23,14 +23,27 @@ entry:
   ret i64 %sum1
 }
 
+define goabiinternal i64 @big_closure_frame(i64 %x, ptr nest %ctxt) {
+entry:
+  %buf = alloca [5000 x i8], align 16
+  %slot = getelementptr inbounds [5000 x i8], ptr %buf, i64 0, i64 4999
+  store volatile i8 1, ptr %slot, align 1
+  %capture = load i64, ptr %ctxt, align 8
+  %sum = add i64 %capture, %x
+  ret i64 %sum
+}
+
 ; CHECK: symdef {{[0-9]+}}: big_frame abi=1 type=1 size={{[0-9]+}}
+; CHECK: symdef {{[0-9]+}}: big_closure_frame abi=1 type=1 size={{[0-9]+}}
 ; CHECK: nonpkgref {{[0-9]+}}: runtime.morestack_noctxt abi=0 type=0 size=0
+; CHECK: nonpkgref {{[0-9]+}}: runtime.morestack abi=0 type=0 size=0
 ; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=funcinfo target= args={{[1-9][0-9]*}} locals={{[1-9][0-9][0-9][0-9][0-9]*}}
 ; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000
 ; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000
 ; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc=[0-
 ; CHECK-SAME: :0
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.morestack_noctxt
+; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.morestack
 
 ; MIR-LABEL: name: big_frame
 ; MIR: fixedStack:
@@ -42,3 +55,6 @@ entry:
 ; PEI: MOV64mr {{.*rsp}}, 1, {{.*noreg}}, 8, {{.*noreg}}, {{.*rax}}
 ; PEI: CALL64pcrel32 &runtime.morestack_noctxt
 ; PEI: {{.*rax}} = MOV64rm {{.*rsp}}, 1, {{.*noreg}}, 8, {{.*noreg}}
+
+; PEI-LABEL: name: big_closure_frame
+; PEI: CALL64pcrel32 &runtime.morestack, {{.*}}implicit $rdx
