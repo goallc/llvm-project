@@ -238,6 +238,7 @@
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
+#include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
@@ -1248,6 +1249,35 @@ static bool hasAArch64GoClosureContext(const Function &F) {
   return false;
 }
 
+static MachineInstrBuilder buildAArch64GoStackGrowthStatepoint(
+    MachineFunction &MF, MachineBasicBlock &MBB, const DebugLoc &DL,
+    const AArch64InstrInfo &TII, const char *Callee) {
+  MachineInstrBuilder Statepoint =
+      BuildMI(&MBB, DL, TII.get(TargetOpcode::STATEPOINT))
+          .addImm(goabi::StackGrowthStatepointID)
+          .addImm(0)
+          .addImm(0)
+          .addExternalSymbol(Callee);
+  auto AddConstant = [&](uint64_t Value) {
+    Statepoint.addImm(StackMaps::ConstantOp).addImm(Value);
+  };
+  AddConstant(MF.getFunction().getCallingConv());
+  AddConstant(0); // Statepoint flags.
+  AddConstant(0); // Deopt arguments.
+  AddConstant(0); // GC pointers.
+  AddConstant(0); // GC allocas.
+  AddConstant(0); // GC base/derived map entries.
+  Statepoint
+      .addRegMask(
+          MF.getSubtarget<AArch64Subtarget>()
+              .getRegisterInfo()
+              ->getCallPreservedMask(MF, MF.getFunction().getCallingConv()))
+      .addReg(AArch64::SP, RegState::ImplicitDefine)
+      .addReg(AArch64::LR, RegState::ImplicitDefine | RegState::Dead |
+                               RegState::EarlyClobber);
+  return Statepoint;
+}
+
 static MachineBasicBlock &
 getAArch64GoStackCheckEntryMBB(MachineFunction &MF,
                                MachineBasicBlock &FallbackMBB) {
@@ -1339,11 +1369,15 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
   MF.push_front(MorestackMBB);
   MF.push_front(CheckMBB);
 
-  MCSymbol *StackMapReset =
-      MF.getContext().createTempSymbol("goobj_stackmap_reset");
-  BuildMI(MorestackMBB, DL, TII.get(TargetOpcode::ANNOTATION_LABEL))
-      .addSym(StackMapReset);
-  MF.getContext().addGoObjStackMapResetLabel(StackMapReset);
+  bool UseStackGrowthStatepoint =
+      MF.getFunction().hasFnAttribute(goabi::StackGrowthStatepointAttr);
+  if (!UseStackGrowthStatepoint)
+    for (const MachineBasicBlock &MBB : MF)
+      for (const MachineInstr &MI : MBB)
+        if (MI.getOpcode() == TargetOpcode::STATEPOINT)
+          report_fatal_error(
+              "GoObj statepoints require the go-stack-growth-statepoint "
+              "function attribute");
 
   Register ScratchReg = AArch64::SP;
   if (StackSize > GoStackSmall) {
@@ -1370,11 +1404,14 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
   BuildMI(MorestackMBB, DL, TII.get(TargetOpcode::COPY), AArch64::X3)
       .addReg(AArch64::LR);
   bool HasClosureContext = hasAArch64GoClosureContext(MF.getFunction());
+  const char *MorestackName =
+      HasClosureContext ? "runtime.morestack" : "runtime.morestack_noctxt";
   MachineInstrBuilder Morestack =
-      BuildMI(MorestackMBB, DL, TII.get(AArch64::BL))
-          .addExternalSymbol(HasClosureContext ? "runtime.morestack"
-                                               : "runtime.morestack_noctxt")
-          .addReg(AArch64::X3, RegState::Implicit);
+      UseStackGrowthStatepoint ? buildAArch64GoStackGrowthStatepoint(
+                                     MF, *MorestackMBB, DL, TII, MorestackName)
+                               : BuildMI(MorestackMBB, DL, TII.get(AArch64::BL))
+                                     .addExternalSymbol(MorestackName);
+  Morestack.addReg(AArch64::X3, RegState::Implicit);
   if (HasClosureContext)
     Morestack.addReg(AArch64::X26, RegState::Implicit);
   emitAArch64GoRegSpills(MF, *MorestackMBB, AFI->getGoRegArgSpillSlots(),

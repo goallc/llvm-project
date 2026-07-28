@@ -52,7 +52,6 @@ entry:
 ; ASM: str x30, [sp]
 ; ASM: bl runtime.GC
 ; ASM: [[CALLS_MORESTACK]]:
-; ASM-NEXT: .Lgoobj_stackmap_reset0:
 ; ASM: mov x3, x30
 ; ASM: bl runtime.morestack_noctxt
 
@@ -61,7 +60,6 @@ entry:
 ; ASM: cmp x16, x17
 ; ASM: b.ls [[LARGE_MORESTACK:.LBB[0-9_]+]]
 ; ASM: [[LARGE_MORESTACK]]:
-; ASM-NEXT: .Lgoobj_stackmap_reset1:
 ; ASM: mov x3, x30
 ; ASM: str x0, [sp, #8]
 ; ASM: bl runtime.morestack_noctxt
@@ -71,7 +69,6 @@ entry:
 ; ASM: sub x16, sp, #{{[0-9]+}}
 ; ASM: b.ls [[CLOSURE_MORESTACK:.LBB[0-9_]+]]
 ; ASM: [[CLOSURE_MORESTACK]]:
-; ASM-NEXT: .Lgoobj_stackmap_reset2:
 ; ASM: mov x3, x30
 ; ASM: bl runtime.morestack
 
