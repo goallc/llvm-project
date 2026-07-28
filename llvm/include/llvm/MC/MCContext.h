@@ -105,6 +105,17 @@ public:
     int32_t Value;
   };
 
+  struct GoObjRelocOverride {
+    uint32_t Offset;
+    uint16_t Type;
+  };
+
+  struct GoObjMarkerReloc {
+    const MCSymbol *Target = nullptr;
+    uint16_t Type = 0;
+    int64_t Addend = 0;
+  };
+
 private:
   Environment Env;
 
@@ -174,6 +185,30 @@ private:
 
   /// Go object symbol flags keyed by MC symbol.
   DenseMap<const MCSymbol *, std::pair<uint8_t, uint8_t>> GoObjSymbolFlags;
+
+  /// Go object data-relocation type overrides keyed by MC symbol. LLVM IR
+  /// constants describe an address but not Go's weak-address variants.
+  DenseMap<const MCSymbol *, std::vector<GoObjRelocOverride>>
+      GoObjRelocOverrides;
+
+  /// Go object data relocations whose inferred relocation kind is weak.
+  DenseMap<const MCSymbol *, std::vector<uint32_t>> GoObjWeakRelocs;
+
+  /// Go object zero-width R_KEEP targets keyed by their source symbol.
+  DenseMap<const MCSymbol *, std::vector<const MCSymbol *>> GoObjKeepTargets;
+
+  /// Go object zero-width linker marker relocations keyed by source function.
+  DenseMap<const MCSymbol *, std::vector<GoObjMarkerReloc>>
+      GoObjMarkerRelocs;
+
+  /// Explicit LLVM global alignments for Go object data symbols.
+  DenseMap<const MCSymbol *, uint32_t> GoObjSymbolAlignments;
+
+  /// Exact LLVM global sizes for Go object data symbols.
+  DenseMap<const MCSymbol *, uint64_t> GoObjSymbolSizes;
+
+  /// Go type auxiliary targets for data symbols.
+  DenseMap<const MCSymbol *, const MCSymbol *> GoObjGotypeTargets;
 
   /// Go object pcsp entries keyed by MC symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjPCSPEntry>>
@@ -593,6 +628,92 @@ public:
     auto It = GoObjSymbolFlags.find(Sym);
     if (It == GoObjSymbolFlags.end())
       return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjRelocOverrides(const MCSymbol *Sym,
+                              std::vector<GoObjRelocOverride> Overrides) {
+    GoObjRelocOverrides[Sym] = std::move(Overrides);
+  }
+
+  const std::vector<GoObjRelocOverride> *
+  getGoObjRelocOverrides(const MCSymbol *Sym) const {
+    auto It = GoObjRelocOverrides.find(Sym);
+    if (It == GoObjRelocOverrides.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void setGoObjWeakRelocs(const MCSymbol *Sym,
+                          std::vector<uint32_t> Offsets) {
+    GoObjWeakRelocs[Sym] = std::move(Offsets);
+  }
+
+  const std::vector<uint32_t> *
+  getGoObjWeakRelocs(const MCSymbol *Sym) const {
+    auto It = GoObjWeakRelocs.find(Sym);
+    if (It == GoObjWeakRelocs.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void setGoObjKeepTargets(const MCSymbol *Sym,
+                           std::vector<const MCSymbol *> Targets) {
+    GoObjKeepTargets[Sym] = std::move(Targets);
+  }
+
+  const std::vector<const MCSymbol *> *
+  getGoObjKeepTargets(const MCSymbol *Sym) const {
+    auto It = GoObjKeepTargets.find(Sym);
+    if (It == GoObjKeepTargets.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void setGoObjMarkerRelocs(const MCSymbol *Sym,
+                            std::vector<GoObjMarkerReloc> Relocs) {
+    GoObjMarkerRelocs[Sym] = std::move(Relocs);
+  }
+
+  const std::vector<GoObjMarkerReloc> *
+  getGoObjMarkerRelocs(const MCSymbol *Sym) const {
+    auto It = GoObjMarkerRelocs.find(Sym);
+    if (It == GoObjMarkerRelocs.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void setGoObjSymbolAlignment(const MCSymbol *Sym, uint32_t Alignment) {
+    GoObjSymbolAlignments[Sym] = Alignment;
+  }
+
+  std::optional<uint32_t>
+  getGoObjSymbolAlignment(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolAlignments.find(Sym);
+    if (It == GoObjSymbolAlignments.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjSymbolSize(const MCSymbol *Sym, uint64_t Size) {
+    GoObjSymbolSizes[Sym] = Size;
+  }
+
+  std::optional<uint64_t> getGoObjSymbolSize(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolSizes.find(Sym);
+    if (It == GoObjSymbolSizes.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjGotypeTarget(const MCSymbol *Sym, const MCSymbol *Target) {
+    GoObjGotypeTargets[Sym] = Target;
+  }
+
+  const MCSymbol *getGoObjGotypeTarget(const MCSymbol *Sym) const {
+    auto It = GoObjGotypeTargets.find(Sym);
+    if (It == GoObjGotypeTargets.end())
+      return nullptr;
     return It->second;
   }
 

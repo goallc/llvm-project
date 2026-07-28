@@ -44,6 +44,11 @@ int64_t MCGoObjObjectTargetWriter::getRelocAddend(const MCValue &Target,
 
 namespace {
 
+struct GoObjSymRef {
+  uint32_t PkgIdx = GoObj::PkgIdxInvalid;
+  uint32_t SymIdx = 0;
+};
+
 struct GoObjSymbol {
   struct Relocation {
     uint32_t Offset = 0;
@@ -55,8 +60,14 @@ struct GoObjSymbol {
   };
 
   struct Auxiliary {
-    uint8_t Type = 0;
+    Auxiliary(uint8_t Type, uint32_t TargetSymbolIndex)
+        : Type(Type), TargetSymbolIndex(TargetSymbolIndex) {}
+    Auxiliary(uint8_t Type, GoObjSymRef DirectTarget)
+        : Type(Type), DirectTarget(DirectTarget) {}
+
+    uint8_t Type;
     uint32_t TargetSymbolIndex = 0;
+    std::optional<GoObjSymRef> DirectTarget;
   };
 
   std::string Name;
@@ -74,11 +85,6 @@ struct GoObjSymbol {
   SmallString<0> Data;
   std::vector<Relocation> Relocations;
   std::vector<Auxiliary> Auxiliaries;
-};
-
-struct GoObjSymRef {
-  uint32_t PkgIdx = GoObj::PkgIdxInvalid;
-  uint32_t SymIdx = 0;
 };
 
 struct GoObjPCTabEntry {
@@ -146,7 +152,7 @@ void addDefinedSymbol(std::vector<GoObjSymbol> &Symbols, const MCSymbol *MCSym,
                       uint64_t SectionEnd,
                       GoObj::DefinedSymbolBlock DefinedBlock, StringRef Name,
                       uint8_t Type, uint8_t Flag, uint8_t Flag2, uint16_t ABI,
-                      uint64_t Size, ArrayRef<char> Data) {
+                      uint64_t Size, uint32_t Align, ArrayRef<char> Data) {
   GoObjSymbol Sym;
   Sym.Name = Name.str();
   Sym.Symbol = MCSym;
@@ -159,6 +165,7 @@ void addDefinedSymbol(std::vector<GoObjSymbol> &Symbols, const MCSymbol *MCSym,
   Sym.Flag2 = Flag2;
   Sym.ABI = ABI;
   Sym.Size = Size;
+  Sym.Align = Align;
   Sym.Data.append(Data.begin(), Data.end());
   Symbols.push_back(std::move(Sym));
 }
@@ -508,7 +515,8 @@ uint64_t GoObjObjectWriter::writeObject() {
     std::vector<SectionSymbol> SectionSymbols;
     for (const MCSymbol &Symbol : Asm->symbols()) {
       if (Symbol.isTemporary() || !Symbol.isInSection() ||
-          &Symbol.getSection() != &Section)
+          &Symbol.getSection() != &Section ||
+          &Symbol == Section.getBeginSymbol())
         continue;
       uint64_t Offset = Asm->getSymbolOffset(Symbol);
       if (Offset > SectionSize)
@@ -537,16 +545,19 @@ uint64_t GoObjObjectWriter::writeObject() {
                          : GoObj::SymABI0;
       uint8_t Flag = 0;
       uint8_t Flag2 = 0;
+      uint32_t Align = 0;
       if (MCSym) {
         if (std::optional<std::pair<uint8_t, uint8_t>> Flags =
                 Asm->getContext().getGoObjSymbolFlags(MCSym)) {
           Flag = Flags->first;
           Flag2 = Flags->second;
         }
+        Align =
+            Asm->getContext().getGoObjSymbolAlignment(MCSym).value_or(0);
       }
       addDefinedSymbol(Symbols, MCSym, &Section, Begin, End,
                        Config.DefaultDefinedSymbolBlock, Name, Type, Flag,
-                       Flag2, ABI, Size, Data);
+                       Flag2, ABI, Size, Align, Data);
     };
 
     if (SectionSymbols.empty()) {
@@ -554,13 +565,24 @@ uint64_t GoObjObjectWriter::writeObject() {
       continue;
     }
 
-    if (SectionSymbols.front().Offset != 0)
-      AddSectionSymbol(nullptr, Section.getName(), 0,
-                       SectionSymbols.front().Offset);
-
     for (size_t I = 0, E = SectionSymbols.size(); I != E; ++I) {
       uint64_t Begin = SectionSymbols[I].Offset;
-      uint64_t End = I + 1 == E ? SectionSize : SectionSymbols[I + 1].Offset;
+      uint64_t End = SectionSize;
+      for (size_t J = I + 1; J != E; ++J) {
+        if (SectionSymbols[J].Offset > Begin) {
+          End = SectionSymbols[J].Offset;
+          break;
+        }
+      }
+      if (std::optional<uint64_t> ExactSize =
+              Asm->getContext().getGoObjSymbolSize(
+                  SectionSymbols[I].Symbol)) {
+        if (*ExactSize > SectionSize - Begin ||
+            Begin + *ExactSize > End)
+          report_fatal_error(
+              "GoObj global size overlaps the next section symbol");
+        End = Begin + *ExactSize;
+      }
       AddSectionSymbol(SectionSymbols[I].Symbol,
                        SectionSymbols[I].Symbol->getName(), Begin, End);
     }
@@ -840,10 +862,80 @@ uint64_t GoObjObjectWriter::writeObject() {
       else
         RelocType = GoObj::R_ADDROFF;
     }
+    if (Source.Symbol) {
+      if (const auto *Overrides =
+              Asm->getContext().getGoObjRelocOverrides(Source.Symbol)) {
+        auto It = std::lower_bound(
+            Overrides->begin(), Overrides->end(),
+            static_cast<uint32_t>(LocalOffset),
+            [](const MCContext::GoObjRelocOverride &Override, uint32_t Offset) {
+              return Override.Offset < Offset;
+            });
+        if (It != Overrides->end() && It->Offset == LocalOffset)
+          RelocType = It->Type;
+      }
+      if (const auto *WeakRelocs =
+              Asm->getContext().getGoObjWeakRelocs(Source.Symbol);
+          WeakRelocs &&
+          std::binary_search(WeakRelocs->begin(), WeakRelocs->end(),
+                             static_cast<uint32_t>(LocalOffset)))
+        RelocType |= GoObj::R_WEAK;
+    }
 
     Source.Relocations.push_back({static_cast<uint32_t>(LocalOffset),
                                   Reloc.Size, RelocType, Addend,
                                   TargetSymRef.PkgIdx, TargetSymRef.SymIdx});
+  }
+
+  // R_KEEP has no bytes or MC fixup. It is a Go linker reachability edge
+  // carried separately from normal LLVM relocations by !goobj.keep.
+  for (GoObjSymbol &Source : Symbols) {
+    if (!Source.Symbol)
+      continue;
+    const auto *Targets = Asm->getContext().getGoObjKeepTargets(Source.Symbol);
+    if (!Targets)
+      continue;
+    for (const MCSymbol *Target : *Targets) {
+      GoObjRelocationEntry Reloc;
+      Reloc.Symbol = Target;
+      int64_t Addend = 0;
+      GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
+      Source.Relocations.push_back({0, 0, GoObj::R_KEEP, Addend,
+                                    TargetSymRef.PkgIdx, TargetSymRef.SymIdx});
+    }
+  }
+
+  for (GoObjSymbol &Source : Symbols) {
+    if (!Source.Symbol)
+      continue;
+    const auto *Markers =
+        Asm->getContext().getGoObjMarkerRelocs(Source.Symbol);
+    if (!Markers)
+      continue;
+    for (const MCContext::GoObjMarkerReloc &Marker : *Markers) {
+      GoObjRelocationEntry Reloc;
+      Reloc.Symbol = Marker.Target;
+      int64_t Addend = Marker.Addend;
+      GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
+      Source.Relocations.push_back(
+          {0, 0, Marker.Type, Addend, TargetSymRef.PkgIdx, TargetSymRef.SymIdx});
+    }
+  }
+
+  for (GoObjSymbol &Source : Symbols) {
+    if (!Source.Symbol)
+      continue;
+    const MCSymbol *Target =
+        Asm->getContext().getGoObjGotypeTarget(Source.Symbol);
+    if (!Target)
+      continue;
+    GoObjRelocationEntry Reloc;
+    Reloc.Symbol = Target;
+    int64_t Addend = 0;
+    GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
+    if (Addend != 0)
+      report_fatal_error("GoObj gotype auxiliary target has an addend");
+    Source.Auxiliaries.emplace_back(GoObj::AuxGotype, TargetSymRef);
   }
 
   for (GoObjSymbol &Symbol : Symbols) {
@@ -975,9 +1067,14 @@ uint64_t GoObjObjectWriter::writeObject() {
   for (uint32_t Index : DefinedSymbolOrder) {
     const GoObjSymbol &Symbol = Symbols[Index];
     for (const GoObjSymbol::Auxiliary &Aux : Symbol.Auxiliaries) {
-      if (Aux.TargetSymbolIndex >= DefinedSymRefs.size())
-        report_fatal_error("GoObj auxiliary target symbol index is invalid");
-      GoObjSymRef Ref = DefinedSymRefs[Aux.TargetSymbolIndex];
+      GoObjSymRef Ref;
+      if (Aux.DirectTarget) {
+        Ref = *Aux.DirectTarget;
+      } else {
+        if (Aux.TargetSymbolIndex >= DefinedSymRefs.size())
+          report_fatal_error("GoObj auxiliary target symbol index is invalid");
+        Ref = DefinedSymRefs[Aux.TargetSymbolIndex];
+      }
       W.write<uint8_t>(Aux.Type);
       W.write<uint32_t>(Ref.PkgIdx);
       W.write<uint32_t>(Ref.SymIdx);
