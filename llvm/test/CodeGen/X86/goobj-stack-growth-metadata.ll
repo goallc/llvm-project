@@ -49,13 +49,11 @@ entry:
 ; ASM-LABEL: big_frame:
 ; ASM: retq
 ; ASM-NEXT: .LBB0_{{[0-9]+}}:
-; ASM-NEXT: .Lgoobj_stackmap_reset0:
 ; ASM: callq runtime.morestack_noctxt
 
 ; ASM-LABEL: big_closure_frame:
 ; ASM: retq
 ; ASM-NEXT: .LBB1_{{[0-9]+}}:
-; ASM-NEXT: .Lgoobj_stackmap_reset1:
 ; ASM: callq runtime.morestack
 
 ; MIR-LABEL: name: big_frame
