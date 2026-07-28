@@ -1,5 +1,6 @@
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj < %s -o %t.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | FileCheck %s
+; RUN: llc -mtriple=x86_64-unknown-linux-goobj < %s | FileCheck %s --check-prefix=ASM
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -stop-after=finalize-isel < %s -o - | FileCheck %s --check-prefix=MIR
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -stop-after=prolog-epilog < %s -o - | FileCheck %s --check-prefix=PEI
 
@@ -44,6 +45,18 @@ entry:
 ; CHECK-SAME: :0
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.morestack_noctxt
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.morestack
+
+; ASM-LABEL: big_frame:
+; ASM: retq
+; ASM-NEXT: .LBB0_1:
+; ASM-NEXT: .Lgoobj_stackmap_reset0:
+; ASM: callq runtime.morestack_noctxt
+
+; ASM-LABEL: big_closure_frame:
+; ASM: retq
+; ASM-NEXT: .LBB1_1:
+; ASM-NEXT: .Lgoobj_stackmap_reset1:
+; ASM: callq runtime.morestack
 
 ; MIR-LABEL: name: big_frame
 ; MIR: fixedStack:

@@ -294,10 +294,10 @@ struct GoObjStatepointStackMaps {
 
 GoObjStatepointStackMaps makeStatepointStackMaps(
     const MCAssembler &Asm, const GoObjSymbol &Function, uint32_t StackSize,
-    uint32_t PCQuantum,
+    uint32_t PCQuantum, ArrayRef<const MCSymbol *> StackMapResetLabels,
     ArrayRef<MCContext::GoObjStackMapEntry> StackMapEntries) {
   struct ResolvedEntry {
-    uint64_t ReturnPC;
+    uint64_t CallsitePC;
     const MCContext::GoObjStackMapEntry *Entry;
   };
 
@@ -312,23 +312,22 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
     if (Entry.StackSize != StackSize)
       report_fatal_error(
           "GoObj statepoint stack size does not match function metadata");
-    int64_t ReturnPCValue;
-    if (!Entry.CallsiteOffsetExpr->evaluateAsAbsolute(ReturnPCValue, Asm) ||
-        ReturnPCValue < 0)
+    int64_t CallsitePCValue;
+    if (!Entry.CallsiteOffsetExpr->evaluateAsAbsolute(CallsitePCValue, Asm) ||
+        CallsitePCValue < 0)
       report_fatal_error("GoObj statepoint callsite offset is not absolute");
-    uint64_t ReturnPC = static_cast<uint64_t>(ReturnPCValue);
-    if (ReturnPC > Function.Size)
+    uint64_t CallsitePC = static_cast<uint64_t>(CallsitePCValue);
+    if (CallsitePC > Function.Size)
       report_fatal_error(
           "GoObj statepoint callsite is outside its function range");
-    if (ReturnPC < PCQuantum || ReturnPC % PCQuantum != 0)
-      report_fatal_error("GoObj statepoint callsite has invalid return PC");
-    ResolvedEntries.push_back({ReturnPC, &Entry});
+    if (CallsitePC % PCQuantum != 0)
+      report_fatal_error("GoObj statepoint callsite has invalid PC");
+    ResolvedEntries.push_back({CallsitePC, &Entry});
   }
   llvm::stable_sort(ResolvedEntries,
                     [](const ResolvedEntry &LHS, const ResolvedEntry &RHS) {
-                      return LHS.ReturnPC < RHS.ReturnPC;
+                      return LHS.CallsitePC < RHS.CallsitePC;
                     });
-
   uint32_t PointerSize = StackMapEntries.front().PointerSize;
   if (!PointerSize)
     report_fatal_error("GoObj statepoint has invalid pointer size");
@@ -344,12 +343,11 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
 
   SmallVector<SmallVector<uint8_t, 8>, 8> Bitmaps;
   SmallVector<GoObjPCTabEntry, 16> PCDataEntries;
-  std::optional<uint64_t> PreviousReturnPC;
+  std::optional<uint64_t> PreviousCallsitePC;
   for (const ResolvedEntry &Resolved : ResolvedEntries) {
-    if (PreviousReturnPC && *PreviousReturnPC == Resolved.ReturnPC)
-      report_fatal_error(
-          "GoObj statepoint callsites have duplicate return PCs");
-    PreviousReturnPC = Resolved.ReturnPC;
+    if (PreviousCallsitePC && *PreviousCallsitePC == Resolved.CallsitePC)
+      report_fatal_error("GoObj statepoint callsites have duplicate PCs");
+    PreviousCallsitePC = Resolved.CallsitePC;
     const MCContext::GoObjStackMapEntry &Entry = *Resolved.Entry;
     if (Entry.PointerSize != PointerSize)
       report_fatal_error(
@@ -397,12 +395,22 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
     if (MapIndex > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))
       report_fatal_error("GoObj stack map index exceeds int32 limit");
 
-    // STATEPOINT labels are emitted after the call. Go traceback asks for the
-    // map at returnPC-1, so cover the final target instruction quantum and
-    // restore the invalid index at the return PC.
-    uint64_t StartPC = Resolved.ReturnPC - PCQuantum;
-    PCDataEntries.push_back({StartPC, static_cast<int32_t>(MapIndex)});
-    PCDataEntries.push_back({Resolved.ReturnPC, -1});
+    // GoObj records statepoint callsites at the beginning of the CALL. The
+    // live-out map remains in effect until another call changes it or the
+    // stack-growth slow path starts after the normal return sequence.
+    PCDataEntries.push_back(
+        {Resolved.CallsitePC, static_cast<int32_t>(MapIndex)});
+  }
+
+  for (const MCSymbol *Label : StackMapResetLabels) {
+    if (!Label || !Label->isInSection() ||
+        &Label->getSection() != Function.Section)
+      continue;
+    uint64_t LabelOffset = Asm.getSymbolOffset(*Label);
+    if (LabelOffset < Function.SectionBegin ||
+        LabelOffset >= Function.SectionEnd)
+      continue;
+    PCDataEntries.push_back({LabelOffset - Function.SectionBegin, -1});
   }
 
   // Args and locals maps share PCDATA_StackMapIndex. Argument classification
@@ -410,6 +418,11 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   // number of entries as the locals map.
   SmallVector<SmallVector<uint8_t, 8>, 8> EmptyArgsMaps(Bitmaps.size());
   SmallVector<GoObjPCTabEntry, 16> NormalizedPCDataEntries;
+  llvm::stable_sort(PCDataEntries, [](const auto &LHS, const auto &RHS) {
+    if (LHS.PC != RHS.PC)
+      return LHS.PC < RHS.PC;
+    return LHS.Value < RHS.Value;
+  });
   for (const GoObjPCTabEntry &Entry : PCDataEntries) {
     if (!NormalizedPCDataEntries.empty() &&
         NormalizedPCDataEntries.back().PC == Entry.PC)
@@ -877,7 +890,8 @@ uint64_t GoObjObjectWriter::writeObject() {
               Symbols[I].Symbol)) {
         if (!Entries->empty()) {
           GoObjStatepointStackMaps Maps = makeStatepointStackMaps(
-              *Asm, Symbols[I], StackSize, PCQuantum, *Entries);
+              *Asm, Symbols[I], StackSize, PCQuantum,
+              Asm->getContext().getGoObjStackMapResetLabels(), *Entries);
           ArgsMap = std::move(Maps.Args);
           LocalsMap = std::move(Maps.Locals);
           StackMapIndex = std::move(Maps.PCData);
