@@ -21,13 +21,10 @@
   i32 123,
   [4 x i8] zeroinitializer,
   ptr @method
-}>, section ".rodata", align 8, !goobj.relocs !1
+}>, section ".rodata", align 8, !goobj.weak_relocs !1
 
 !0 = !{i32 4, i32 1}
-!1 = !{!2, !3, !4}
-!2 = !{i32 0, i32 1}
-!3 = !{i32 8, i32 1}
-!4 = !{i32 24, i32 32769}
+!1 = !{i32 24}
 !5 = !{!"gotype"}
 !6 = !{!"external_gotype"}
 

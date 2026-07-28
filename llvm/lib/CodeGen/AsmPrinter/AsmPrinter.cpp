@@ -924,6 +924,28 @@ getGoObjRelocsMetadata(const GlobalObject *GO) {
   return Result;
 }
 
+static std::optional<std::vector<uint32_t>>
+getGoObjWeakRelocsMetadata(const GlobalObject *GO) {
+  const MDNode *MD = GO->getMetadata("goobj.weak_relocs");
+  if (!MD)
+    return std::nullopt;
+
+  std::vector<uint32_t> Result;
+  Result.reserve(MD->getNumOperands());
+  for (const MDOperand &Operand : MD->operands()) {
+    const auto *Offset = mdconst::dyn_extract<ConstantInt>(Operand);
+    if (!Offset || Offset->getValue().ugt(UINT32_MAX))
+      report_fatal_error(
+          "expected !goobj.weak_relocs entries to be i32 offsets");
+    Result.push_back(static_cast<uint32_t>(Offset->getZExtValue()));
+  }
+
+  llvm::sort(Result);
+  if (std::adjacent_find(Result.begin(), Result.end()) != Result.end())
+    report_fatal_error("duplicate !goobj.weak_relocs offset");
+  return Result;
+}
+
 static std::optional<std::vector<std::string>>
 getGoObjKeepMetadata(const GlobalObject *GO) {
   const MDNode *MD = GO->getMetadata("goobj.keep");
@@ -1027,6 +1049,9 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
     if (std::optional<std::vector<MCContext::GoObjRelocOverride>> Relocs =
             getGoObjRelocsMetadata(GV))
       OutContext.setGoObjRelocOverrides(GVSym, std::move(*Relocs));
+    if (std::optional<std::vector<uint32_t>> WeakRelocs =
+            getGoObjWeakRelocsMetadata(GV))
+      OutContext.setGoObjWeakRelocs(GVSym, std::move(*WeakRelocs));
     if (std::optional<std::vector<std::string>> Keep =
             getGoObjKeepMetadata(GV)) {
       std::vector<const MCSymbol *> Targets;

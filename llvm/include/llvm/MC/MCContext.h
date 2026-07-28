@@ -191,6 +191,9 @@ private:
   DenseMap<const MCSymbol *, std::vector<GoObjRelocOverride>>
       GoObjRelocOverrides;
 
+  /// Go object data relocations whose inferred relocation kind is weak.
+  DenseMap<const MCSymbol *, std::vector<uint32_t>> GoObjWeakRelocs;
+
   /// Go object zero-width R_KEEP targets keyed by their source symbol.
   DenseMap<const MCSymbol *, std::vector<const MCSymbol *>> GoObjKeepTargets;
 
@@ -637,6 +640,19 @@ public:
   getGoObjRelocOverrides(const MCSymbol *Sym) const {
     auto It = GoObjRelocOverrides.find(Sym);
     if (It == GoObjRelocOverrides.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void setGoObjWeakRelocs(const MCSymbol *Sym,
+                          std::vector<uint32_t> Offsets) {
+    GoObjWeakRelocs[Sym] = std::move(Offsets);
+  }
+
+  const std::vector<uint32_t> *
+  getGoObjWeakRelocs(const MCSymbol *Sym) const {
+    auto It = GoObjWeakRelocs.find(Sym);
+    if (It == GoObjWeakRelocs.end())
       return nullptr;
     return &It->second;
   }

@@ -874,6 +874,12 @@ uint64_t GoObjObjectWriter::writeObject() {
         if (It != Overrides->end() && It->Offset == LocalOffset)
           RelocType = It->Type;
       }
+      if (const auto *WeakRelocs =
+              Asm->getContext().getGoObjWeakRelocs(Source.Symbol);
+          WeakRelocs &&
+          std::binary_search(WeakRelocs->begin(), WeakRelocs->end(),
+                             static_cast<uint32_t>(LocalOffset)))
+        RelocType |= GoObj::R_WEAK;
     }
 
     Source.Relocations.push_back({static_cast<uint32_t>(LocalOffset),
