@@ -1828,6 +1828,12 @@ void AArch64AsmPrinter::LowerPATCHPOINT(MCStreamer &OutStreamer, StackMaps &SM,
 
 void AArch64AsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
                                         const MachineInstr &MI) {
+  auto &Ctx = OutStreamer.getContext();
+  MCSymbol *MILabel = Ctx.createTempSymbol();
+  bool IsGoObj = Ctx.isGoObj();
+  if (IsGoObj)
+    OutStreamer.emitLabel(MILabel);
+
   StatepointOpers SOpers(&MI);
   if (unsigned PatchBytes = SOpers.getNumPatchBytes()) {
     assert(PatchBytes % 4 == 0 && "Invalid number of NOP bytes requested!");
@@ -1861,9 +1867,8 @@ void AArch64AsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
                    MCInstBuilder(CallOpcode).addOperand(CallTargetMCOp));
   }
 
-  auto &Ctx = OutStreamer.getContext();
-  MCSymbol *MILabel = Ctx.createTempSymbol();
-  OutStreamer.emitLabel(MILabel);
+  if (!IsGoObj)
+    OutStreamer.emitLabel(MILabel);
   SM.recordStatepoint(*MILabel, MI);
 }
 

@@ -1339,6 +1339,12 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
   MF.push_front(MorestackMBB);
   MF.push_front(CheckMBB);
 
+  MCSymbol *StackMapReset =
+      MF.getContext().createTempSymbol("goobj_stackmap_reset");
+  BuildMI(MorestackMBB, DL, TII.get(TargetOpcode::ANNOTATION_LABEL))
+      .addSym(StackMapReset);
+  MF.getContext().addGoObjStackMapResetLabel(StackMapReset);
+
   Register ScratchReg = AArch64::SP;
   if (StackSize > GoStackSmall) {
     ScratchReg = AArch64::X16;

@@ -796,6 +796,12 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
 
   NoAutoPaddingScope NoPadScope(*OutStreamer);
 
+  auto &Ctx = OutStreamer->getContext();
+  MCSymbol *MILabel = Ctx.createTempSymbol();
+  bool IsGoObj = Ctx.isGoObj();
+  if (IsGoObj)
+    OutStreamer->emitLabel(MILabel);
+
   StatepointOpers SOpers(&MI);
   if (unsigned PatchBytes = SOpers.getNumPatchBytes()) {
     emitX86Nops(*OutStreamer, PatchBytes, Subtarget);
@@ -846,9 +852,8 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
 
   // Record our statepoint node in the same section used by STACKMAP
   // and PATCHPOINT
-  auto &Ctx = OutStreamer->getContext();
-  MCSymbol *MILabel = Ctx.createTempSymbol();
-  OutStreamer->emitLabel(MILabel);
+  if (!IsGoObj)
+    OutStreamer->emitLabel(MILabel);
   SM.recordStatepoint(*MILabel, MI);
 }
 

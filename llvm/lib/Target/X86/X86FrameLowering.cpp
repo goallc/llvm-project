@@ -284,6 +284,12 @@ static void emitGoStackCheck(MachineFunction &MF,
   MF.push_front(MorestackMBB);
   MF.push_front(CheckMBB);
 
+  MCSymbol *StackMapReset =
+      MF.getContext().createTempSymbol("goobj_stackmap_reset");
+  BuildMI(MorestackMBB, DL, TII.get(TargetOpcode::ANNOTATION_LABEL))
+      .addSym(StackMapReset);
+  MF.getContext().addGoObjStackMapResetLabel(StackMapReset);
+
   unsigned ScratchReg = X86::R12;
   if (StackSize <= GoStackSmall) {
     ScratchReg = X86::RSP;
