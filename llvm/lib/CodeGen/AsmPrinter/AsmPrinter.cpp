@@ -855,22 +855,41 @@ MCSymbol *AsmPrinter::getSymbolPreferLocal(const GlobalValue &GV) const {
 }
 
 static std::optional<std::pair<uint8_t, uint8_t>>
-getGoObjSymbolFlagsMetadata(const GlobalObject *GO) {
-  const MDNode *MD = GO->getMetadata("goobj.symbol.flags");
-  if (!MD)
+getGoObjSymbolFlags(const GlobalVariable *GV) {
+  uint8_t Flag = 0;
+  uint8_t Flag2 = 0;
+
+  if (GV->hasLocalLinkage())
+    Flag |= GoObj::SymFlagLocal;
+  else if (GV->isWeakForLinker())
+    Flag |= GoObj::SymFlagDupok;
+
+  if (const auto *ST = dyn_cast<StructType>(GV->getValueType());
+      ST && ST->hasName()) {
+    if (ST->getName().starts_with("go.descriptor."))
+      Flag |= GoObj::SymFlagGoType;
+    if (ST->getName().starts_with("go.itab."))
+      Flag2 |= GoObj::SymFlagItab;
+  }
+
+  if (const MDNode *MD = GV->getMetadata("goobj.symbol.flags")) {
+    if (MD->getNumOperands() != 2)
+      report_fatal_error("expected !goobj.symbol.flags to have two operands");
+
+    auto ReadFlag = [&](unsigned I) -> uint8_t {
+      const auto *CI = mdconst::dyn_extract<ConstantInt>(MD->getOperand(I));
+      if (!CI || CI->getValue().ugt(UINT8_MAX))
+        report_fatal_error("expected !goobj.symbol.flags operands to be i8");
+      return static_cast<uint8_t>(CI->getZExtValue());
+    };
+
+    Flag |= ReadFlag(0);
+    Flag2 |= ReadFlag(1);
+  }
+
+  if (Flag == 0 && Flag2 == 0)
     return std::nullopt;
-
-  if (MD->getNumOperands() != 2)
-    report_fatal_error("expected !goobj.symbol.flags to have two operands");
-
-  auto ReadFlag = [&](unsigned I) -> uint8_t {
-    const auto *CI = mdconst::dyn_extract<ConstantInt>(MD->getOperand(I));
-    if (!CI || CI->getValue().ugt(UINT8_MAX))
-      report_fatal_error("expected !goobj.symbol.flags operands to be i8");
-    return static_cast<uint8_t>(CI->getZExtValue());
-  };
-
-  return std::make_pair(ReadFlag(0), ReadFlag(1));
+  return std::make_pair(Flag, Flag2);
 }
 
 static std::optional<std::vector<MCContext::GoObjRelocOverride>>
@@ -1003,7 +1022,7 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
 
   if (TM.getTargetTriple().isOSBinFormatGoObj()) {
     if (std::optional<std::pair<uint8_t, uint8_t>> Flags =
-            getGoObjSymbolFlagsMetadata(GV))
+            getGoObjSymbolFlags(GV))
       OutContext.setGoObjSymbolFlags(GVSym, Flags->first, Flags->second);
     if (std::optional<std::vector<MCContext::GoObjRelocOverride>> Relocs =
             getGoObjRelocsMetadata(GV))

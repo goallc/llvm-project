@@ -57,6 +57,8 @@ def read_symbols(data, start, end):
                 "name": string_at(data, offset),
                 "abi": struct.unpack_from("<H", data, offset + 8)[0],
                 "type": data[offset + 10],
+                "flag": data[offset + 11],
+                "flag2": data[offset + 12],
                 "size": struct.unpack_from("<I", data, offset + 13)[0],
                 "align": struct.unpack_from("<I", data, offset + 17)[0],
             }
@@ -144,7 +146,8 @@ def main(path):
         for index, symbol in enumerate(symbols):
             print(
                 f"{label} {index}: {symbol['name']} abi={symbol['abi']} "
-                f"type={symbol['type']} size={symbol['size']} align={symbol['align']}"
+                f"type={symbol['type']} size={symbol['size']} align={symbol['align']} "
+                f"flag={symbol['flag']} flag2={symbol['flag2']}"
             )
 
     defined = symdef + hashed64def + hasheddef + nonpkgdef
