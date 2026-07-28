@@ -178,6 +178,7 @@ void MCContext::reset() {
   GoObjSymbolSizes.clear();
   GoObjGotypeTargets.clear();
   GoObjSymbolPCSPEntries.clear();
+  GoObjSymbolStackMapEntries.clear();
   Symbols.clear();
   Allocator.Reset();
   Instances.clear();
