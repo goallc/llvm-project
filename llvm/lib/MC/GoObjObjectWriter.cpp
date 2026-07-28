@@ -903,6 +903,9 @@ uint64_t GoObjObjectWriter::writeObject() {
           Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef, LocalsMap);
       uint32_t StackMapIndexSym = addAuxCarrierSymbol(
           Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef, StackMapIndex);
+      uint32_t UnsafePointSym =
+          addAuxCarrierSymbol(Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
+                              makeConstantPCTab(-1, CodeSize, PCQuantum));
 
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncInfo, FuncInfoSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, ArgsMapSym});
@@ -910,6 +913,7 @@ uint64_t GoObjObjectWriter::writeObject() {
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcsp, PcspSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcfile, PcfileSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcline, PclineSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, UnsafePointSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, StackMapIndexSym});
     }
   }
