@@ -896,35 +896,110 @@ getGoObjSymbolFlags(const GlobalVariable *GV) {
   return std::make_pair(Flag, Flag2);
 }
 
+static bool containsGoObjMethodRelocType(Type *Ty) {
+  if (auto *ST = dyn_cast<StructType>(Ty)) {
+    if (ST->hasName() &&
+        (ST->getName() == "go.runtime.Method" ||
+         ST->getName() == "go.runtime.Imethod"))
+      return true;
+    return llvm::any_of(ST->elements(), containsGoObjMethodRelocType);
+  }
+  if (auto *AT = dyn_cast<ArrayType>(Ty))
+    return containsGoObjMethodRelocType(AT->getElementType());
+  return false;
+}
+
+static void collectGoObjMethodRelocs(
+    const DataLayout &DL, Type *Ty, uint64_t BaseOffset,
+    std::vector<MCContext::GoObjRelocOverride> &Result) {
+  if (auto *ST = dyn_cast<StructType>(Ty)) {
+    const StructLayout *Layout = DL.getStructLayout(ST);
+    auto AddField = [&](unsigned Field, uint16_t RelocType) {
+      if (Field >= ST->getNumElements() ||
+          DL.getTypeStoreSize(ST->getElementType(Field)) != 4)
+        report_fatal_error("invalid LLVM Go runtime method layout");
+      uint64_t Offset = BaseOffset + Layout->getElementOffset(Field);
+      if (Offset > UINT32_MAX)
+        report_fatal_error("LLVM Go runtime method offset exceeds uint32");
+      Result.push_back(
+          {static_cast<uint32_t>(Offset), RelocType});
+    };
+
+    if (ST->hasName() && ST->getName() == "go.runtime.Method") {
+      // runtime.Method is {NameOff, TypeOff, TextOff, TextOff}. Only the
+      // final three fields participate in method dead-code elimination.
+      AddField(1, GoObj::R_METHODOFF);
+      AddField(2, GoObj::R_METHODOFF);
+      AddField(3, GoObj::R_METHODOFF);
+      return;
+    }
+    if (ST->hasName() && ST->getName() == "go.runtime.Imethod") {
+      // An interface method's TypeOff is an ordinary section offset. It is
+      // not one of the three consecutive concrete-method relocations.
+      AddField(1, GoObj::R_ADDROFF);
+      return;
+    }
+
+    for (unsigned I = 0; I != ST->getNumElements(); ++I) {
+      Type *ElementTy = ST->getElementType(I);
+      if (containsGoObjMethodRelocType(ElementTy))
+        collectGoObjMethodRelocs(
+            DL, ElementTy, BaseOffset + Layout->getElementOffset(I), Result);
+    }
+    return;
+  }
+
+  auto *AT = dyn_cast<ArrayType>(Ty);
+  if (!AT || !containsGoObjMethodRelocType(AT->getElementType()))
+    return;
+  TypeSize Stride = DL.getTypeAllocSize(AT->getElementType());
+  if (Stride.isScalable())
+    report_fatal_error("scalable LLVM Go runtime method array");
+  for (uint64_t I = 0; I != AT->getNumElements(); ++I)
+    collectGoObjMethodRelocs(DL, AT->getElementType(),
+                             BaseOffset + I * Stride.getFixedValue(), Result);
+}
+
 static std::optional<std::vector<MCContext::GoObjRelocOverride>>
-getGoObjRelocsMetadata(const GlobalObject *GO) {
-  const MDNode *MD = GO->getMetadata("goobj.relocs");
-  if (!MD)
-    return std::nullopt;
-
+getGoObjRelocOverrides(const GlobalVariable *GV, bool IsGoType) {
   std::vector<MCContext::GoObjRelocOverride> Result;
-  Result.reserve(MD->getNumOperands());
-  for (const MDOperand &Operand : MD->operands()) {
-    const auto *Entry = dyn_cast<MDNode>(Operand);
-    if (!Entry || Entry->getNumOperands() != 2)
-      report_fatal_error("expected !goobj.relocs entries to have two operands");
+  if (IsGoType && containsGoObjMethodRelocType(GV->getValueType()))
+    collectGoObjMethodRelocs(GV->getDataLayout(), GV->getValueType(), 0,
+                             Result);
 
-    const auto *Offset =
-        mdconst::dyn_extract<ConstantInt>(Entry->getOperand(0));
-    const auto *Type = mdconst::dyn_extract<ConstantInt>(Entry->getOperand(1));
-    if (!Offset || !Type || Offset->getValue().ugt(UINT32_MAX) ||
-        Type->getValue().ugt(UINT16_MAX))
-      report_fatal_error("expected !goobj.relocs entries to be i32 values");
-    Result.push_back({static_cast<uint32_t>(Offset->getZExtValue()),
-                      static_cast<uint16_t>(Type->getZExtValue())});
+  if (const MDNode *MD = GV->getMetadata("goobj.relocs")) {
+    Result.reserve(Result.size() + MD->getNumOperands());
+    for (const MDOperand &Operand : MD->operands()) {
+      const auto *Entry = dyn_cast<MDNode>(Operand);
+      if (!Entry || Entry->getNumOperands() != 2)
+        report_fatal_error(
+            "expected !goobj.relocs entries to have two operands");
+
+      const auto *Offset =
+          mdconst::dyn_extract<ConstantInt>(Entry->getOperand(0));
+      const auto *Type = mdconst::dyn_extract<ConstantInt>(Entry->getOperand(1));
+      if (!Offset || !Type || Offset->getValue().ugt(UINT32_MAX) ||
+          Type->getValue().ugt(UINT16_MAX))
+        report_fatal_error("expected !goobj.relocs entries to be i32 values");
+      Result.push_back({static_cast<uint32_t>(Offset->getZExtValue()),
+                        static_cast<uint16_t>(Type->getZExtValue())});
+    }
   }
 
   llvm::sort(Result, [](const auto &LHS, const auto &RHS) {
     return LHS.Offset < RHS.Offset;
   });
-  for (size_t I = 1; I < Result.size(); ++I)
-    if (Result[I - 1].Offset == Result[I].Offset)
-      report_fatal_error("duplicate !goobj.relocs offset");
+  auto NewEnd = std::unique(
+      Result.begin(), Result.end(), [](const auto &LHS, const auto &RHS) {
+        if (LHS.Offset != RHS.Offset)
+          return false;
+        if (LHS.Type != RHS.Type)
+          report_fatal_error("conflicting LLVM GoObj relocation semantics");
+        return true;
+      });
+  Result.erase(NewEnd, Result.end());
+  if (Result.empty())
+    return std::nullopt;
   return Result;
 }
 
@@ -1059,11 +1134,13 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
   MCSymbol *EmittedSym = GVSym;
 
   if (TM.getTargetTriple().isOSBinFormatGoObj()) {
-    if (std::optional<std::pair<uint8_t, uint8_t>> Flags =
-            getGoObjSymbolFlags(GV))
+    std::optional<std::pair<uint8_t, uint8_t>> Flags =
+        getGoObjSymbolFlags(GV);
+    if (Flags)
       OutContext.setGoObjSymbolFlags(GVSym, Flags->first, Flags->second);
     if (std::optional<std::vector<MCContext::GoObjRelocOverride>> Relocs =
-            getGoObjRelocsMetadata(GV))
+            getGoObjRelocOverrides(
+                GV, Flags && (Flags->first & GoObj::SymFlagGoType)))
       OutContext.setGoObjRelocOverrides(GVSym, std::move(*Relocs));
     if (std::optional<std::vector<uint32_t>> WeakRelocs =
             getGoObjWeakRelocsMetadata(GV))
