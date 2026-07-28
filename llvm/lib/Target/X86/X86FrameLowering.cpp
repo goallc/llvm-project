@@ -218,6 +218,13 @@ static bool shouldEmitGoStackCheck(const MachineFunction &MF) {
          goabi::isGoCallingConv(F.getCallingConv()) && !F.isVarArg();
 }
 
+static bool hasGoClosureContext(const Function &F) {
+  for (const Argument &Arg : F.args())
+    if (Arg.hasNestAttr())
+      return true;
+  return false;
+}
+
 static MachineBasicBlock &
 getGoStackCheckEntryMBB(MachineFunction &MF, MachineBasicBlock &FallbackMBB) {
   const BasicBlock &EntryBB = MF.getFunction().getEntryBlock();
@@ -291,8 +298,13 @@ static void emitGoStackCheck(MachineFunction &MF,
       .addImm(X86::COND_A);
 
   emitGoRegSpills(MF, *MorestackMBB, Spills, /*Reload=*/false);
-  BuildMI(MorestackMBB, DL, TII.get(X86::CALL64pcrel32))
-      .addExternalSymbol("runtime.morestack_noctxt");
+  bool HasClosureContext = hasGoClosureContext(MF.getFunction());
+  MachineInstrBuilder Morestack =
+      BuildMI(MorestackMBB, DL, TII.get(X86::CALL64pcrel32))
+          .addExternalSymbol(HasClosureContext ? "runtime.morestack"
+                                               : "runtime.morestack_noctxt");
+  if (HasClosureContext)
+    Morestack.addReg(X86::RDX, RegState::Implicit);
   emitGoRegSpills(MF, *MorestackMBB, Spills, /*Reload=*/true);
   BuildMI(MorestackMBB, DL, TII.get(X86::JMP_1)).addMBB(&EntryMBB);
 

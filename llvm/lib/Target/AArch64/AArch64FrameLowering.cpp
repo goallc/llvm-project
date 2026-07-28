@@ -1241,6 +1241,13 @@ static bool shouldEmitAArch64GoStackCheck(const MachineFunction &MF) {
          goabi::isGoCallingConv(F.getCallingConv()) && !F.isVarArg();
 }
 
+static bool hasAArch64GoClosureContext(const Function &F) {
+  for (const Argument &Arg : F.args())
+    if (Arg.hasNestAttr())
+      return true;
+  return false;
+}
+
 static MachineBasicBlock &
 getAArch64GoStackCheckEntryMBB(MachineFunction &MF,
                                MachineBasicBlock &FallbackMBB) {
@@ -1356,9 +1363,14 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
                          /*Reload=*/false);
   BuildMI(MorestackMBB, DL, TII.get(TargetOpcode::COPY), AArch64::X3)
       .addReg(AArch64::LR);
-  BuildMI(MorestackMBB, DL, TII.get(AArch64::BL))
-      .addExternalSymbol("runtime.morestack_noctxt")
-      .addReg(AArch64::X3, RegState::Implicit);
+  bool HasClosureContext = hasAArch64GoClosureContext(MF.getFunction());
+  MachineInstrBuilder Morestack =
+      BuildMI(MorestackMBB, DL, TII.get(AArch64::BL))
+          .addExternalSymbol(HasClosureContext ? "runtime.morestack"
+                                               : "runtime.morestack_noctxt")
+          .addReg(AArch64::X3, RegState::Implicit);
+  if (HasClosureContext)
+    Morestack.addReg(AArch64::X26, RegState::Implicit);
   emitAArch64GoRegSpills(MF, *MorestackMBB, AFI->getGoRegArgSpillSlots(),
                          /*Reload=*/true);
   BuildMI(MorestackMBB, DL, TII.get(AArch64::B)).addMBB(&EntryMBB);
