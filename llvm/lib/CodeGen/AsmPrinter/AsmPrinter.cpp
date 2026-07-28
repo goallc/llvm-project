@@ -21,6 +21,7 @@
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
@@ -581,6 +582,8 @@ void AsmPrinter::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addUsedIfAvailable<BasicBlockSectionsProfileReaderWrapperPass>();
 }
 
+static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M);
+
 bool AsmPrinter::doInitialization(Module &M) {
   MMI = GetMMI();
   HasSplitStack = false;
@@ -596,6 +599,7 @@ bool AsmPrinter::doInitialization(Module &M) {
   TM.getObjFileLowering()->getModuleMetadata(M);
 
   if (Target.isOSBinFormatGoObj()) {
+    collectGoObjModuleMetadata(*this, M);
     for (const Function &F : M) {
       if (!F.isDeclaration())
         continue;
@@ -946,67 +950,79 @@ getGoObjWeakRelocsMetadata(const GlobalObject *GO) {
   return Result;
 }
 
-static std::optional<std::vector<std::string>>
-getGoObjKeepMetadata(const GlobalObject *GO) {
-  const MDNode *MD = GO->getMetadata("goobj.keep");
-  if (!MD)
-    return std::nullopt;
-
-  std::vector<std::string> Result;
-  Result.reserve(MD->getNumOperands());
-  for (const MDOperand &Operand : MD->operands()) {
-    const auto *Name = dyn_cast<MDString>(Operand);
-    if (!Name || Name->getString().empty())
-      report_fatal_error("expected !goobj.keep entries to be symbol names");
-    Result.push_back(Name->getString().str());
-  }
-  return Result;
+static const GlobalValue *getGoObjMetadataGlobal(const MDOperand &Operand,
+                                                 StringRef MetadataName) {
+  const auto *CAM = dyn_cast_or_null<ConstantAsMetadata>(Operand.get());
+  const auto *GV = CAM ? dyn_cast<GlobalValue>(CAM->getValue()) : nullptr;
+  if (!GV)
+    report_fatal_error(Twine("expected !") + MetadataName +
+                       " symbol operands to be LLVM global references");
+  return GV;
 }
 
-static std::optional<std::string>
-getGoObjGotypeMetadata(const GlobalObject *GO) {
-  const MDNode *MD = GO->getMetadata("goobj.gotype");
-  if (!MD)
-    return std::nullopt;
-  if (MD->getNumOperands() != 1)
-    report_fatal_error("expected !goobj.gotype to have one operand");
-  const auto *Name = dyn_cast<MDString>(MD->getOperand(0));
-  if (!Name || Name->getString().empty())
-    report_fatal_error("expected !goobj.gotype operand to be a symbol name");
-  return Name->getString().str();
-}
-
-struct GoObjMarkerRelocMetadata {
-  std::string Target;
-  uint16_t Type = 0;
-  int64_t Addend = 0;
-};
-
-static std::optional<std::vector<GoObjMarkerRelocMetadata>>
-getGoObjMarkerRelocsMetadata(const GlobalObject *GO) {
-  const MDNode *MD = GO->getMetadata("goobj.marker_relocs");
-  if (!MD)
-    return std::nullopt;
-
-  std::vector<GoObjMarkerRelocMetadata> Result;
-  Result.reserve(MD->getNumOperands());
-  for (const MDOperand &Operand : MD->operands()) {
-    const auto *Entry = dyn_cast<MDNode>(Operand);
-    if (!Entry || Entry->getNumOperands() != 3)
-      report_fatal_error(
-          "expected !goobj.marker_relocs entries to have three operands");
-    const auto *Type = mdconst::dyn_extract<ConstantInt>(Entry->getOperand(0));
-    const auto *Addend =
-        mdconst::dyn_extract<ConstantInt>(Entry->getOperand(1));
-    const auto *Target = dyn_cast<MDString>(Entry->getOperand(2));
-    if (!Type || Type->getValue().ugt(UINT16_MAX) || !Addend || !Target ||
-        Target->getString().empty())
-      report_fatal_error("invalid !goobj.marker_relocs entry");
-    Result.push_back({Target->getString().str(),
-                      static_cast<uint16_t>(Type->getZExtValue()),
-                      Addend->getSExtValue()});
+static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
+  if (const NamedMDNode *Keep = M.getNamedMetadata("goobj.keep")) {
+    DenseMap<const GlobalValue *, std::vector<const MCSymbol *>> Targets;
+    for (const MDNode *Entry : Keep->operands()) {
+      if (Entry->getNumOperands() != 2)
+        report_fatal_error("expected !goobj.keep entries to have two operands");
+      const GlobalValue *Source =
+          getGoObjMetadataGlobal(Entry->getOperand(0), "goobj.keep");
+      const GlobalValue *Target =
+          getGoObjMetadataGlobal(Entry->getOperand(1), "goobj.keep");
+      Targets[Source].push_back(AP.getSymbol(Target));
+    }
+    for (auto &[Source, SourceTargets] : Targets)
+      AP.OutContext.setGoObjKeepTargets(AP.getSymbol(Source),
+                                        std::move(SourceTargets));
   }
-  return Result;
+
+  if (const NamedMDNode *Gotypes = M.getNamedMetadata("goobj.gotype")) {
+    DenseSet<const GlobalValue *> Sources;
+    for (const MDNode *Entry : Gotypes->operands()) {
+      if (Entry->getNumOperands() != 2)
+        report_fatal_error(
+            "expected !goobj.gotype entries to have two operands");
+      const GlobalValue *Source =
+          getGoObjMetadataGlobal(Entry->getOperand(0), "goobj.gotype");
+      const GlobalValue *Target =
+          getGoObjMetadataGlobal(Entry->getOperand(1), "goobj.gotype");
+      if (!Sources.insert(Source).second)
+        report_fatal_error("duplicate !goobj.gotype source");
+      AP.OutContext.setGoObjGotypeTarget(AP.getSymbol(Source),
+                                         AP.getSymbol(Target));
+    }
+  }
+
+  if (const NamedMDNode *Markers =
+          M.getNamedMetadata("goobj.marker_relocs")) {
+    DenseMap<const GlobalValue *, std::vector<MCContext::GoObjMarkerReloc>>
+        Relocs;
+    for (const MDNode *Entry : Markers->operands()) {
+      if (Entry->getNumOperands() != 4)
+        report_fatal_error(
+            "expected !goobj.marker_relocs entries to have four operands");
+      const GlobalValue *Source =
+          getGoObjMetadataGlobal(Entry->getOperand(0),
+                                 "goobj.marker_relocs");
+      const GlobalValue *Target =
+          getGoObjMetadataGlobal(Entry->getOperand(1),
+                                 "goobj.marker_relocs");
+      const auto *Type =
+          mdconst::dyn_extract<ConstantInt>(Entry->getOperand(2));
+      const auto *Addend =
+          mdconst::dyn_extract<ConstantInt>(Entry->getOperand(3));
+      if (!isa<Function>(Source) || !Type ||
+          Type->getValue().ugt(UINT16_MAX) || !Addend)
+        report_fatal_error("invalid !goobj.marker_relocs entry");
+      Relocs[Source].push_back(
+          {AP.getSymbol(Target), static_cast<uint16_t>(Type->getZExtValue()),
+           Addend->getSExtValue()});
+    }
+    for (auto &[Source, SourceRelocs] : Relocs)
+      AP.OutContext.setGoObjMarkerRelocs(AP.getSymbol(Source),
+                                         std::move(SourceRelocs));
+  }
 }
 
 /// EmitGlobalVariable - Emit the specified global variable to the .s file.
@@ -1052,28 +1068,6 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
     if (std::optional<std::vector<uint32_t>> WeakRelocs =
             getGoObjWeakRelocsMetadata(GV))
       OutContext.setGoObjWeakRelocs(GVSym, std::move(*WeakRelocs));
-    if (std::optional<std::vector<std::string>> Keep =
-            getGoObjKeepMetadata(GV)) {
-      std::vector<const MCSymbol *> Targets;
-      Targets.reserve(Keep->size());
-      for (const std::string &Name : *Keep) {
-        const auto *Target =
-            dyn_cast_or_null<GlobalValue>(GV->getParent()->getNamedValue(Name));
-        if (!Target)
-          report_fatal_error(Twine("!goobj.keep target is not an LLVM global: ") +
-                             Name);
-        Targets.push_back(getSymbol(Target));
-      }
-      OutContext.setGoObjKeepTargets(GVSym, std::move(Targets));
-    }
-    if (std::optional<std::string> Gotype = getGoObjGotypeMetadata(GV)) {
-      const auto *Target = dyn_cast_or_null<GlobalValue>(
-          GV->getParent()->getNamedValue(*Gotype));
-      if (!Target)
-        report_fatal_error(
-            Twine("!goobj.gotype target is not an LLVM global: ") + *Gotype);
-      OutContext.setGoObjGotypeTarget(GVSym, getSymbol(Target));
-    }
   }
 
   // getOrCreateEmuTLSControlSym only creates the symbol with name and default
@@ -3516,22 +3510,6 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
     OutContext.setGoObjSymbolArgSize(
         CurrentFnSym,
         getGoObjArgSize(F, MF.getDataLayout(), TM.getTargetTriple()));
-
-    if (std::optional<std::vector<GoObjMarkerRelocMetadata>> Markers =
-            getGoObjMarkerRelocsMetadata(&F)) {
-      std::vector<MCContext::GoObjMarkerReloc> Relocs;
-      Relocs.reserve(Markers->size());
-      for (const GoObjMarkerRelocMetadata &Marker : *Markers) {
-        const auto *Target = dyn_cast_or_null<GlobalValue>(
-            F.getParent()->getNamedValue(Marker.Target));
-        if (!Target)
-          report_fatal_error(
-              Twine("!goobj.marker_relocs target is not an LLVM global: ") +
-              Marker.Target);
-        Relocs.push_back({getSymbol(Target), Marker.Type, Marker.Addend});
-      }
-      OutContext.setGoObjMarkerRelocs(CurrentFnSym, std::move(Relocs));
-    }
   }
 
   CurrentFnSymForSize = CurrentFnSym;
