@@ -48,6 +48,7 @@ namespace llvm {
 
 class CodeViewContext;
 class MCAsmInfo;
+class MCExpr;
 class MCInst;
 class MCLabel;
 class MCObjectFileInfo;
@@ -103,6 +104,30 @@ public:
   struct GoObjPCSPEntry {
     const MCSymbol *Label;
     int32_t Value;
+  };
+
+  struct GoObjStackMapLocation {
+    enum LocationType : uint8_t {
+      Unprocessed,
+      Register,
+      Direct,
+      Indirect,
+      Constant,
+      ConstantIndex,
+    };
+
+    LocationType Type;
+    uint16_t Size;
+    uint16_t DwarfRegNum;
+    int32_t Offset;
+  };
+
+  struct GoObjStackMapEntry {
+    const MCExpr *CallsiteOffsetExpr;
+    uint64_t ID;
+    uint64_t StackSize;
+    uint32_t PointerSize;
+    std::vector<GoObjStackMapLocation> Locations;
   };
 
   struct GoObjRelocOverride {
@@ -213,6 +238,10 @@ private:
   /// Go object pcsp entries keyed by MC symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjPCSPEntry>>
       GoObjSymbolPCSPEntries;
+
+  /// Go object statepoint stack maps keyed by function MC symbol.
+  DenseMap<const MCSymbol *, std::vector<GoObjStackMapEntry>>
+      GoObjSymbolStackMapEntries;
 
   /// A mapping from a local label number and an instance count to a symbol.
   /// For example, in the assembly
@@ -726,6 +755,19 @@ public:
   getGoObjSymbolPCSPEntries(const MCSymbol *Sym) const {
     auto It = GoObjSymbolPCSPEntries.find(Sym);
     if (It == GoObjSymbolPCSPEntries.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void addGoObjSymbolStackMapEntry(const MCSymbol *Sym,
+                                   GoObjStackMapEntry Entry) {
+    GoObjSymbolStackMapEntries[Sym].push_back(std::move(Entry));
+  }
+
+  const std::vector<GoObjStackMapEntry> *
+  getGoObjSymbolStackMapEntries(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolStackMapEntries.find(Sym);
+    if (It == GoObjSymbolStackMapEntries.end())
       return nullptr;
     return &It->second;
   }

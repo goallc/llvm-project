@@ -12,9 +12,11 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/BinaryFormat/GoObj.h"
 #include "llvm/MC/MCAsmBackend.h"
+#include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCAssembler.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDwarf.h"
+#include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCFixup.h"
 #include "llvm/MC/MCGoObjObjectWriter.h"
 #include "llvm/MC/MCSection.h"
@@ -22,6 +24,7 @@
 #include "llvm/Support/Alignment.h"
 #include "llvm/Support/EndianStream.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Triple.h"
@@ -120,6 +123,19 @@ uint32_t getGoObjPCQuantum(const Triple &TT) {
     return 1;
   default:
     return 4;
+  }
+}
+
+uint16_t getGoObjStackPointerDwarfReg(const Triple &TT) {
+  switch (TT.getArch()) {
+  case Triple::x86_64:
+    return 7;
+  case Triple::aarch64:
+  case Triple::aarch64_be:
+    return 31;
+  default:
+    report_fatal_error(
+        "GoObj statepoint stack maps do not support this architecture");
   }
 }
 
@@ -251,6 +267,162 @@ SmallString<0> makeEmptyStackMap() {
   W.write<uint32_t>(1); // One bitmap, selected by PCDATA_StackMapIndex 0.
   W.write<uint32_t>(0); // Zero pointer bits.
   return Data;
+}
+
+SmallString<0> makeStackMap(uint32_t NBits,
+                            ArrayRef<SmallVector<uint8_t, 8>> Bitmaps) {
+  SmallString<0> Data;
+  raw_svector_ostream OS(Data);
+  support::endian::Writer W(OS, llvm::endianness::little);
+  W.write<uint32_t>(checkedUint32(Bitmaps.size(), "GoObj stack map count"));
+  W.write<uint32_t>(NBits);
+  size_t BytesPerBitmap = divideCeil(NBits, 8u);
+  for (const auto &Bitmap : Bitmaps) {
+    if (Bitmap.size() != BytesPerBitmap)
+      report_fatal_error("GoObj stack map bitmap has invalid size");
+    const char *BitmapData = reinterpret_cast<const char *>(Bitmap.data());
+    Data.append(BitmapData, BitmapData + Bitmap.size());
+  }
+  return Data;
+}
+
+struct GoObjStatepointStackMaps {
+  SmallString<0> Args;
+  SmallString<0> Locals;
+  SmallString<0> PCData;
+};
+
+GoObjStatepointStackMaps makeStatepointStackMaps(
+    const MCAssembler &Asm, const GoObjSymbol &Function, uint32_t StackSize,
+    uint32_t PCQuantum,
+    ArrayRef<MCContext::GoObjStackMapEntry> StackMapEntries) {
+  struct ResolvedEntry {
+    uint64_t ReturnPC;
+    const MCContext::GoObjStackMapEntry *Entry;
+  };
+
+  SmallVector<ResolvedEntry, 8> ResolvedEntries;
+  ResolvedEntries.reserve(StackMapEntries.size());
+  for (const MCContext::GoObjStackMapEntry &Entry : StackMapEntries) {
+    if (!Entry.CallsiteOffsetExpr)
+      report_fatal_error("GoObj statepoint has no callsite offset expression");
+    if (Entry.StackSize == UINT64_MAX)
+      report_fatal_error(
+          "GoObj statepoint stack maps do not support dynamic frames");
+    if (Entry.StackSize != StackSize)
+      report_fatal_error(
+          "GoObj statepoint stack size does not match function metadata");
+    int64_t ReturnPCValue;
+    if (!Entry.CallsiteOffsetExpr->evaluateAsAbsolute(ReturnPCValue, Asm) ||
+        ReturnPCValue < 0)
+      report_fatal_error("GoObj statepoint callsite offset is not absolute");
+    uint64_t ReturnPC = static_cast<uint64_t>(ReturnPCValue);
+    if (ReturnPC > Function.Size)
+      report_fatal_error(
+          "GoObj statepoint callsite is outside its function range");
+    if (ReturnPC < PCQuantum || ReturnPC % PCQuantum != 0)
+      report_fatal_error("GoObj statepoint callsite has invalid return PC");
+    ResolvedEntries.push_back({ReturnPC, &Entry});
+  }
+  llvm::stable_sort(ResolvedEntries,
+                    [](const ResolvedEntry &LHS, const ResolvedEntry &RHS) {
+                      return LHS.ReturnPC < RHS.ReturnPC;
+                    });
+
+  uint32_t PointerSize = StackMapEntries.front().PointerSize;
+  if (!PointerSize)
+    report_fatal_error("GoObj statepoint has invalid pointer size");
+  if (PointerSize != Asm.getContext().getAsmInfo().getCodePointerSize())
+    report_fatal_error(
+        "GoObj statepoint pointer size does not match its target");
+  uint16_t StackPointerDwarfRegNum =
+      getGoObjStackPointerDwarfReg(Asm.getContext().getTargetTriple());
+  uint32_t NBits =
+      checkedUint32(divideCeil(static_cast<uint64_t>(StackSize), PointerSize),
+                    "GoObj locals stack map bit count");
+  size_t BytesPerBitmap = divideCeil(NBits, 8u);
+
+  SmallVector<SmallVector<uint8_t, 8>, 8> Bitmaps;
+  SmallVector<GoObjPCTabEntry, 16> PCDataEntries;
+  std::optional<uint64_t> PreviousReturnPC;
+  for (const ResolvedEntry &Resolved : ResolvedEntries) {
+    if (PreviousReturnPC && *PreviousReturnPC == Resolved.ReturnPC)
+      report_fatal_error(
+          "GoObj statepoint callsites have duplicate return PCs");
+    PreviousReturnPC = Resolved.ReturnPC;
+    const MCContext::GoObjStackMapEntry &Entry = *Resolved.Entry;
+    if (Entry.PointerSize != PointerSize)
+      report_fatal_error(
+          "GoObj statepoint pointer size changes within a function");
+
+    SmallVector<uint8_t, 8> Bitmap(BytesPerBitmap, 0);
+    for (const MCContext::GoObjStackMapLocation &Loc : Entry.Locations) {
+      switch (Loc.Type) {
+      case MCContext::GoObjStackMapLocation::Direct:
+      case MCContext::GoObjStackMapLocation::Indirect:
+        break;
+      case MCContext::GoObjStackMapLocation::Unprocessed:
+      case MCContext::GoObjStackMapLocation::Register:
+      case MCContext::GoObjStackMapLocation::Constant:
+      case MCContext::GoObjStackMapLocation::ConstantIndex:
+        report_fatal_error(
+            "GoObj statepoint GC pointer is not in a stack slot");
+      }
+      if (Loc.Size != PointerSize || Loc.Offset < 0 ||
+          Loc.DwarfRegNum != StackPointerDwarfRegNum ||
+          static_cast<uint64_t>(Loc.Offset) + PointerSize > StackSize ||
+          static_cast<uint64_t>(Loc.Offset) % PointerSize != 0)
+        report_fatal_error(
+            "GoObj statepoint contains an invalid pointer stack slot");
+
+      // Direct describes the pointer value SP+Offset, not a pointer stored at
+      // SP+Offset. Statepoint lowering rematerializes that address after stack
+      // movement; marking it in FUNCDATA_LocalsPointerMaps would instead make
+      // the runtime scan the alloca contents as a pointer. Address-taken stack
+      // objects with pointer fields require FUNCDATA_StackObjects.
+      if (Loc.Type == MCContext::GoObjStackMapLocation::Direct)
+        continue;
+      uint32_t Bit = static_cast<uint32_t>(Loc.Offset) / PointerSize;
+      Bitmap[Bit / 8] |= uint8_t(1u << (Bit % 8));
+    }
+
+    auto It = llvm::find(Bitmaps, Bitmap);
+    uint32_t MapIndex;
+    if (It == Bitmaps.end()) {
+      MapIndex = checkedUint32(Bitmaps.size(), "GoObj stack map index");
+      Bitmaps.push_back(std::move(Bitmap));
+    } else {
+      MapIndex = checkedUint32(It - Bitmaps.begin(), "GoObj stack map index");
+    }
+    if (MapIndex > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))
+      report_fatal_error("GoObj stack map index exceeds int32 limit");
+
+    // STATEPOINT labels are emitted after the call. Go traceback asks for the
+    // map at returnPC-1, so cover the final target instruction quantum and
+    // restore the invalid index at the return PC.
+    uint64_t StartPC = Resolved.ReturnPC - PCQuantum;
+    PCDataEntries.push_back({StartPC, static_cast<int32_t>(MapIndex)});
+    PCDataEntries.push_back({Resolved.ReturnPC, -1});
+  }
+
+  // Args and locals maps share PCDATA_StackMapIndex. Argument classification
+  // is not available here yet, but the empty argument map still needs the same
+  // number of entries as the locals map.
+  SmallVector<SmallVector<uint8_t, 8>, 8> EmptyArgsMaps(Bitmaps.size());
+  SmallVector<GoObjPCTabEntry, 16> NormalizedPCDataEntries;
+  for (const GoObjPCTabEntry &Entry : PCDataEntries) {
+    if (!NormalizedPCDataEntries.empty() &&
+        NormalizedPCDataEntries.back().PC == Entry.PC)
+      NormalizedPCDataEntries.back().Value = Entry.Value;
+    else
+      NormalizedPCDataEntries.push_back(Entry);
+  }
+  GoObjStatepointStackMaps Result;
+  Result.Args = makeStackMap(0, EmptyArgsMaps);
+  Result.Locals = makeStackMap(NBits, Bitmaps);
+  Result.PCData =
+      makePCTab(-1, NormalizedPCDataEntries, Function.Size, PCQuantum);
+  return Result;
 }
 
 std::string getDwarfFilePath(const MCDwarfLineTable &Table, unsigned FileNum) {
@@ -698,17 +870,29 @@ uint64_t GoObjObjectWriter::writeObject() {
       uint32_t PclineSym = addAuxCarrierSymbol(
           Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
           makePCTab(InitialLine, LineInfo.PCLine, CodeSize, PCQuantum));
-      uint32_t EmptyArgsMapSym = addAuxCarrierSymbol(
-          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef, makeEmptyStackMap());
-      uint32_t EmptyLocalsMapSym = addAuxCarrierSymbol(
-          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef, makeEmptyStackMap());
-      uint32_t StackMapIndexSym =
-          addAuxCarrierSymbol(Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
-                              makeConstantPCTab(0, CodeSize, PCQuantum));
+      SmallString<0> ArgsMap = makeEmptyStackMap();
+      SmallString<0> LocalsMap = makeEmptyStackMap();
+      SmallString<0> StackMapIndex = makeConstantPCTab(0, CodeSize, PCQuantum);
+      if (const auto *Entries = Asm->getContext().getGoObjSymbolStackMapEntries(
+              Symbols[I].Symbol)) {
+        if (!Entries->empty()) {
+          GoObjStatepointStackMaps Maps = makeStatepointStackMaps(
+              *Asm, Symbols[I], StackSize, PCQuantum, *Entries);
+          ArgsMap = std::move(Maps.Args);
+          LocalsMap = std::move(Maps.Locals);
+          StackMapIndex = std::move(Maps.PCData);
+        }
+      }
+      uint32_t ArgsMapSym = addAuxCarrierSymbol(
+          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef, ArgsMap);
+      uint32_t LocalsMapSym = addAuxCarrierSymbol(
+          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef, LocalsMap);
+      uint32_t StackMapIndexSym = addAuxCarrierSymbol(
+          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef, StackMapIndex);
 
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncInfo, FuncInfoSym});
-      Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, EmptyArgsMapSym});
-      Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, EmptyLocalsMapSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, ArgsMapSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, LocalsMapSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcsp, PcspSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcfile, PcfileSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcline, PclineSym});
