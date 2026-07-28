@@ -26,6 +26,7 @@
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
+#include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/WinEHFuncInfo.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/EHPersonalities.h"
@@ -225,6 +226,36 @@ static bool hasGoClosureContext(const Function &F) {
   return false;
 }
 
+static MachineInstrBuilder buildGoStackGrowthStatepoint(MachineFunction &MF,
+                                                        MachineBasicBlock &MBB,
+                                                        const DebugLoc &DL,
+                                                        const X86InstrInfo &TII,
+                                                        const char *Callee) {
+  MachineInstrBuilder Statepoint =
+      BuildMI(&MBB, DL, TII.get(TargetOpcode::STATEPOINT))
+          .addImm(goabi::StackGrowthStatepointID)
+          .addImm(0)
+          .addImm(0)
+          .addExternalSymbol(Callee);
+  auto AddConstant = [&](uint64_t Value) {
+    Statepoint.addImm(StackMaps::ConstantOp).addImm(Value);
+  };
+  AddConstant(MF.getFunction().getCallingConv());
+  AddConstant(0); // Statepoint flags.
+  AddConstant(0); // Deopt arguments.
+  AddConstant(0); // GC pointers.
+  AddConstant(0); // GC allocas.
+  AddConstant(0); // GC base/derived map entries.
+  Statepoint
+      .addRegMask(
+          MF.getSubtarget<X86Subtarget>()
+              .getRegisterInfo()
+              ->getCallPreservedMask(MF, MF.getFunction().getCallingConv()))
+      .addReg(X86::RSP, RegState::ImplicitDefine)
+      .addReg(X86::SSP, RegState::ImplicitDefine);
+  return Statepoint;
+}
+
 static MachineBasicBlock &
 getGoStackCheckEntryMBB(MachineFunction &MF, MachineBasicBlock &FallbackMBB) {
   const BasicBlock &EntryBB = MF.getFunction().getEntryBlock();
@@ -255,22 +286,37 @@ static void emitGoStackCheck(MachineFunction &MF,
   MachineBasicBlock &EntryMBB = getGoStackCheckEntryMBB(MF, PrologueMBB);
 
   MachineBasicBlock *CheckMBB = MF.CreateMachineBasicBlock();
+  MachineBasicBlock *CompareMBB = CheckMBB;
+  if (StackSize > GoStackBig)
+    CompareMBB = MF.CreateMachineBasicBlock();
   MachineBasicBlock *MorestackMBB = MF.CreateMachineBasicBlock();
   for (const auto &LI : EntryMBB.liveins()) {
     CheckMBB->addLiveIn(LI);
+    if (CompareMBB != CheckMBB)
+      CompareMBB->addLiveIn(LI);
     MorestackMBB->addLiveIn(LI);
   }
   CheckMBB->addLiveIn(X86::R14);
+  if (CompareMBB != CheckMBB) {
+    CompareMBB->addLiveIn(X86::R12);
+    CompareMBB->addLiveIn(X86::R14);
+  }
   MorestackMBB->addLiveIn(X86::R14);
 
   MF.push_front(MorestackMBB);
+  if (CompareMBB != CheckMBB)
+    MF.push_front(CompareMBB);
   MF.push_front(CheckMBB);
 
-  MCSymbol *StackMapReset =
-      MF.getContext().createTempSymbol("goobj_stackmap_reset");
-  BuildMI(MorestackMBB, DL, TII.get(TargetOpcode::ANNOTATION_LABEL))
-      .addSym(StackMapReset);
-  MF.getContext().addGoObjStackMapResetLabel(StackMapReset);
+  bool UseStackGrowthStatepoint =
+      MF.getFunction().hasFnAttribute(goabi::StackGrowthStatepointAttr);
+  if (!UseStackGrowthStatepoint)
+    for (const MachineBasicBlock &MBB : MF)
+      for (const MachineInstr &MI : MBB)
+        if (MI.getOpcode() == TargetOpcode::STATEPOINT)
+          report_fatal_error(
+              "GoObj statepoints require the go-stack-growth-statepoint "
+              "function attribute");
 
   unsigned ScratchReg = X86::R12;
   if (StackSize <= GoStackSmall) {
@@ -292,30 +338,41 @@ static void emitGoStackCheck(MachineFunction &MF,
         .addImm(X86::COND_B);
   }
 
-  BuildMI(CheckMBB, DL, TII.get(X86::CMP64rm))
+  BuildMI(CompareMBB, DL, TII.get(X86::CMP64rm))
       .addReg(ScratchReg)
       .addReg(X86::R14)
       .addImm(1)
       .addReg(X86::NoRegister)
       .addImm(GoGStackGuard0Offset)
       .addReg(X86::NoRegister);
-  BuildMI(CheckMBB, DL, TII.get(X86::JCC_1))
+  BuildMI(CompareMBB, DL, TII.get(X86::JCC_1))
       .addMBB(&EntryMBB)
       .addImm(X86::COND_A);
 
   emitGoRegSpills(MF, *MorestackMBB, Spills, /*Reload=*/false);
   bool HasClosureContext = hasGoClosureContext(MF.getFunction());
+  const char *MorestackName =
+      HasClosureContext ? "runtime.morestack" : "runtime.morestack_noctxt";
   MachineInstrBuilder Morestack =
-      BuildMI(MorestackMBB, DL, TII.get(X86::CALL64pcrel32))
-          .addExternalSymbol(HasClosureContext ? "runtime.morestack"
-                                               : "runtime.morestack_noctxt");
+      UseStackGrowthStatepoint
+          ? buildGoStackGrowthStatepoint(MF, *MorestackMBB, DL, TII,
+                                         MorestackName)
+          : BuildMI(MorestackMBB, DL, TII.get(X86::CALL64pcrel32))
+                .addExternalSymbol(MorestackName);
   if (HasClosureContext)
     Morestack.addReg(X86::RDX, RegState::Implicit);
   emitGoRegSpills(MF, *MorestackMBB, Spills, /*Reload=*/true);
   BuildMI(MorestackMBB, DL, TII.get(X86::JMP_1)).addMBB(&EntryMBB);
 
-  CheckMBB->addSuccessor(MorestackMBB, BranchProbability::getZero());
-  CheckMBB->addSuccessor(&EntryMBB, BranchProbability::getOne());
+  if (CompareMBB != CheckMBB) {
+    CheckMBB->addSuccessor(MorestackMBB, BranchProbability::getZero());
+    CheckMBB->addSuccessor(CompareMBB, BranchProbability::getOne());
+    CompareMBB->addSuccessor(MorestackMBB, BranchProbability::getZero());
+    CompareMBB->addSuccessor(&EntryMBB, BranchProbability::getOne());
+  } else {
+    CheckMBB->addSuccessor(MorestackMBB, BranchProbability::getZero());
+    CheckMBB->addSuccessor(&EntryMBB, BranchProbability::getOne());
+  }
   MorestackMBB->addSuccessor(&EntryMBB);
 }
 } // namespace

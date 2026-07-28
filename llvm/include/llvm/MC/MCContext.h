@@ -243,9 +243,6 @@ private:
   DenseMap<const MCSymbol *, std::vector<GoObjStackMapEntry>>
       GoObjSymbolStackMapEntries;
 
-  /// Labels at which Go stack-growth slow paths begin.
-  std::vector<const MCSymbol *> GoObjStackMapResetLabels;
-
   /// A mapping from a local label number and an instance count to a symbol.
   /// For example, in the assembly
   ///     1:
@@ -773,14 +770,6 @@ public:
     if (It == GoObjSymbolStackMapEntries.end())
       return nullptr;
     return &It->second;
-  }
-
-  void addGoObjStackMapResetLabel(const MCSymbol *Label) {
-    GoObjStackMapResetLabels.push_back(Label);
-  }
-
-  const std::vector<const MCSymbol *> &getGoObjStackMapResetLabels() const {
-    return GoObjStackMapResetLabels;
   }
 
   /// Allocates and returns a new `WasmSignature` instance (with empty parameter

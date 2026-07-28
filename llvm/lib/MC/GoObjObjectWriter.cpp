@@ -294,7 +294,7 @@ struct GoObjStatepointStackMaps {
 
 GoObjStatepointStackMaps makeStatepointStackMaps(
     const MCAssembler &Asm, const GoObjSymbol &Function, uint32_t StackSize,
-    uint32_t PCQuantum, ArrayRef<const MCSymbol *> StackMapResetLabels,
+    uint32_t PCQuantum,
     ArrayRef<MCContext::GoObjStackMapEntry> StackMapEntries) {
   struct ResolvedEntry {
     uint64_t CallsitePC;
@@ -396,21 +396,10 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
       report_fatal_error("GoObj stack map index exceeds int32 limit");
 
     // GoObj records statepoint callsites at the beginning of the CALL. The
-    // live-out map remains in effect until another call changes it or the
-    // stack-growth slow path starts after the normal return sequence.
+    // live-out map remains in effect until another statepoint, including the
+    // stack-growth call, changes it.
     PCDataEntries.push_back(
         {Resolved.CallsitePC, static_cast<int32_t>(MapIndex)});
-  }
-
-  for (const MCSymbol *Label : StackMapResetLabels) {
-    if (!Label || !Label->isInSection() ||
-        &Label->getSection() != Function.Section)
-      continue;
-    uint64_t LabelOffset = Asm.getSymbolOffset(*Label);
-    if (LabelOffset < Function.SectionBegin ||
-        LabelOffset >= Function.SectionEnd)
-      continue;
-    PCDataEntries.push_back({LabelOffset - Function.SectionBegin, -1});
   }
 
   // Args and locals maps share PCDATA_StackMapIndex. Argument classification
@@ -890,8 +879,7 @@ uint64_t GoObjObjectWriter::writeObject() {
               Symbols[I].Symbol)) {
         if (!Entries->empty()) {
           GoObjStatepointStackMaps Maps = makeStatepointStackMaps(
-              *Asm, Symbols[I], StackSize, PCQuantum,
-              Asm->getContext().getGoObjStackMapResetLabels(), *Entries);
+              *Asm, Symbols[I], StackSize, PCQuantum, *Entries);
           ArgsMap = std::move(Maps.Args);
           LocalsMap = std::move(Maps.Locals);
           StackMapIndex = std::move(Maps.PCData);

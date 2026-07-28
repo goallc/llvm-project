@@ -27,6 +27,12 @@ class Type;
 namespace goabi {
 
 inline constexpr StringLiteral TupleResultsAttr = "go_results_tuple";
+// The Go statepoint pass uses this attribute to request that target frame
+// lowering represent the late morestack call with a root-free STATEPOINT.
+inline constexpr StringLiteral StackGrowthStatepointAttr =
+    "go-stack-growth-statepoint";
+// "GoStackG" encoded as a stable positive statepoint identifier.
+inline constexpr uint64_t StackGrowthStatepointID = 0x476f537461636b47ULL;
 
 inline bool isGoABIInternalCallingConv(CallingConv::ID CC) {
   return CC == CallingConv::GoABIInternal;
