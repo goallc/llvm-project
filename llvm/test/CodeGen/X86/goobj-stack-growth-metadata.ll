@@ -41,20 +41,20 @@ entry:
 ; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=funcinfo target= args={{[1-9][0-9]*}} locals={{[1-9][0-9][0-9][0-9][0-9]*}}
 ; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000
 ; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000
-; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc=[0-
-; CHECK-SAME: :0
+; CHECK: aux 0.{{[0-9]+}}: type=pcdata target= pc=[0-{{[0-9]+}}:-1]
+; CHECK-NEXT: aux 0.{{[0-9]+}}: type=pcdata target= pc=[0-{{[0-9]+}}:0]
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.morestack_noctxt
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.morestack
 
 ; ASM-LABEL: big_frame:
 ; ASM: retq
-; ASM-NEXT: .LBB0_1:
+; ASM-NEXT: .LBB0_{{[0-9]+}}:
 ; ASM-NEXT: .Lgoobj_stackmap_reset0:
 ; ASM: callq runtime.morestack_noctxt
 
 ; ASM-LABEL: big_closure_frame:
 ; ASM: retq
-; ASM-NEXT: .LBB1_1:
+; ASM-NEXT: .LBB1_{{[0-9]+}}:
 ; ASM-NEXT: .Lgoobj_stackmap_reset1:
 ; ASM: callq runtime.morestack
 
