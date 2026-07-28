@@ -852,16 +852,6 @@ uint64_t GoObjObjectWriter::writeObject() {
     GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
 
     uint16_t RelocType = checkedUint16(Reloc.Type, "relocation type");
-    if ((Source.Flag & GoObj::SymFlagGoType) && Reloc.Size == 4 &&
-        RelocType == GoObj::R_ADDR) {
-      if (Reloc.Symbol && Reloc.Symbol->isInSection() &&
-          getGoObjSymbolType(&Reloc.Symbol->getSection()) == GoObj::STEXT)
-        RelocType = GoObj::R_METHODOFF;
-      else if (Reloc.Symbol && Reloc.Symbol->getName().starts_with("type:func"))
-        RelocType = GoObj::R_METHODOFF;
-      else
-        RelocType = GoObj::R_ADDROFF;
-    }
     if (Source.Symbol) {
       if (const auto *Overrides =
               Asm->getContext().getGoObjRelocOverrides(Source.Symbol)) {
