@@ -7,15 +7,18 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/GoCallingConv.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/Instructions.h"
+#include "llvm/Support/ErrorHandling.h"
+#include <limits>
 
 using namespace llvm;
 
 namespace llvm::goabi {
 
-static bool classifyType(Type *Ty, const DataLayout &DL, const ABIConfig &Config,
-                         unsigned &IntRegs, unsigned &FPRegs) {
+static bool classifyType(Type *Ty, const DataLayout &DL,
+                         const ABIConfig &Config, unsigned &IntRegs,
+                         unsigned &FPRegs) {
   if (Ty->isVoidTy())
     return true;
 
@@ -132,8 +135,9 @@ void getReturnTypes(Type *ReturnType, bool TupleResults,
   ResultTys.push_back(ReturnType);
 }
 
-CallLayout computeCallLayout(ArrayRef<Type *> ArgTys, ArrayRef<Type *> ResultTys,
-                             const DataLayout &DL, const ABIConfig &Config) {
+CallLayout computeCallLayout(ArrayRef<Type *> ArgTys,
+                             ArrayRef<Type *> ResultTys, const DataLayout &DL,
+                             const ABIConfig &Config) {
   CallLayout Layout;
   Layout.Args.reserve(ArgTys.size());
   Layout.Results.reserve(ResultTys.size());
@@ -142,7 +146,8 @@ CallLayout computeCallLayout(ArrayRef<Type *> ArgTys, ArrayRef<Type *> ResultTys
   unsigned NextFP = 0;
   uint64_t StackArgsEnd = 0;
   for (Type *ArgTy : ArgTys) {
-    ValueLayout ArgLayout = computeValueLayout(ArgTy, DL, Config, NextInt, NextFP);
+    ValueLayout ArgLayout =
+        computeValueLayout(ArgTy, DL, Config, NextInt, NextFP);
     if (!ArgLayout.InRegs)
       StackArgsEnd = layoutStackValue(StackArgsEnd, ArgLayout);
     Layout.Args.push_back(ArgLayout);
@@ -168,14 +173,93 @@ CallLayout computeCallLayout(ArrayRef<Type *> ArgTys, ArrayRef<Type *> ResultTys
     if (ArgLayout.InRegs)
       SpillEnd = alignToValue(SpillEnd, ArgLayout.Alignment) + ArgLayout.Size;
   Layout.SpillAreaSize = SpillEnd - Layout.SpillAreaOffset;
-  Layout.TotalStackSize =
-      alignToValue(alignToValue(SpillEnd, Config.PtrAlign), Config.StackAlign);
+  Layout.ArgSize = alignToValue(SpillEnd, Config.PtrAlign);
+  Layout.TotalStackSize = alignToValue(Layout.ArgSize, Config.StackAlign);
   return Layout;
 }
 
-bool isIntegerPiece(Type *Ty) {
-  return Ty->isPointerTy() || Ty->isIntegerTy();
+static void collectPointerOffsets(Type *Ty, uint64_t BaseOffset,
+                                  const DataLayout &DL,
+                                  SmallVectorImpl<uint64_t> &Offsets) {
+  if (Ty->isPointerTy()) {
+    Offsets.push_back(BaseOffset);
+    return;
+  }
+
+  if (auto *AT = dyn_cast<ArrayType>(Ty)) {
+    uint64_t Stride = DL.getTypeAllocSize(AT->getElementType());
+    for (uint64_t I = 0; I != AT->getNumElements(); ++I)
+      collectPointerOffsets(AT->getElementType(), BaseOffset + I * Stride, DL,
+                            Offsets);
+    return;
+  }
+
+  if (auto *ST = dyn_cast<StructType>(Ty)) {
+    const StructLayout *Layout = DL.getStructLayout(ST);
+    for (auto [Index, ElementTy] : llvm::enumerate(ST->elements()))
+      collectPointerOffsets(
+          ElementTy, BaseOffset + Layout->getElementOffset(Index), DL, Offsets);
+    return;
+  }
+
+  if (Ty->isVectorTy() && Ty->getScalarType()->isPointerTy())
+    report_fatal_error("Go entry argument maps do not support pointer vectors");
 }
+
+EntryArgsInfo computeEntryArgsInfo(ArrayRef<Type *> ArgTys,
+                                   const CallLayout &Layout,
+                                   const DataLayout &DL,
+                                   const ABIConfig &Config) {
+  if (!Config.PtrSize || Layout.ArgSize % Config.PtrSize != 0 ||
+      Layout.ArgSize / Config.PtrSize > std::numeric_limits<uint32_t>::max())
+    report_fatal_error("invalid Go entry argument map dimensions");
+  if (ArgTys.size() != Layout.Args.size())
+    report_fatal_error("Go entry argument types do not match ABI layout");
+
+  EntryArgsInfo Info;
+  Info.PointerSize = Config.PtrSize;
+  Info.ArgSize = Layout.ArgSize;
+  Info.NumBits = static_cast<uint32_t>(Layout.ArgSize / Config.PtrSize);
+
+  SmallVector<uint64_t, 8> HomeOffsets(ArgTys.size());
+  uint64_t SpillOffset = Layout.SpillAreaOffset;
+  for (auto [Index, ArgLayout] : llvm::enumerate(Layout.Args)) {
+    if (ArgLayout.InRegs) {
+      SpillOffset = alignToValue(SpillOffset, ArgLayout.Alignment);
+      HomeOffsets[Index] = SpillOffset;
+      SpillOffset += ArgLayout.Size;
+    } else {
+      HomeOffsets[Index] = ArgLayout.StackOffset;
+    }
+  }
+  if (SpillOffset != Layout.SpillAreaOffset + Layout.SpillAreaSize)
+    report_fatal_error("Go entry argument homes do not match spill area");
+
+  SmallVector<uint64_t, 16> PointerOffsets;
+  for (auto [Index, ArgTy] : llvm::enumerate(ArgTys))
+    collectPointerOffsets(ArgTy, HomeOffsets[Index], DL, PointerOffsets);
+  llvm::sort(PointerOffsets);
+
+  for (uint64_t Offset : PointerOffsets) {
+    if (Offset % Config.PtrSize != 0 ||
+        Offset + Config.PtrSize > Layout.ArgSize)
+      report_fatal_error(
+          "Go entry argument pointer is outside an aligned ABI home");
+    uint32_t Word = static_cast<uint32_t>(Offset / Config.PtrSize);
+    if (!Info.PointerWords.empty() && Info.PointerWords.back() >= Word)
+      report_fatal_error(
+          "Go entry argument pointer words are not strictly ordered");
+    Info.PointerWords.push_back(Word);
+  }
+
+  // TODO(goallc): LLVM opaque pointer types currently conflate the non-GC
+  // itab/type word of a Go interface and pointers to NotInHeap types with
+  // ordinary Go GC pointers. Treat them conservatively until the frontend
+  // gives those words a distinct IR type or signature attribute.
+  return Info;
+}
+
+bool isIntegerPiece(Type *Ty) { return Ty->isPointerTy() || Ty->isIntegerTy(); }
 
 bool isFloatingPiece(Type *Ty) {
   return Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||

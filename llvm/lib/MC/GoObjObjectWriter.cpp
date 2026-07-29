@@ -296,14 +296,15 @@ struct GoObjGCFrameLayout {
   uint32_t FuncInfoLocalsSize;
   uint32_t GCLocalsStart;
   uint32_t GCLocalsSize;
+  uint32_t EntryArgsStart;
 };
 
 GoObjGCFrameLayout getGoObjGCFrameLayout(const Triple &TT, uint32_t StackSize,
                                          uint32_t PointerSize) {
   if (TT.getArch() != Triple::aarch64)
-    return {StackSize, 0, StackSize};
+    return {StackSize, 0, StackSize, 0};
   if (StackSize == 0)
-    return {0, 0, 0};
+    return {0, 0, 0, PointerSize};
   if (!PointerSize || StackSize < 2 * PointerSize ||
       StackSize % PointerSize != 0)
     report_fatal_error("AArch64 GoObj frame has invalid GC layout");
@@ -313,12 +314,22 @@ GoObjGCFrameLayout getGoObjGCFrameLayout(const Triple &TT, uint32_t StackSize,
   // next callee. _func.locals is frame.varp-SP, so it excludes LR from the
   // physical frame size. Locals pointer maps exclude both reserved words and
   // therefore describe [SP+PointerSize, frame.varp).
-  return {StackSize - PointerSize, PointerSize, StackSize - 2 * PointerSize};
+  return {StackSize - PointerSize, PointerSize, StackSize - 2 * PointerSize,
+          PointerSize};
 }
+
+struct GoObjStackMapPair {
+  SmallVector<uint8_t, 8> Args;
+  SmallVector<uint8_t, 8> Locals;
+
+  bool operator==(const GoObjStackMapPair &Other) const {
+    return Args == Other.Args && Locals == Other.Locals;
+  }
+};
 
 GoObjStatepointStackMaps makeStatepointStackMaps(
     const MCAssembler &Asm, const GoObjSymbol &Function, uint32_t StackSize,
-    uint32_t PCQuantum,
+    uint32_t ArgSize, uint32_t PCQuantum,
     ArrayRef<MCContext::GoObjStackMapEntry> StackMapEntries) {
   struct ResolvedEntry {
     uint64_t CallsitePC;
@@ -365,21 +376,16 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   uint32_t NBits = checkedUint32(
       divideCeil(static_cast<uint64_t>(FrameLayout.GCLocalsSize), PointerSize),
       "GoObj locals stack map bit count");
-  size_t BytesPerBitmap = divideCeil(NBits, 8u);
+  if (ArgSize % PointerSize != 0)
+    report_fatal_error("GoObj argument area is not pointer-aligned");
+  uint32_t ArgsNBits = ArgSize / PointerSize;
+  size_t LocalsBytesPerBitmap = divideCeil(NBits, 8u);
+  size_t ArgsBytesPerBitmap = divideCeil(ArgsNBits, 8u);
 
-  SmallVector<SmallVector<uint8_t, 8>, 8> Bitmaps;
-  SmallVector<GoObjPCTabEntry, 16> PCDataEntries;
-  std::optional<uint64_t> PreviousCallsitePC;
-  for (const ResolvedEntry &Resolved : ResolvedEntries) {
-    if (PreviousCallsitePC && *PreviousCallsitePC == Resolved.CallsitePC)
-      report_fatal_error("GoObj statepoint callsites have duplicate PCs");
-    PreviousCallsitePC = Resolved.CallsitePC;
-    const MCContext::GoObjStackMapEntry &Entry = *Resolved.Entry;
-    if (Entry.PointerSize != PointerSize)
-      report_fatal_error(
-          "GoObj statepoint pointer size changes within a function");
-
-    SmallVector<uint8_t, 8> Bitmap(BytesPerBitmap, 0);
+  auto BuildPair = [&](const MCContext::GoObjStackMapEntry &Entry) {
+    bool IsStackGrowth = Entry.ID == GoObj::StackGrowthStatepointID;
+    GoObjStackMapPair Pair{SmallVector<uint8_t, 8>(ArgsBytesPerBitmap, 0),
+                           SmallVector<uint8_t, 8>(LocalsBytesPerBitmap, 0)};
     for (const MCContext::GoObjStackMapLocation &Loc : Entry.Locations) {
       switch (Loc.Type) {
       case MCContext::GoObjStackMapLocation::Direct:
@@ -392,15 +398,38 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
         report_fatal_error(
             "GoObj statepoint GC pointer is not in a stack slot");
       }
-      if (Loc.Size != PointerSize || Loc.Offset < 0 ||
-          Loc.DwarfRegNum != StackPointerDwarfRegNum ||
+      if (Loc.Size != PointerSize || Loc.DwarfRegNum != StackPointerDwarfRegNum)
+        report_fatal_error(
+            "GoObj statepoint contains an invalid pointer stack slot");
+
+      if (IsStackGrowth) {
+        if (Loc.Type != MCContext::GoObjStackMapLocation::Indirect ||
+            Loc.Offset < 0 ||
+            static_cast<uint64_t>(Loc.Offset) < FrameLayout.EntryArgsStart ||
+            static_cast<uint64_t>(Loc.Offset) + PointerSize >
+                static_cast<uint64_t>(FrameLayout.EntryArgsStart) + ArgSize ||
+            (static_cast<uint64_t>(Loc.Offset) - FrameLayout.EntryArgsStart) %
+                    PointerSize !=
+                0)
+          report_fatal_error(
+              "GoObj stack-growth statepoint contains an invalid argument "
+              "pointer slot");
+        uint32_t Bit =
+            (static_cast<uint32_t>(Loc.Offset) - FrameLayout.EntryArgsStart) /
+            PointerSize;
+        Pair.Args[Bit / 8] |= uint8_t(1u << (Bit % 8));
+        continue;
+      }
+
+      if (Loc.Offset < 0 ||
           static_cast<uint64_t>(Loc.Offset) < FrameLayout.GCLocalsStart ||
           static_cast<uint64_t>(Loc.Offset) + PointerSize >
               static_cast<uint64_t>(FrameLayout.GCLocalsStart) +
                   FrameLayout.GCLocalsSize ||
           static_cast<uint64_t>(Loc.Offset) % PointerSize != 0)
         report_fatal_error(
-            "GoObj statepoint contains an invalid pointer stack slot");
+            "GoObj ordinary statepoint contains an invalid locals pointer "
+            "slot");
 
       // Direct describes the pointer value SP+Offset, not a pointer stored at
       // SP+Offset. Statepoint lowering rematerializes that address after stack
@@ -412,16 +441,45 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
       uint32_t Bit =
           (static_cast<uint32_t>(Loc.Offset) - FrameLayout.GCLocalsStart) /
           PointerSize;
-      Bitmap[Bit / 8] |= uint8_t(1u << (Bit % 8));
+      Pair.Locals[Bit / 8] |= uint8_t(1u << (Bit % 8));
     }
+    return Pair;
+  };
 
-    auto It = llvm::find(Bitmaps, Bitmap);
-    uint32_t MapIndex;
-    if (It == Bitmaps.end()) {
-      MapIndex = checkedUint32(Bitmaps.size(), "GoObj stack map index");
-      Bitmaps.push_back(std::move(Bitmap));
-    } else {
-      MapIndex = checkedUint32(It - Bitmaps.begin(), "GoObj stack map index");
+  const ResolvedEntry *StackGrowthEntry = nullptr;
+  for (const ResolvedEntry &Resolved : ResolvedEntries) {
+    if (Resolved.Entry->ID != GoObj::StackGrowthStatepointID)
+      continue;
+    if (StackGrowthEntry)
+      report_fatal_error(
+          "GoObj function contains multiple stack-growth statepoints");
+    StackGrowthEntry = &Resolved;
+  }
+  if (!StackGrowthEntry)
+    report_fatal_error("GoObj function has no stack-growth statepoint");
+
+  SmallVector<GoObjStackMapPair, 8> Pairs;
+  Pairs.push_back(BuildPair(*StackGrowthEntry->Entry));
+  SmallVector<GoObjPCTabEntry, 16> PCDataEntries;
+  std::optional<uint64_t> PreviousCallsitePC;
+  for (const ResolvedEntry &Resolved : ResolvedEntries) {
+    if (PreviousCallsitePC && *PreviousCallsitePC == Resolved.CallsitePC)
+      report_fatal_error("GoObj statepoint callsites have duplicate PCs");
+    PreviousCallsitePC = Resolved.CallsitePC;
+    const MCContext::GoObjStackMapEntry &Entry = *Resolved.Entry;
+    if (Entry.PointerSize != PointerSize)
+      report_fatal_error(
+          "GoObj statepoint pointer size changes within a function");
+    uint32_t MapIndex = 0;
+    if (Entry.ID != GoObj::StackGrowthStatepointID) {
+      GoObjStackMapPair Pair = BuildPair(Entry);
+      auto It = llvm::find(Pairs, Pair);
+      if (It == Pairs.end()) {
+        MapIndex = checkedUint32(Pairs.size(), "GoObj stack map index");
+        Pairs.push_back(std::move(Pair));
+      } else {
+        MapIndex = checkedUint32(It - Pairs.begin(), "GoObj stack map index");
+      }
     }
     if (MapIndex > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))
       report_fatal_error("GoObj stack map index exceeds int32 limit");
@@ -433,10 +491,14 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
         {Resolved.CallsitePC, static_cast<int32_t>(MapIndex)});
   }
 
-  // Args and locals maps share PCDATA_StackMapIndex. Argument classification
-  // is not available here yet, but the empty argument map still needs the same
-  // number of entries as the locals map.
-  SmallVector<SmallVector<uint8_t, 8>, 8> EmptyArgsMaps(Bitmaps.size());
+  SmallVector<SmallVector<uint8_t, 8>, 8> ArgsBitmaps;
+  SmallVector<SmallVector<uint8_t, 8>, 8> LocalsBitmaps;
+  ArgsBitmaps.reserve(Pairs.size());
+  LocalsBitmaps.reserve(Pairs.size());
+  for (GoObjStackMapPair &Pair : Pairs) {
+    ArgsBitmaps.push_back(std::move(Pair.Args));
+    LocalsBitmaps.push_back(std::move(Pair.Locals));
+  }
   SmallVector<GoObjPCTabEntry, 16> NormalizedPCDataEntries;
   llvm::stable_sort(PCDataEntries, [](const auto &LHS, const auto &RHS) {
     if (LHS.PC != RHS.PC)
@@ -451,8 +513,8 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
       NormalizedPCDataEntries.push_back(Entry);
   }
   GoObjStatepointStackMaps Result;
-  Result.Args = makeStackMap(0, EmptyArgsMaps);
-  Result.Locals = makeStackMap(NBits, Bitmaps);
+  Result.Args = makeStackMap(ArgsNBits, ArgsBitmaps);
+  Result.Locals = makeStackMap(NBits, LocalsBitmaps);
   Result.PCData =
       makePCTab(-1, NormalizedPCDataEntries, Function.Size, PCQuantum);
   return Result;
@@ -914,7 +976,7 @@ uint64_t GoObjObjectWriter::writeObject() {
               Symbols[I].Symbol)) {
         if (!Entries->empty()) {
           GoObjStatepointStackMaps Maps = makeStatepointStackMaps(
-              *Asm, Symbols[I], StackSize, PCQuantum, *Entries);
+              *Asm, Symbols[I], StackSize, ArgSize, PCQuantum, *Entries);
           ArgsMap = std::move(Maps.Args);
           LocalsMap = std::move(Maps.Locals);
           StackMapIndex = std::move(Maps.PCData);

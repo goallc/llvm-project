@@ -272,7 +272,7 @@ static uint32_t getGoObjArgSize(const Function &F, const DataLayout &DL,
   goabi::getReturnTypes(F.getReturnType(), goabi::hasTupleResultsAttr(F),
                         ResultTys);
   uint64_t Size =
-      goabi::computeCallLayout(ArgTys, ResultTys, DL, Config).TotalStackSize;
+      goabi::computeCallLayout(ArgTys, ResultTys, DL, Config).ArgSize;
   if (Size > std::numeric_limits<uint32_t>::max())
     report_fatal_error("GoObj function argument size exceeds uint32 limit");
   return static_cast<uint32_t>(Size);
