@@ -12,6 +12,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/BinaryFormat/GoObj.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/DataLayout.h"
@@ -31,8 +32,8 @@ inline constexpr StringLiteral TupleResultsAttr = "go_results_tuple";
 // lowering represent the late morestack call with a root-free STATEPOINT.
 inline constexpr StringLiteral StackGrowthStatepointAttr =
     "go-stack-growth-statepoint";
-// "GoStackG" encoded as a stable positive statepoint identifier.
-inline constexpr uint64_t StackGrowthStatepointID = 0x476f537461636b47ULL;
+inline constexpr uint64_t StackGrowthStatepointID =
+    GoObj::StackGrowthStatepointID;
 
 inline bool isGoABIInternalCallingConv(CallingConv::ID CC) {
   return CC == CallingConv::GoABIInternal;
@@ -74,7 +75,17 @@ struct CallLayout {
   uint64_t StackResultsSize = 0;
   uint64_t SpillAreaOffset = 0;
   uint64_t SpillAreaSize = 0;
+  /// Semantic Go argument/result/home area size, excluding target call-frame
+  /// tail padding.
+  uint64_t ArgSize = 0;
   uint64_t TotalStackSize = 0;
+};
+
+struct EntryArgsInfo {
+  uint32_t PointerSize = 0;
+  uint64_t ArgSize = 0;
+  uint32_t NumBits = 0;
+  SmallVector<uint32_t, 8> PointerWords;
 };
 
 bool hasTupleResultsAttr(const AttributeList &Attrs);
@@ -84,8 +95,14 @@ bool hasTupleResultsAttr(const CallBase &CB);
 void getReturnTypes(Type *ReturnType, bool TupleResults,
                     SmallVectorImpl<Type *> &ResultTys);
 
-CallLayout computeCallLayout(ArrayRef<Type *> ArgTys, ArrayRef<Type *> ResultTys,
-                             const DataLayout &DL, const ABIConfig &Config);
+CallLayout computeCallLayout(ArrayRef<Type *> ArgTys,
+                             ArrayRef<Type *> ResultTys, const DataLayout &DL,
+                             const ABIConfig &Config);
+
+EntryArgsInfo computeEntryArgsInfo(ArrayRef<Type *> ArgTys,
+                                   const CallLayout &Layout,
+                                   const DataLayout &DL,
+                                   const ABIConfig &Config);
 
 bool isIntegerPiece(Type *Ty);
 bool isFloatingPiece(Type *Ty);

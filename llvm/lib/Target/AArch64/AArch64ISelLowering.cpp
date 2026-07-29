@@ -25,6 +25,7 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SmallVectorExtras.h"
@@ -9073,10 +9074,19 @@ static SDValue lowerAArch64GoFormalArguments(
 
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys = getAArch64GoArgTypes(F, LayoutMap);
+  goabi::ABIConfig ABIConfig =
+      getAArch64GoABIConfig(TLI, Subtarget, F.getCallingConv());
   goabi::CallLayout Layout = goabi::computeCallLayout(
       ArgTys, getAArch64GoReturnTypes(F.getReturnType(), F.getAttributes()),
-      DAG.getDataLayout(),
-      getAArch64GoABIConfig(TLI, Subtarget, F.getCallingConv()));
+      DAG.getDataLayout(), ABIConfig);
+
+  std::optional<goabi::EntryArgsInfo> EntryArgs;
+  SmallBitVector MatchedEntryArgWords;
+  if (F.hasFnAttribute(goabi::StackGrowthStatepointAttr)) {
+    EntryArgs = goabi::computeEntryArgsInfo(ArgTys, Layout, DAG.getDataLayout(),
+                                            ABIConfig);
+    MatchedEntryArgWords.resize(EntryArgs->NumBits);
+  }
 
   SmallVector<uint64_t, 8> ArgSpillOffsets(ArgTys.size(), 0);
   uint64_t SpillOffset = Layout.SpillAreaOffset;
@@ -9091,7 +9101,31 @@ static SDValue lowerAArch64GoFormalArguments(
 
   FuncInfo->setBytesInStackArgArea(Layout.TotalStackSize);
   FuncInfo->clearGoRegArgSpillSlots();
+  FuncInfo->clearGoArgPointerSlots();
   unsigned StackBias = getAArch64GoStackBias(F.getCallingConv());
+
+  auto RecordPointerSlots = [&](int FI, uint64_t ArgOffset, uint64_t Size) {
+    if (!EntryArgs)
+      return;
+    uint64_t PointerSize = EntryArgs->PointerSize;
+    for (uint32_t Word : EntryArgs->PointerWords) {
+      uint64_t PointerOffset = static_cast<uint64_t>(Word) * PointerSize;
+      if (PointerOffset < ArgOffset ||
+          PointerOffset + PointerSize > ArgOffset + Size)
+        continue;
+      if (MatchedEntryArgWords.test(Word))
+        report_fatal_error(
+            "Go entry argument pointer word maps to multiple AArch64 fixed "
+            "objects");
+      uint64_t WithinObject = PointerOffset - ArgOffset;
+      if (WithinObject > UINT32_MAX)
+        report_fatal_error(
+            "Go entry argument pointer offset exceeds AArch64 metadata range");
+      FuncInfo->addGoArgPointerSlot(FI, static_cast<uint32_t>(WithinObject),
+                                    Word);
+      MatchedEntryArgWords.set(Word);
+    }
+  };
 
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
     if (Group.Index == ISD::InputArg::NoArgIndex)
@@ -9135,6 +9169,7 @@ static SDValue lowerAArch64GoFormalArguments(
             /*IsImmutable=*/false);
         FuncInfo->addGoRegArgSpillSlot(PReg, FI, Size,
                                        isAArch64GoFloatPiece(In.OrigTy));
+        RecordPointerSlots(FI, ArgSpillOffset + SpillPieceOffset, Size);
         SpillPieceOffset += Size;
 
         if (In.VT != CopyVT)
@@ -9148,10 +9183,18 @@ static SDValue lowerAArch64GoFormalArguments(
       int FI = MFI.CreateFixedObject(
           Size, StackBias + ArgLayout.StackOffset + In.PartOffset,
           /*IsImmutable=*/true);
+      RecordPointerSlots(FI, ArgLayout.StackOffset + In.PartOffset, Size);
       SDValue Addr = DAG.getFrameIndex(FI, PtrVT);
       InVals.push_back(DAG.getLoad(In.VT, DL, Chain, Addr,
                                    MachinePointerInfo::getFixedStack(MF, FI)));
     }
+  }
+
+  if (EntryArgs) {
+    for (uint32_t Word : EntryArgs->PointerWords)
+      if (!MatchedEntryArgWords.test(Word))
+        report_fatal_error(
+            "Go entry argument pointer word has no AArch64 fixed object");
   }
 
   return Chain;
