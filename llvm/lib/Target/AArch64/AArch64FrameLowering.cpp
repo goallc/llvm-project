@@ -594,6 +594,12 @@ bool AArch64FrameLowering::hasFPImpl(const MachineFunction &MF) const {
       return true;
   }
 
+  // The Go arm64 ABI maintains an FP link for every non-empty frame, including
+  // leaf functions with locals or spills. Non-leaf functions are covered by
+  // the frontend's "frame-pointer"="non-leaf" policy below.
+  if (usesGoFrameLayout(MF) && MFI.getObjectIndexEnd() != 0)
+    return true;
+
   // Retain behavior of always omitting the FP for leaf functions when possible.
   if (MF.getTarget().Options.DisableFramePointerElim(MF))
     return true;
@@ -3238,9 +3244,7 @@ void AArch64FrameLowering::processFunctionBeforeFrameFinalized(
   (void)determineSVEStackSizes(MF, AssignObjectOffsets::Yes);
 
   MachineFrameInfo &MFI = MF.getFrameInfo();
-  if (usesGoFrameLayout(MF) &&
-      (MFI.hasCalls() || MFI.getObjectIndexEnd() != 0 ||
-       MFI.hasVarSizedObjects())) {
+  if (usesGoFrameLayout(MF) && hasFP(MF)) {
     // The caller writes its FP link at 8 bytes below its SP. Once this
     // function allocates a frame, that address is the top word of the new
     // physical frame. Model it as a fixed object so PEI cannot place spills

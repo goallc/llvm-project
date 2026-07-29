@@ -5,25 +5,25 @@
 
 declare goabiinternal void @"runtime.GC"()
 
-define goabiinternal i64 @add(i64 %a, i64 %b) {
+define goabiinternal i64 @add(i64 %a, i64 %b) #0 {
 entry:
   %sum = add i64 %a, %b
   ret i64 %sum
 }
 
-define goabi0 i64 @stackadd(i64 %a, i64 %b) {
+define goabi0 i64 @stackadd(i64 %a, i64 %b) #0 {
 entry:
   %sum = add i64 %a, %b
   ret i64 %sum
 }
 
-define goabiinternal void @calls() {
+define goabiinternal void @calls() #0 {
 entry:
   call goabiinternal void @"runtime.GC"()
   ret void
 }
 
-define goabiinternal i64 @largeframe(i64 %value) {
+define goabiinternal i64 @largeframe(i64 %value) #0 {
 entry:
   %buf = alloca [8192 x i8], align 16
   %slot = getelementptr inbounds [8192 x i8], ptr %buf, i64 0, i64 8191
@@ -31,7 +31,7 @@ entry:
   ret i64 %value
 }
 
-define goabiinternal i64 @largeclosure(i64 %value, ptr nest %ctxt) {
+define goabiinternal i64 @largeclosure(i64 %value, ptr nest %ctxt) #0 {
 entry:
   %buf = alloca [8192 x i8], align 16
   %slot = getelementptr inbounds [8192 x i8], ptr %buf, i64 0, i64 8191
@@ -94,3 +94,5 @@ entry:
 ; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=runtime.GC
 ; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=runtime.morestack_noctxt
 ; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=runtime.morestack
+
+attributes #0 = { "frame-pointer"="non-leaf" }

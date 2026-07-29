@@ -109,6 +109,9 @@ AArch64PrologueEpilogueCommon::AArch64PrologueEpilogueCommon(
 void AArch64PrologueEpilogueCommon::checkGoFrameLayout(
     int64_t StackSize) const {
   assert(IsGoFrame && "expected a Go frame");
+  if (!HasFP)
+    report_fatal_error(
+        "non-empty AArch64 GoObj frame requires a frame pointer");
   if (StackSize < 16 || StackSize % 16 != 0)
     report_fatal_error("AArch64 GoObj frame has invalid size");
   if (IsFunclet || NeedsWinCFI || HomPrologEpilog || MFI.hasVarSizedObjects() ||
@@ -699,16 +702,6 @@ void AArch64PrologueEmitter::emitGoFrameRecord(MachineBasicBlock::iterator MBBI,
                     TII, MachineInstr::FrameSetup, false, NeedsWinCFI,
                     &HasWinCFI, EmitAsyncCFI, StackOffset::getFixed(StackSize));
   }
-
-  if (EmitAsyncCFI)
-    emitGoFrameRecordCFI(MBBI, StackSize);
-}
-
-void AArch64PrologueEmitter::emitGoFrameRecordCFI(
-    MachineBasicBlock::iterator MBBI, int64_t StackSize) const {
-  CFIInstBuilder CFIBuilder(MBB, MBBI, MachineInstr::FrameSetup);
-  CFIBuilder.buildOffset(AArch64::LR, -StackSize);
-  CFIBuilder.buildOffset(AArch64::FP, -StackSize - 8);
 }
 
 void AArch64PrologueEmitter::emitPrologue() {
@@ -858,7 +851,7 @@ void AArch64PrologueEmitter::emitPrologue() {
 
   // For funclets the FP belongs to the containing function. Only set up FP if
   // we actually need to.
-  if (!IsFunclet && (HasFP || IsGoFrame))
+  if (!IsFunclet && HasFP)
     emitFramePointerSetup(AfterGPRSavesI, DL, FixedObject);
 
   // Now emit the moves for whatever callee saved regs we have (including FP,
@@ -977,10 +970,7 @@ void AArch64PrologueEmitter::emitPrologue() {
           createDefCFA(RegInfo, /*FrameReg=*/AArch64::SP, /*Reg=*/AArch64::SP,
                        TotalSize, /*LastAdjustmentWasScalable=*/false));
     }
-    if (IsGoFrame)
-      emitGoFrameRecordCFI(AfterSVESavesI, MFI.getStackSize());
-    else
-      emitCalleeSavedGPRLocations(AfterSVESavesI);
+    emitCalleeSavedGPRLocations(AfterSVESavesI);
     emitCalleeSavedSVELocations(AfterSVESavesI);
   }
 }
@@ -1351,6 +1341,13 @@ void AArch64PrologueEmitter::emitWindowsStackProbe(
 
 void AArch64PrologueEmitter::emitCalleeSavedGPRLocations(
     MachineBasicBlock::iterator MBBI) const {
+  if (IsGoFrame) {
+    CFIInstBuilder CFIBuilder(MBB, MBBI, MachineInstr::FrameSetup);
+    CFIBuilder.buildOffset(AArch64::LR, -MFI.getStackSize());
+    CFIBuilder.buildOffset(AArch64::FP, -MFI.getStackSize() - 8);
+    return;
+  }
+
   const std::vector<CalleeSavedInfo> &CSI = MFI.getCalleeSavedInfo();
   if (CSI.empty())
     return;

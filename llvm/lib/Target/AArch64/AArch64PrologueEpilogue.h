@@ -139,9 +139,6 @@ private:
   void emitGoFrameRecord(MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
                          int64_t StackSize) const;
 
-  void emitGoFrameRecordCFI(MachineBasicBlock::iterator MBBI,
-                            int64_t StackSize) const;
-
   void emitFramePointerSetup(MachineBasicBlock::iterator MBBI,
                              const DebugLoc &DL, unsigned FixedObject);
 
