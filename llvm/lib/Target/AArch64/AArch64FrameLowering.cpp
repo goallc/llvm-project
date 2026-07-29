@@ -268,6 +268,13 @@ using namespace llvm;
 
 #define DEBUG_TYPE "frame-info"
 
+bool AArch64FrameLowering::usesGoFrameLayout(const MachineFunction &MF) {
+  const Function &F = MF.getFunction();
+  const Triple &TT = MF.getTarget().getTargetTriple();
+  return TT.isOSBinFormatGoObj() && TT.getArch() == Triple::aarch64 &&
+         goabi::isGoCallingConv(F.getCallingConv()) && !F.isVarArg();
+}
+
 static cl::opt<bool> EnableRedZone("aarch64-redzone",
                                    cl::desc("enable use of redzone on AArch64"),
                                    cl::init(false), cl::Hidden);
@@ -586,6 +593,12 @@ bool AArch64FrameLowering::hasFPImpl(const MachineFunction &MF) const {
     if (Subtarget.getTargetLowering()->useStackGuardMixFP())
       return true;
   }
+
+  // The Go arm64 ABI maintains an FP link for every non-empty frame, including
+  // leaf functions with locals or spills. Non-leaf functions are covered by
+  // the frontend's "frame-pointer"="non-leaf" policy below.
+  if (usesGoFrameLayout(MF) && MFI.getObjectIndexEnd() != 0)
+    return true;
 
   // Retain behavior of always omitting the FP for leaf functions when possible.
   if (MF.getTarget().Options.DisableFramePointerElim(MF))
@@ -1236,10 +1249,7 @@ constexpr uint64_t GoStackSmall = 128;
 constexpr int64_t GoGStackGuard0Offset = 16;
 
 static bool shouldEmitAArch64GoStackCheck(const MachineFunction &MF) {
-  const Function &F = MF.getFunction();
-  return MF.getTarget().getTargetTriple().isOSBinFormatGoObj() &&
-         MF.getTarget().getTargetTriple().getArch() == Triple::aarch64 &&
-         goabi::isGoCallingConv(F.getCallingConv()) && !F.isVarArg();
+  return AArch64FrameLowering::usesGoFrameLayout(MF);
 }
 
 static bool hasAArch64GoClosureContext(const Function &F) {
@@ -1247,6 +1257,19 @@ static bool hasAArch64GoClosureContext(const Function &F) {
     if (Arg.hasNestAttr())
       return true;
   return false;
+}
+
+static void
+checkAArch64GoStackGrowthStatepointContract(const MachineFunction &MF) {
+  if (!AArch64FrameLowering::usesGoFrameLayout(MF) ||
+      MF.getFunction().hasFnAttribute(goabi::StackGrowthStatepointAttr))
+    return;
+  for (const MachineBasicBlock &MBB : MF)
+    for (const MachineInstr &MI : MBB)
+      if (MI.getOpcode() == TargetOpcode::STATEPOINT)
+        report_fatal_error(
+            "GoObj statepoints require the go-stack-growth-statepoint "
+            "function attribute");
 }
 
 static MachineInstrBuilder buildAArch64GoStackGrowthStatepoint(
@@ -1371,13 +1394,6 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
 
   bool UseStackGrowthStatepoint =
       MF.getFunction().hasFnAttribute(goabi::StackGrowthStatepointAttr);
-  if (!UseStackGrowthStatepoint)
-    for (const MachineBasicBlock &MBB : MF)
-      for (const MachineInstr &MI : MBB)
-        if (MI.getOpcode() == TargetOpcode::STATEPOINT)
-          report_fatal_error(
-              "GoObj statepoints require the go-stack-growth-statepoint "
-              "function attribute");
 
   Register ScratchReg = AArch64::SP;
   if (StackSize > GoStackSmall) {
@@ -1422,38 +1438,17 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
   CheckMBB->addSuccessor(&EntryMBB, BranchProbability::getOne());
   MorestackMBB->addSuccessor(&EntryMBB);
 }
+
 } // namespace
 
 void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
                                         MachineBasicBlock &MBB) const {
+  checkAArch64GoStackGrowthStatepointContract(MF);
+  if (usesGoFrameLayout(MF) && MF.getFrameInfo().hasVarSizedObjects())
+    report_fatal_error("GoObj stack growth does not support dynamic allocas");
   AArch64PrologueEmitter PrologueEmitter(MF, MBB, *this);
   PrologueEmitter.emitPrologue();
   emitAArch64GoStackCheck(MF, MBB);
-
-  const Function &F = MF.getFunction();
-  if (!MF.getTarget().getTargetTriple().isOSBinFormatGoObj() ||
-      !goabi::isGoCallingConv(F.getCallingConv()) ||
-      !MF.getFrameInfo().hasCalls())
-    return;
-
-  // Go's link-register architectures keep the caller PC at 0(SP) while a
-  // function is executing. The generic AArch64 frame puts the LR spill above
-  // the reserved call frame, so mirror it into Go's reserved minimum-frame
-  // slot for traceback and stack copying.
-  MachineBasicBlock::iterator Insert = MBB.begin();
-  while (Insert != MBB.end() && Insert->getFlag(MachineInstr::FrameSetup)) {
-    for (MachineOperand &MO : Insert->operands())
-      if (MO.isReg() && MO.getReg() == AArch64::LR)
-        MO.setIsKill(false);
-    ++Insert;
-  }
-  const AArch64InstrInfo *TII =
-      MF.getSubtarget<AArch64Subtarget>().getInstrInfo();
-  BuildMI(MBB, Insert, DebugLoc(), TII->get(AArch64::STRXui))
-      .addReg(AArch64::LR)
-      .addReg(AArch64::SP)
-      .addImm(0)
-      .setMIFlag(MachineInstr::FrameSetup);
 }
 
 void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
@@ -2746,6 +2741,12 @@ void AArch64FrameLowering::determineCalleeSaves(MachineFunction &MF,
   const AArch64Subtarget &Subtarget = MF.getSubtarget<AArch64Subtarget>();
 
   TargetFrameLowering::determineCalleeSaves(MF, SavedRegs, RS);
+  if (usesGoFrameLayout(MF)) {
+    // Go frames save LR at 0(SP) and maintain their FP link below SP. Do not
+    // allocate the platform ABI's in-frame (FP, LR) callee-save record.
+    SavedRegs.reset(AArch64::FP);
+    SavedRegs.reset(AArch64::LR);
+  }
   const AArch64RegisterInfo *RegInfo = Subtarget.getRegisterInfo();
   AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
   unsigned UnspilledCSGPR = AArch64::NoRegister;
@@ -2908,7 +2909,7 @@ void AArch64FrameLowering::determineCalleeSaves(MachineFunction &MF,
 
   // The frame record needs to be created by saving the appropriate registers
   uint64_t EstimatedStackSize = MFI.estimateStackSize(MF);
-  if (hasFP(MF) ||
+  if ((!usesGoFrameLayout(MF) && hasFP(MF)) ||
       windowsRequiresStackProbe(MF, EstimatedStackSize + CSStackSize + 16)) {
     SavedRegs.set(AArch64::FP);
     SavedRegs.set(AArch64::LR);
@@ -3242,12 +3243,21 @@ void AArch64FrameLowering::processFunctionBeforeFrameFinalized(
 
   (void)determineSVEStackSizes(MF, AssignObjectOffsets::Yes);
 
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  if (usesGoFrameLayout(MF) && hasFP(MF)) {
+    // The caller writes its FP link at 8 bytes below its SP. Once this
+    // function allocates a frame, that address is the top word of the new
+    // physical frame. Model it as a fixed object so PEI cannot place spills
+    // there. The Go call-frame bias already reserves the bottom word for LR.
+    MFI.CreateFixedObject(/*Size=*/8, /*SPOffset=*/-8,
+                          /*IsImmutable=*/true);
+  }
+
   // If this function isn't doing Win64-style C++ EH, we don't need to do
   // anything.
   if (!MF.hasEHFunclets())
     return;
 
-  MachineFrameInfo &MFI = MF.getFrameInfo();
   auto *AFI = MF.getInfo<AArch64FunctionInfo>();
 
   // Win64 C++ EH needs to allocate space for the catch objects in the fixed

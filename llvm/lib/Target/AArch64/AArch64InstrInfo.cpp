@@ -12,6 +12,7 @@
 
 #include "AArch64InstrInfo.h"
 #include "AArch64ExpandImm.h"
+#include "AArch64FrameLowering.h"
 #include "AArch64MachineFunctionInfo.h"
 #include "AArch64PointerAuth.h"
 #include "AArch64Subtarget.h"
@@ -107,6 +108,34 @@ AArch64InstrInfo::AArch64InstrInfo(const AArch64Subtarget &STI)
     : AArch64GenInstrInfo(STI, RI, AArch64::ADJCALLSTACKDOWN,
                           AArch64::ADJCALLSTACKUP, AArch64::CATCHRET),
       RI(STI.getTargetTriple(), STI.getHwMode()), Subtarget(STI) {}
+
+int64_t AArch64InstrInfo::getGoObjSPAdjust(const MachineInstr &MI) const {
+  // Large Go frames form the final SP in X16, save the frame record relative
+  // to it, and then copy X16 to SP in one architectural update. The copy does
+  // not encode the adjustment, so recover it from PEI's finalized frame size.
+  if ((MI.getFlag(MachineInstr::FrameSetup) ||
+       MI.getFlag(MachineInstr::FrameDestroy)) &&
+      MI.getOpcode() == AArch64::ADDXri &&
+      MI.getOperand(0).getReg() == AArch64::SP &&
+      MI.getOperand(1).getReg() == AArch64::X16 &&
+      MI.getOperand(2).getImm() == 0 && MI.getOperand(3).getImm() == 0 &&
+      AArch64FrameLowering::usesGoFrameLayout(*MI.getMF())) {
+    int64_t StackSize =
+        MI.getParent()->getParent()->getFrameInfo().getStackSize();
+    return MI.getFlag(MachineInstr::FrameSetup) ? StackSize : -StackSize;
+  }
+  if (MI.getFlag(MachineInstr::FrameSetup) &&
+      MI.getOpcode() == AArch64::STRXpre &&
+      MI.getOperand(0).getReg() == AArch64::SP &&
+      MI.getOperand(2).getReg() == AArch64::SP && MI.getOperand(3).getImm() < 0)
+    return -MI.getOperand(3).getImm();
+  if (MI.getFlag(MachineInstr::FrameDestroy) &&
+      MI.getOpcode() == AArch64::LDRXpost &&
+      MI.getOperand(0).getReg() == AArch64::SP &&
+      MI.getOperand(2).getReg() == AArch64::SP && MI.getOperand(3).getImm() > 0)
+    return -MI.getOperand(3).getImm();
+  return TargetInstrInfo::getGoObjSPAdjust(MI);
+}
 
 /// Return the maximum number of bytes of code the specified instruction may be
 /// after LFI rewriting. If the instruction is not rewritten, std::nullopt is

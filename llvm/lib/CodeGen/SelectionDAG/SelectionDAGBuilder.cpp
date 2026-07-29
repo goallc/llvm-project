@@ -11479,11 +11479,12 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
   // Handle the incoming return values from the call.
   CLI.Ins.clear();
   auto &DL = CLI.DAG.getDataLayout();
-  bool GoTupleResults = goabi::isGoCallingConv(CLI.CallConv) && CLI.CB &&
-                        goabi::hasTupleResultsAttr(*CLI.CB);
+  const bool IsGoCallingConv = goabi::isGoCallingConv(CLI.CallConv);
+  bool GoTupleResults =
+      IsGoCallingConv && CLI.CB && goabi::hasTupleResultsAttr(*CLI.CB);
 
   SmallVector<Type *, 4> TopLevelRetTys;
-  if (goabi::isGoCallingConv(CLI.CallConv))
+  if (IsGoCallingConv)
     goabi::getReturnTypes(CLI.OrigRetTy, GoTupleResults, TopLevelRetTys);
   else
     TopLevelRetTys.push_back(CLI.OrigRetTy);
@@ -11569,7 +11570,7 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
     CLI.IsTailCall = false;
   } else {
     bool NeedsRegBlock =
-        !goabi::isGoCallingConv(CLI.CallConv) &&
+        !IsGoCallingConv &&
         functionArgumentNeedsConsecutiveRegisters(CLI.RetTy, CLI.CallConv,
                                                   CLI.IsVarArg, DL);
     for (unsigned I = 0, E = RetVTs.size(); I != E; ++I) {
@@ -11580,21 +11581,23 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
           Flags.setInConsecutiveRegsLast();
       }
       EVT VT = RetVTs[I];
-      MVT RegisterVT = goabi::isGoCallingConv(CLI.CallConv)
+      MVT RegisterVT = IsGoCallingConv
                            ? getRegisterType(Context, VT)
                            : getRegisterTypeForCallingConv(Context, CLI.CallConv,
                                                            VT);
-      unsigned NumRegs = goabi::isGoCallingConv(CLI.CallConv)
+      unsigned NumRegs = IsGoCallingConv
                              ? getNumRegisters(Context, VT)
                              : getNumRegistersForCallingConv(Context,
                                                              CLI.CallConv, VT);
       for (unsigned i = 0; i != NumRegs; ++i) {
-        unsigned PartOffset =
-            Offsets[I].getFixedValue() +
-            i * RegisterVT.getStoreSize().getKnownMinValue();
-        unsigned OrigArgIndex = goabi::isGoCallingConv(CLI.CallConv)
-                                    ? ResultIndices[I]
-                                    : ISD::InputArg::NoArgIndex;
+        unsigned PartOffset = 0;
+        unsigned OrigArgIndex = ISD::InputArg::NoArgIndex;
+        if (IsGoCallingConv) {
+          PartOffset =
+              Offsets[I].getFixedValue() +
+              i * RegisterVT.getStoreSize().getKnownMinValue();
+          OrigArgIndex = ResultIndices[I];
+        }
         ISD::InputArg Ret(Flags, RegisterVT, VT, RetOrigTys[I],
                           CLI.IsReturnValueUsed, OrigArgIndex, PartOffset);
         if (RetOrigTys[I]->isPointerTy()) {

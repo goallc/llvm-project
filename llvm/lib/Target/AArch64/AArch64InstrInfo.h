@@ -190,6 +190,7 @@ public:
   const AArch64RegisterInfo &getRegisterInfo() const { return RI; }
 
   unsigned getInstSizeInBytes(const MachineInstr &MI) const override;
+  int64_t getGoObjSPAdjust(const MachineInstr &MI) const override;
 
   bool isAsCheapAsAMove(const MachineInstr &MI) const override;
 
