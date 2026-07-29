@@ -47,6 +47,9 @@ public:
   void emitPrologue(MachineFunction &MF, MachineBasicBlock &MBB) const override;
   void emitEpilogue(MachineFunction &MF, MachineBasicBlock &MBB) const override;
 
+  /// Return whether MF uses the Go arm64 stack and frame-chain layout.
+  static bool usesGoFrameLayout(const MachineFunction &MF);
+
   /// Harden the entire function with pac-ret.
   ///
   /// If pac-ret+leaf is requested, we want to harden as much code as possible.

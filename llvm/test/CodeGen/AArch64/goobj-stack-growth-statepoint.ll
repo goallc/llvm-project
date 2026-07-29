@@ -3,7 +3,8 @@
 ; RUN:   -stop-after=prolog-epilog < %s | FileCheck %s
 
 define goabiinternal i64 @closure_morestack_statepoint(
-    i64 %value, ptr nest %ctxt) "go-stack-growth-statepoint" {
+    i64 %value, ptr nest %ctxt) "frame-pointer"="non-leaf"
+    "go-stack-growth-statepoint" {
 entry:
   %buf = alloca [8192 x i8], align 16
   %slot = getelementptr inbounds [8192 x i8], ptr %buf, i64 0, i64 8191
