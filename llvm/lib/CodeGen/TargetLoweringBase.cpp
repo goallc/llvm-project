@@ -2113,8 +2113,9 @@ void llvm::GetReturnInfo(CallingConv::ID CC, Type *ReturnType,
                          SmallVectorImpl<ISD::OutputArg> &Outs,
                          const TargetLowering &TLI, const DataLayout &DL,
                          bool GoTupleResults) {
+  const bool IsGoCallingConv = goabi::isGoCallingConv(CC);
   SmallVector<Type *, 4> ResultTys;
-  if (goabi::isGoCallingConv(CC))
+  if (IsGoCallingConv)
     goabi::getReturnTypes(ReturnType,
                           GoTupleResults || goabi::hasTupleResultsAttr(attr),
                           ResultTys);
@@ -2125,7 +2126,8 @@ void llvm::GetReturnInfo(CallingConv::ID CC, Type *ReturnType,
        ++ResultIndex) {
     SmallVector<Type *, 4> Types;
     SmallVector<TypeSize, 4> Offsets;
-    ComputeValueTypes(DL, ResultTys[ResultIndex], Types, &Offsets);
+    ComputeValueTypes(DL, ResultTys[ResultIndex], Types,
+                      IsGoCallingConv ? &Offsets : nullptr);
     if (Types.empty())
       continue;
 
@@ -2156,11 +2158,17 @@ void llvm::GetReturnInfo(CallingConv::ID CC, Type *ReturnType,
         Flags.setZExt();
 
       unsigned PartSize = PartVT.getStoreSize().getKnownMinValue();
-      for (unsigned PartIndex = 0; PartIndex != NumParts; ++PartIndex)
+      for (unsigned PartIndex = 0; PartIndex != NumParts; ++PartIndex) {
+        unsigned OutputIndex = 0;
+        uint64_t PartOffset = 0;
+        if (IsGoCallingConv) {
+          OutputIndex = ResultIndex;
+          PartOffset =
+              Offsets[TypeIndex].getFixedValue() + PartIndex * PartSize;
+        }
         Outs.push_back(ISD::OutputArg(
-            Flags, PartVT, VT, Ty,
-            goabi::isGoCallingConv(CC) ? ResultIndex : 0,
-            Offsets[TypeIndex].getFixedValue() + PartIndex * PartSize));
+            Flags, PartVT, VT, Ty, OutputIndex, PartOffset));
+      }
     }
   }
 }
