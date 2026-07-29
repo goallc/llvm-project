@@ -1284,12 +1284,34 @@ static MachineInstrBuilder buildAArch64GoStackGrowthStatepoint(
   auto AddConstant = [&](uint64_t Value) {
     Statepoint.addImm(StackMaps::ConstantOp).addImm(Value);
   };
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+  ArrayRef<AArch64FunctionInfo::GoArgPointerSlot> PointerSlots =
+      MF.getInfo<AArch64FunctionInfo>()->getGoArgPointerSlots();
+  uint64_t PointerSize = MF.getDataLayout().getPointerSize();
   AddConstant(MF.getFunction().getCallingConv());
-  AddConstant(0); // Statepoint flags.
-  AddConstant(0); // Deopt arguments.
-  AddConstant(0); // GC pointers.
-  AddConstant(0); // GC allocas.
-  AddConstant(0); // GC base/derived map entries.
+  AddConstant(0);                   // Statepoint flags.
+  AddConstant(0);                   // Deopt arguments.
+  AddConstant(PointerSlots.size()); // GC pointers.
+  for (const AArch64FunctionInfo::GoArgPointerSlot &Slot : PointerSlots) {
+    if (!MFI.isFixedObjectIndex(Slot.FrameIndex))
+      report_fatal_error(
+          "AArch64 Go entry argument pointer slot is not a fixed object");
+    int64_t Offset = MFI.getObjectOffset(Slot.FrameIndex) +
+                     static_cast<int64_t>(Slot.OffsetWithinObject);
+    int64_t ExpectedOffset = static_cast<int64_t>(PointerSize) +
+                             static_cast<int64_t>(Slot.ArgWord) * PointerSize;
+    if (PointerSize == 0 || Offset != ExpectedOffset || !isInt<32>(Offset))
+      report_fatal_error(
+          "AArch64 Go entry argument pointer slot has invalid SP offset");
+    Statepoint.addImm(StackMaps::IndirectMemRefOp)
+        .addImm(PointerSize)
+        .addReg(AArch64::SP)
+        .addImm(Offset);
+  }
+  AddConstant(0);                   // GC allocas.
+  AddConstant(PointerSlots.size()); // GC base/derived map entries.
+  for (uint64_t I = 0; I != PointerSlots.size(); ++I)
+    Statepoint.addImm(I).addImm(I);
   Statepoint
       .addRegMask(
           MF.getSubtarget<AArch64Subtarget>()
@@ -1388,6 +1410,16 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
   CheckMBB->addLiveIn(AArch64::LR);
   MorestackMBB->addLiveIn(AArch64::X28);
   MorestackMBB->addLiveIn(AArch64::LR);
+  // Formal argument copies can be eliminated when an argument is unused in
+  // the function body, but the pre-frame morestack path still saves every
+  // ABIInternal register argument into its fixed home. Keep those physical
+  // inputs live through the newly inserted check block independently of
+  // ordinary IR uses.
+  for (const AArch64FunctionInfo::GoRegArgSpillSlot &Spill :
+       AFI->getGoRegArgSpillSlots()) {
+    CheckMBB->addLiveIn(Spill.Reg);
+    MorestackMBB->addLiveIn(Spill.Reg);
+  }
 
   MF.push_front(MorestackMBB);
   MF.push_front(CheckMBB);
@@ -1600,6 +1632,20 @@ StackOffset AArch64FrameLowering::resolveFrameOffsetReference(
   const auto &Subtarget = MF.getSubtarget<AArch64Subtarget>();
   const AArch64RegisterInfo *RegInfo = Subtarget.getRegisterInfo();
   const auto *AFI = MF.getInfo<AArch64FunctionInfo>();
+
+  // Go's physical FP is the traceback link at SP-8, not the conventional
+  // AArch64 frame-record base assumed by getFPOffset and the generic
+  // PreferFP heuristic below. Referencing a local through that register would
+  // address below SP even though the same frame index's stack-map location is
+  // resolved relative to the allocated frame. Go frames reject dynamic and
+  // realigned stacks, so SP is a stable base for both fixed inputs and locals.
+  if (usesGoFrameLayout(MF)) {
+    if (MFI.hasVarSizedObjects() || RegInfo->hasStackRealignment(MF))
+      report_fatal_error(
+          "AArch64 Go frame-index references require a fixed SP");
+    FrameReg = AArch64::SP;
+    return getStackOffset(MF, ObjectOffset);
+  }
 
   int64_t FPOffset = getFPOffset(MF, ObjectOffset).getFixed();
   int64_t Offset = getStackOffset(MF, ObjectOffset).getFixed();

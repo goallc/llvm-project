@@ -19,6 +19,10 @@
 namespace llvm {
 namespace GoObj {
 
+// "GoStackG" encoded as the stable statepoint identifier for the pre-frame
+// runtime.morestack slow path.
+inline constexpr uint64_t StackGrowthStatepointID = 0x476f537461636b47ULL;
+
 inline constexpr char Magic[] = {'\0', 'g', 'o', '1', '2', '0', 'l', 'd'};
 inline constexpr uint32_t MagicSize = sizeof(Magic);
 inline constexpr uint32_t FingerprintSize = 8;
