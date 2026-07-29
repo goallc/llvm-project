@@ -49,8 +49,12 @@ entry:
 ; ASM: ldr x17, [x28, #16]
 ; ASM: cmp sp, x17
 ; ASM: b.ls [[CALLS_MORESTACK:.LBB[0-9_]+]]
-; ASM: str x30, [sp]
+; ASM: str x30, [sp, #-16]!
+; ASM: stur x29, [sp, #-8]
+; ASM: sub x29, sp, #8
 ; ASM: bl runtime.GC
+; ASM: ldur x29, [sp, #-8]
+; ASM-NEXT: ldr x30, [sp], #16
 ; ASM: [[CALLS_MORESTACK]]:
 ; ASM: mov x3, x30
 ; ASM: bl runtime.morestack_noctxt
@@ -59,6 +63,11 @@ entry:
 ; ASM: sub x16, sp, #{{[0-9]+}}
 ; ASM: cmp x16, x17
 ; ASM: b.ls [[LARGE_MORESTACK:.LBB[0-9_]+]]
+; ASM: stp x29, x30, [x16, #-8]
+; ASM-NEXT: mov sp, x16
+; ASM: sub x29, sp, #8
+; ASM: ldp x29, x30, [sp, #-8]
+; ASM: mov sp, x16
 ; ASM: [[LARGE_MORESTACK]]:
 ; ASM: mov x3, x30
 ; ASM: str x0, [sp, #8]
@@ -81,6 +90,7 @@ entry:
 ; OBJ: nonpkgref {{[0-9]+}}: runtime.GC abi=1 type=0 size=0
 ; OBJ: nonpkgref {{[0-9]+}}: runtime.morestack_noctxt abi=0 type=0 size=0
 ; OBJ: nonpkgref {{[0-9]+}}: runtime.morestack abi=0 type=0 size=0
+; OBJ: aux {{[0-9]+}}.{{[0-9]+}}: type=funcinfo target= args=0 locals=8
 ; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=runtime.GC
 ; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=runtime.morestack_noctxt
 ; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=runtime.morestack

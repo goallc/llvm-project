@@ -74,6 +74,8 @@ protected:
   SVEFrameSizes getSVEStackFrameSizes() const;
   SVEStackAllocations getSVEStackAllocations(SVEFrameSizes const &);
 
+  void checkGoFrameLayout(int64_t StackSize) const;
+
   MachineFunction &MF;
   MachineBasicBlock &MBB;
 
@@ -89,6 +91,7 @@ protected:
   bool IsFunclet = false;   // Note: Set in derived constructors.
   bool NeedsWinCFI = false; // Note: Can be changed in emitFramePointerSetup.
   bool HomPrologEpilog = false; // Note: Set in derived constructors.
+  bool IsGoFrame = false; // GoObj function using the Go arm64 frame layout.
   SVEStackLayout SVELayout = SVEStackLayout::Default;
 
   // Note: "HasWinCFI" is mutable as it can change in any "emit" function.
@@ -132,6 +135,12 @@ private:
   void emitEmptyStackFramePrologue(int64_t NumBytes,
                                    MachineBasicBlock::iterator MBBI,
                                    const DebugLoc &DL) const;
+
+  void emitGoFrameRecord(MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
+                         int64_t StackSize) const;
+
+  void emitGoFrameRecordCFI(MachineBasicBlock::iterator MBBI,
+                            int64_t StackSize) const;
 
   void emitFramePointerSetup(MachineBasicBlock::iterator MBBI,
                              const DebugLoc &DL, unsigned FixedObject);
@@ -180,6 +189,9 @@ public:
 
 private:
   bool shouldCombineCSRLocalStackBump(uint64_t StackBumpBytes) const;
+
+  void emitGoFrameRestore(MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
+                          int64_t StackSize) const;
 
   /// A helper for moving the SP to a negative offset from the FP, without
   /// deallocating any stack in the range FP to FP + Offset.

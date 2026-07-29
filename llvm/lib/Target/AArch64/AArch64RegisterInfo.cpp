@@ -549,6 +549,10 @@ AArch64RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   if (goabi::isGoCallingConv(MF.getFunction().getCallingConv())) {
     markSuperRegs(Reserved, AArch64::W18);
     markSuperRegs(Reserved, AArch64::W28);
+    if (MF.getTarget().getTargetTriple().isOSBinFormatGoObj()) {
+      markSuperRegs(Reserved, AArch64::W29);
+      markSuperRegs(Reserved, AArch64::W30);
+    }
   }
 
   if (MF.getSubtarget<AArch64Subtarget>().isLRReservedForRA()) {

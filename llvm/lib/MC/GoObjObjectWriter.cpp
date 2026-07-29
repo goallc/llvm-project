@@ -292,6 +292,30 @@ struct GoObjStatepointStackMaps {
   SmallString<0> PCData;
 };
 
+struct GoObjGCFrameLayout {
+  uint32_t FuncInfoLocalsSize;
+  uint32_t GCLocalsStart;
+  uint32_t GCLocalsSize;
+};
+
+GoObjGCFrameLayout getGoObjGCFrameLayout(const Triple &TT, uint32_t StackSize,
+                                         uint32_t PointerSize) {
+  if (TT.getArch() != Triple::aarch64)
+    return {StackSize, 0, StackSize};
+  if (StackSize == 0)
+    return {0, 0, 0};
+  if (!PointerSize || StackSize < 2 * PointerSize ||
+      StackSize % PointerSize != 0)
+    report_fatal_error("AArch64 GoObj frame has invalid GC layout");
+
+  // Go arm64 frames keep LR at 0(SP). The caller's FP link occupies the top
+  // word at frame.varp, and this function's FP link is stored below SP for the
+  // next callee. _func.locals is frame.varp-SP, so it excludes LR from the
+  // physical frame size. Locals pointer maps exclude both reserved words and
+  // therefore describe [SP+PointerSize, frame.varp).
+  return {StackSize - PointerSize, PointerSize, StackSize - 2 * PointerSize};
+}
+
 GoObjStatepointStackMaps makeStatepointStackMaps(
     const MCAssembler &Asm, const GoObjSymbol &Function, uint32_t StackSize,
     uint32_t PCQuantum,
@@ -334,11 +358,13 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   if (PointerSize != Asm.getContext().getAsmInfo().getCodePointerSize())
     report_fatal_error(
         "GoObj statepoint pointer size does not match its target");
+  GoObjGCFrameLayout FrameLayout = getGoObjGCFrameLayout(
+      Asm.getContext().getTargetTriple(), StackSize, PointerSize);
   uint16_t StackPointerDwarfRegNum =
       getGoObjStackPointerDwarfReg(Asm.getContext().getTargetTriple());
-  uint32_t NBits =
-      checkedUint32(divideCeil(static_cast<uint64_t>(StackSize), PointerSize),
-                    "GoObj locals stack map bit count");
+  uint32_t NBits = checkedUint32(
+      divideCeil(static_cast<uint64_t>(FrameLayout.GCLocalsSize), PointerSize),
+      "GoObj locals stack map bit count");
   size_t BytesPerBitmap = divideCeil(NBits, 8u);
 
   SmallVector<SmallVector<uint8_t, 8>, 8> Bitmaps;
@@ -368,7 +394,10 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
       }
       if (Loc.Size != PointerSize || Loc.Offset < 0 ||
           Loc.DwarfRegNum != StackPointerDwarfRegNum ||
-          static_cast<uint64_t>(Loc.Offset) + PointerSize > StackSize ||
+          static_cast<uint64_t>(Loc.Offset) < FrameLayout.GCLocalsStart ||
+          static_cast<uint64_t>(Loc.Offset) + PointerSize >
+              static_cast<uint64_t>(FrameLayout.GCLocalsStart) +
+                  FrameLayout.GCLocalsSize ||
           static_cast<uint64_t>(Loc.Offset) % PointerSize != 0)
         report_fatal_error(
             "GoObj statepoint contains an invalid pointer stack slot");
@@ -380,7 +409,9 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
       // objects with pointer fields require FUNCDATA_StackObjects.
       if (Loc.Type == MCContext::GoObjStackMapLocation::Direct)
         continue;
-      uint32_t Bit = static_cast<uint32_t>(Loc.Offset) / PointerSize;
+      uint32_t Bit =
+          (static_cast<uint32_t>(Loc.Offset) - FrameLayout.GCLocalsStart) /
+          PointerSize;
       Bitmap[Bit / 8] |= uint8_t(1u << (Bit % 8));
     }
 
@@ -822,6 +853,10 @@ uint64_t GoObjObjectWriter::writeObject() {
       uint32_t ArgSize = Asm->getContext()
                              .getGoObjSymbolArgSize(Symbols[I].Symbol)
                              .value_or(0);
+      uint32_t PointerSize =
+          Asm->getContext().getAsmInfo().getCodePointerSize();
+      GoObjGCFrameLayout FrameLayout = getGoObjGCFrameLayout(
+          Asm->getContext().getTargetTriple(), StackSize, PointerSize);
       uint64_t CodeSize = Symbols[I].Size;
 
       SmallVector<GoObjPCTabEntry, 8> PCSPEntries;
@@ -854,8 +889,8 @@ uint64_t GoObjObjectWriter::writeObject() {
 
       uint32_t FuncInfoSym = addAuxCarrierSymbol(
           Symbols, GoObj::DefinedSymbolBlock::Symdef,
-          makeFuncInfoData(ArgSize, StackSize, LineInfo.Files,
-                           LineInfo.StartLine));
+          makeFuncInfoData(ArgSize, FrameLayout.FuncInfoLocalsSize,
+                           LineInfo.Files, LineInfo.StartLine));
       uint32_t PcspSym = addAuxCarrierSymbol(
           Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
           PCSPEntries.empty()
