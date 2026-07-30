@@ -1654,8 +1654,9 @@ TargetLoweringBase::emitPatchPoint(MachineInstr &InitialMI,
     // Add frame index operands recognized by stackmaps.cpp
     if (MFI.isStatepointSpillSlotObjectIndex(FI)) {
       // indirect-mem-ref tag, size, #FI, offset.
-      // Used for spills inserted by StatepointLowering.  This codepath is not
-      // used for patchpoints/stackmaps at all, for these spilling is done via
+      // Used for spills inserted by StatepointLowering and exact fixed incoming
+      // argument homes reused by it. This codepath is not used for
+      // patchpoints/stackmaps at all, for these spilling is done via the
       // foldMemoryOperand callback only.
       assert(MI->getOpcode() == TargetOpcode::STATEPOINT && "sanity");
       MIB.addImm(StackMaps::IndirectMemRefOp);

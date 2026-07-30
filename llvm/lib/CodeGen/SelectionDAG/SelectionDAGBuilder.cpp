@@ -93,6 +93,7 @@
 #include "llvm/MC/MCContext.h"
 #include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
@@ -12371,7 +12372,11 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
   for (const Argument &Arg : F.args()) {
     SmallVector<SDValue, 4> ArgValues;
     SmallVector<EVT, 4> ValueVTs;
-    ComputeValueVTs(*TLI, DAG.getDataLayout(), Arg.getType(), ValueVTs);
+    SmallVector<TypeSize, 4> ValueOffsets;
+    bool IsGoCallingConv = goabi::isGoCallingConv(F.getCallingConv());
+    ComputeValueVTs(*TLI, DAG.getDataLayout(), Arg.getType(), ValueVTs,
+                    /*MemVTs=*/nullptr,
+                    IsGoCallingConv ? &ValueOffsets : nullptr);
     unsigned NumValues = ValueVTs.size();
     if (NumValues == 0)
       continue;
@@ -12411,6 +12416,41 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
                                                       F.getCallingConv(), VT);
       unsigned NumParts = TLI->getNumRegistersForCallingConv(
           *CurDAG->getContext(), F.getCallingConv(), VT);
+
+      // Preserve the identity of exact fixed incoming homes for pointer
+      // values. Statepoint lowering can then describe and relocate the value
+      // in its ABI argument slot instead of copying it to a local spill slot.
+      if (IsGoCallingConv && ValueOffsets[Val].isFixed()) {
+        const uint64_t PartSize = PartVT.getStoreSize().getKnownMinValue();
+        for (unsigned Part = 0; Part != NumParts; ++Part) {
+          const ISD::InputArg &In = Ins[i + Part];
+          if (!In.Flags.isPointer())
+            continue;
+
+          auto PartOffset = checkedMulAddUnsigned(
+              uint64_t(Part), PartSize, ValueOffsets[Val].getFixedValue());
+          if (!PartOffset || In.PartOffset != *PartOffset)
+            continue;
+
+          auto *Load = dyn_cast<LoadSDNode>(InVals[i + Part]);
+          if (!Load || Load->isIndexed() ||
+              Load->getExtensionType() != ISD::NON_EXTLOAD ||
+              Load->getMemoryVT().getStoreSize().getKnownMinValue() != PartSize)
+            continue;
+          auto *FI = dyn_cast<FrameIndexSDNode>(Load->getBasePtr());
+          if (!FI)
+            continue;
+
+          MachineFrameInfo &MFI = DAG.getMachineFunction().getFrameInfo();
+          if (!MFI.isFixedObjectIndex(FI->getIndex()) ||
+              !MFI.isImmutableObjectIndex(FI->getIndex()) ||
+              MFI.getObjectSize(FI->getIndex()) != int64_t(PartSize))
+            continue;
+
+          FuncInfo->addArgumentValueHome(&Arg, *PartOffset, PartSize,
+                                         FI->getIndex());
+        }
+      }
 
       // Even an apparent 'unused' swifterror argument needs to be returned. So
       // we do generate a copy for it that can be used on return from the
