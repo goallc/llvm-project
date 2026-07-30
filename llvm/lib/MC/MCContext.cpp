@@ -169,6 +169,7 @@ void MCContext::reset() {
   GoObjSymbolABIs.clear();
   GoObjSymbolStackSizes.clear();
   GoObjSymbolArgSizes.clear();
+  GoObjSymbolHasFramePointers.clear();
   GoObjSymbolFlags.clear();
   GoObjRelocOverrides.clear();
   GoObjWeakRelocs.clear();

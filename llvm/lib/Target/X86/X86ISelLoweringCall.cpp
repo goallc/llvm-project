@@ -20,6 +20,7 @@
 #include "X86InstrBuilder.h"
 #include "X86MachineFunctionInfo.h"
 #include "X86TargetMachine.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/ObjCARCUtil.h"
 #include "llvm/CodeGen/GoCallingConv.h"
@@ -164,16 +165,26 @@ static SDValue lowerX86GoFormalArguments(
   const Function &F = MF.getFunction();
   const X86Subtarget &Subtarget = MF.getSubtarget<X86Subtarget>();
   MVT PtrVT = TLI.getPointerTy(DAG.getDataLayout());
-  int64_t IncomingStackOffset =
+  int64_t EntryStackBias =
       goabi::isGoABI0CallingConv(F.getCallingConv())
           ? 0
           : static_cast<int64_t>(PtrVT.getStoreSize());
 
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys = getX86GoArgTypes(F, LayoutMap);
+  goabi::ABIConfig ABIConfig =
+      getX86GoABIConfig(Subtarget, F.getCallingConv());
   goabi::CallLayout Layout = goabi::computeCallLayout(
       ArgTys, getX86GoReturnTypes(F.getReturnType(), F.getAttributes()),
-      DAG.getDataLayout(), getX86GoABIConfig(Subtarget, F.getCallingConv()));
+      DAG.getDataLayout(), ABIConfig);
+
+  std::optional<goabi::EntryArgsInfo> EntryArgs;
+  SmallBitVector MatchedEntryArgWords;
+  if (F.hasFnAttribute(goabi::StackGrowthStatepointAttr)) {
+    EntryArgs = goabi::computeEntryArgsInfo(ArgTys, Layout, DAG.getDataLayout(),
+                                            ABIConfig);
+    MatchedEntryArgWords.resize(EntryArgs->NumBits);
+  }
 
   SmallVector<uint64_t, 8> ArgSpillOffsets(ArgTys.size(), 0);
   uint64_t SpillOffset = Layout.SpillAreaOffset;
@@ -190,6 +201,42 @@ static SDValue lowerX86GoFormalArguments(
   FuncInfo->setArgumentStackSize(Layout.TotalStackSize);
   FuncInfo->setRegSaveFrameIndex(0xAAAAAAA);
   FuncInfo->clearGoRegArgSpillSlots();
+  FuncInfo->clearGoArgPointerSlots();
+
+  auto RecordPointerSlots = [&](int FI, uint64_t ArgOffset, uint64_t Size,
+                                int64_t FixedObjectBias) {
+    if (!EntryArgs)
+      return;
+    uint64_t PointerSize = EntryArgs->PointerSize;
+    for (uint32_t Word : EntryArgs->PointerWords) {
+      uint64_t PointerOffset = static_cast<uint64_t>(Word) * PointerSize;
+      if (PointerOffset < ArgOffset ||
+          PointerOffset + PointerSize > ArgOffset + Size)
+        continue;
+      if (MatchedEntryArgWords.test(Word))
+        report_fatal_error(
+            "Go entry argument pointer word maps to multiple X86 fixed "
+            "objects");
+      uint64_t WithinObject = PointerOffset - ArgOffset;
+      if (WithinObject > UINT32_MAX)
+        report_fatal_error(
+            "Go entry argument pointer offset exceeds X86 metadata range");
+      int64_t FixedObjectOffset =
+          MFI.getObjectOffset(FI) + static_cast<int64_t>(WithinObject);
+      int64_t ExpectedFixedObjectOffset =
+          FixedObjectBias + static_cast<int64_t>(PointerOffset);
+      int64_t EntryOffset =
+          EntryStackBias + static_cast<int64_t>(PointerOffset);
+      if (FixedObjectOffset != ExpectedFixedObjectOffset ||
+          !isInt<32>(EntryOffset))
+        report_fatal_error(
+            "Go entry argument pointer word has an invalid X86 fixed object");
+      FuncInfo->addGoArgPointerSlot(
+          FI, static_cast<uint32_t>(WithinObject),
+          static_cast<int32_t>(EntryOffset), Word);
+      MatchedEntryArgWords.set(Word);
+    }
+  };
 
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
     if (Group.Index == ISD::InputArg::NoArgIndex)
@@ -231,9 +278,11 @@ static SDValue lowerX86GoFormalArguments(
             std::max<uint64_t>(1, CopyVT.getStoreSize().getKnownMinValue()));
         uint64_t ArgSpillOffset = ArgSpillOffsets[LayoutMap[Group.Index]];
         int FI = MFI.CreateFixedSpillStackObject(
-            Size, IncomingStackOffset + ArgSpillOffset + In.PartOffset,
+            Size, EntryStackBias + ArgSpillOffset + In.PartOffset,
             /*IsImmutable=*/false);
         FuncInfo->addGoRegArgSpillSlot(PReg, FI, Size, IsFP);
+        RecordPointerSlots(FI, ArgSpillOffset + In.PartOffset, Size,
+                           EntryStackBias);
 
         if (In.VT != CopyVT)
           Val = DAG.getNode(ISD::TRUNCATE, DL, In.VT, Val);
@@ -244,13 +293,22 @@ static SDValue lowerX86GoFormalArguments(
       unsigned Size = static_cast<unsigned>(
           std::max<uint64_t>(1, In.VT.getStoreSize().getKnownMinValue()));
       int FI = MFI.CreateFixedObject(
-          Size, IncomingStackOffset + ArgLayout.StackOffset + In.PartOffset,
+          Size, ArgLayout.StackOffset + In.PartOffset,
           /*IsImmutable=*/true);
+      RecordPointerSlots(FI, ArgLayout.StackOffset + In.PartOffset, Size,
+                         /*FixedObjectBias=*/0);
       SDValue Addr = DAG.getFrameIndex(FI, PtrVT);
       InVals.push_back(
           DAG.getLoad(In.VT, DL, Chain, Addr,
                       MachinePointerInfo::getFixedStack(MF, FI)));
     }
+  }
+
+  if (EntryArgs) {
+    for (uint32_t Word : EntryArgs->PointerWords)
+      if (!MatchedEntryArgWords.test(Word))
+        report_fatal_error(
+            "Go entry argument pointer word has no X86 fixed object");
   }
 
   return Chain;
@@ -263,11 +321,6 @@ static SDValue lowerX86GoReturn(const X86TargetLowering &TLI, SDValue Chain,
                                 const SDLoc &DL, SelectionDAG &DAG) {
   const X86Subtarget &Subtarget = MF.getSubtarget<X86Subtarget>();
   MachineFrameInfo &MFI = MF.getFrameInfo();
-  int64_t IncomingStackOffset =
-      goabi::isGoABI0CallingConv(MF.getFunction().getCallingConv())
-          ? 0
-          : static_cast<int64_t>(
-                TLI.getPointerTy(DAG.getDataLayout()).getStoreSize());
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys = getX86GoArgTypes(MF.getFunction(), LayoutMap);
   SmallVector<Type *, 8> ResultTys =
@@ -304,7 +357,7 @@ static SDValue lowerX86GoReturn(const X86TargetLowering &TLI, SDValue Chain,
       unsigned Size = static_cast<unsigned>(
           std::max<uint64_t>(1, Out.VT.getStoreSize().getKnownMinValue()));
       int FI = MFI.CreateFixedObject(
-          Size, IncomingStackOffset + ResultLayout.StackOffset + Out.PartOffset,
+          Size, ResultLayout.StackOffset + Out.PartOffset,
           /*IsImmutable=*/false);
       SDValue Addr = DAG.getFrameIndex(FI, TLI.getPointerTy(DAG.getDataLayout()));
       MemOps.push_back(DAG.getStore(
