@@ -477,7 +477,8 @@ static SectionKind getELFKindForNamedSection(StringRef Name, SectionKind K) {
   if (!Name.starts_with(".")) return K;
 
   // Default implementation based on some magic section names.
-  if (Name == ".bss" || Name.starts_with(".bss.") ||
+  if (Name == ".bss" || Name.starts_with(".bss.") || Name == ".noptrbss" ||
+      Name.starts_with(".noptrbss.") ||
       Name.starts_with(".gnu.linkonce.b.") ||
       Name.starts_with(".llvm.linkonce.b.") || Name == ".sbss" ||
       Name.starts_with(".sbss.") || Name.starts_with(".gnu.linkonce.sb.") ||

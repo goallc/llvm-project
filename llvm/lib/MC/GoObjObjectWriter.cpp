@@ -148,10 +148,14 @@ uint8_t getGoObjSymbolType(const MCSection *Section) {
 
   if (Section->isText())
     return GoObj::STEXT;
-  if (Section->isBssSection())
-    return GoObj::SBSS;
 
   StringRef Name = Section->getName();
+  if (Name.starts_with(".noptrdata"))
+    return GoObj::SNOPTRDATA;
+  if (Name.starts_with(".noptrbss"))
+    return GoObj::SNOPTRBSS;
+  if (Section->isBssSection())
+    return GoObj::SBSS;
   if (Name.starts_with(".rodata") || Name.starts_with("__TEXT,__const"))
     return GoObj::SRODATA;
   if (Name.starts_with(".debug_") || Name.starts_with("__DWARF,"))
