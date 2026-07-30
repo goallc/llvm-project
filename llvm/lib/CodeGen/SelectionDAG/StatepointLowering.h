@@ -19,7 +19,9 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/Support/Alignment.h"
 #include <cassert>
+#include <cstdint>
 
 namespace llvm {
 
@@ -33,6 +35,13 @@ class SelectionDAGBuilder;
 class StatepointLoweringState {
 public:
   StatepointLoweringState() = default;
+
+  struct FixedStackHome {
+    int FI;
+    int64_t Offset;
+    uint64_t Size;
+    Align Alignment;
+  };
 
   /// Reset all state tracking for a newly encountered safepoint.  Also
   /// performs some consistency checking.
@@ -58,6 +67,17 @@ public:
     assert(!Locations.count(Val) &&
            "Trying to allocate already allocated location");
     Locations[Val] = Location;
+  }
+
+  const FixedStackHome *getFixedStackHome(SDValue Val) const {
+    auto I = FixedStackHomes.find(Val);
+    return I == FixedStackHomes.end() ? nullptr : &I->second;
+  }
+
+  void setFixedStackHome(SDValue Val, FixedStackHome Home) {
+    assert(!FixedStackHomes.count(Val) &&
+           "Trying to set an already assigned fixed stack home");
+    FixedStackHomes.try_emplace(Val, Home);
   }
 
   /// Record the fact that we expect to encounter a given gc_relocate
@@ -107,6 +127,11 @@ private:
   /// Maps pre-relocation value (gc pointer directly incoming into statepoint)
   /// into it's location (currently only stack slots)
   DenseMap<SDValue, SDValue> Locations;
+
+  /// Exact stack subslots which already contain incoming GC pointer values.
+  /// Unlike Locations, these homes may have a non-zero offset within an
+  /// existing frame object and do not require an additional spill store.
+  DenseMap<SDValue, FixedStackHome> FixedStackHomes;
 
   /// A boolean indicator for each slot listed in the FunctionInfo as to
   /// whether it has been used in the current statepoint.  Since we try to
