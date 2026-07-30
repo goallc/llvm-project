@@ -315,9 +315,29 @@ static void reservePreviousStackSlotForValue(const Value *IncomingValue,
 /// Extract call from statepoint, lower it and return pointer to the
 /// call node. Also update NodeMap so that getValue(statepoint) will
 /// reference lowered call result
+static SDNode *peelCallResultChain(SDNode *Node) {
+  while (Node->getOpcode() == ISD::LOAD ||
+         Node->getOpcode() == ISD::CopyFromReg)
+    Node = Node->getOperand(0).getNode();
+
+  if (Node->getOpcode() != ISD::TokenFactor)
+    return Node;
+
+  SDNode *CommonCallEnd = nullptr;
+  for (SDValue Operand : Node->ops()) {
+    SDNode *CallEnd = peelCallResultChain(Operand.getNode());
+    if (CallEnd->getOpcode() != ISD::CALLSEQ_END ||
+        (CommonCallEnd && CommonCallEnd != CallEnd))
+      return Node;
+    CommonCallEnd = CallEnd;
+  }
+  return CommonCallEnd ? CommonCallEnd : Node;
+}
+
 static std::pair<SDValue, SDNode *> lowerCallFromStatepointLoweringInfo(
     SelectionDAGBuilder::StatepointLoweringInfo &SI,
     SelectionDAGBuilder &Builder) {
+  bool HasDef = !SI.CLI.RetTy->isVoidTy();
   SDValue ReturnValue, CallEndVal;
   std::tie(ReturnValue, CallEndVal) =
       Builder.lowerInvokable(SI.CLI, SI.EHPadBB);
@@ -335,21 +355,16 @@ static std::pair<SDValue, SDNode *> lowerCallFromStatepointLoweringInfo(
   //   ch, glue = callseq_end ch, glue
   //   get_return_value ch, glue
   //
-  // get_return_value can either be a sequence of CopyFromReg instructions
-  // to grab the return value from the return register(s), or it can be a LOAD
-  // to load a value returned by reference via a stack slot.
+  // get_return_value can be a sequence of CopyFromReg instructions to grab
+  // return values from registers, LOAD instructions to grab values returned
+  // via stack slots, or a mixture of both. Multiple result chains can also be
+  // joined by a TokenFactor.
 
   if (CallEnd->getOpcode() == ISD::EH_LABEL)
     CallEnd = CallEnd->getOperand(0).getNode();
 
-  bool HasDef = !SI.CLI.RetTy->isVoidTy();
-  if (HasDef) {
-    if (CallEnd->getOpcode() == ISD::LOAD)
-      CallEnd = CallEnd->getOperand(0).getNode();
-    else
-      while (CallEnd->getOpcode() == ISD::CopyFromReg)
-        CallEnd = CallEnd->getOperand(0).getNode();
-  }
+  if (HasDef)
+    CallEnd = peelCallResultChain(CallEnd);
 
   assert(CallEnd->getOpcode() == ISD::CALLSEQ_END && "expected!");
   return std::make_pair(ReturnValue, CallEnd->getOperand(0).getNode());
@@ -1046,6 +1061,7 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
     retAttrs = GCResultLocality.first->getAttributes().getRetAttrs();
 
   StatepointLoweringInfo SI(DAG);
+  SI.CLI.CB = &I;
   populateCallLoweringInfo(SI.CLI, &I, GCStatepointInst::CallArgsBeginPos,
                            I.getNumCallArgs(), ActualCallee,
                            I.getActualReturnType(), retAttrs,
