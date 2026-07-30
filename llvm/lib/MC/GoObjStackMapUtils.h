@@ -27,27 +27,31 @@ struct StackMapSlot {
 
 inline StackMapSlot classifyOrdinaryStackMapSlot(
     int64_t Offset, bool IsIndirect, uint32_t PointerSize, uint64_t LocalsStart,
-    uint64_t LocalsSize, uint64_t ArgsStart, uint64_t ArgsSize) {
+    uint64_t LocalsSize, uint32_t LocalsBitOffset, uint64_t ArgsStart,
+    uint64_t ArgsSize) {
   if (Offset < 0 || PointerSize == 0)
     return {};
 
   uint64_t UOffset = static_cast<uint64_t>(Offset);
-  auto Classify = [&](uint64_t Start, uint64_t Size,
-                      StackMapSlotKind Kind) -> StackMapSlot {
+  auto Classify = [&](uint64_t Start, uint64_t Size, StackMapSlotKind Kind,
+                      uint32_t BitOffset) -> StackMapSlot {
     if (UOffset < Start || UOffset - Start >= Size ||
         Size - (UOffset - Start) < PointerSize ||
         (UOffset - Start) % PointerSize != 0)
       return {};
     if (!IsIndirect)
       return {StackMapSlotKind::Direct, 0};
-    return {Kind, static_cast<uint32_t>((UOffset - Start) / PointerSize)};
+    return {Kind, BitOffset +
+                      static_cast<uint32_t>((UOffset - Start) / PointerSize)};
   };
 
   if (StackMapSlot Slot =
-          Classify(LocalsStart, LocalsSize, StackMapSlotKind::Locals);
+          Classify(LocalsStart, LocalsSize, StackMapSlotKind::Locals,
+                   LocalsBitOffset);
       Slot.Kind != StackMapSlotKind::Invalid)
     return Slot;
-  return Classify(ArgsStart, ArgsSize, StackMapSlotKind::Args);
+  return Classify(ArgsStart, ArgsSize, StackMapSlotKind::Args,
+                  /*BitOffset=*/0);
 }
 
 } // namespace llvm::goobj

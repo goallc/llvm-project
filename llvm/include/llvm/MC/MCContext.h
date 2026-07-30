@@ -209,6 +209,9 @@ private:
   /// Go object symbol argument sizes keyed by MC symbol.
   DenseMap<const MCSymbol *, uint32_t> GoObjSymbolArgSizes;
 
+  /// Whether a Go object symbol uses a frame pointer, keyed by MC symbol.
+  DenseMap<const MCSymbol *, bool> GoObjSymbolHasFramePointers;
+
   /// Go object symbol flags keyed by MC symbol.
   DenseMap<const MCSymbol *, std::pair<uint8_t, uint8_t>> GoObjSymbolFlags;
 
@@ -645,6 +648,19 @@ public:
   std::optional<uint32_t> getGoObjSymbolArgSize(const MCSymbol *Sym) const {
     auto It = GoObjSymbolArgSizes.find(Sym);
     if (It == GoObjSymbolArgSizes.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjSymbolHasFramePointer(const MCSymbol *Sym,
+                                     bool HasFramePointer) {
+    GoObjSymbolHasFramePointers[Sym] = HasFramePointer;
+  }
+
+  std::optional<bool>
+  getGoObjSymbolHasFramePointer(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolHasFramePointers.find(Sym);
+    if (It == GoObjSymbolHasFramePointers.end())
       return std::nullopt;
     return It->second;
   }

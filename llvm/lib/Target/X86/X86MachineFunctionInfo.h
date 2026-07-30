@@ -123,9 +123,17 @@ public:
     bool IsFP = false;
   };
 
+  struct GoArgPointerSlot {
+    int FrameIndex = 0;
+    uint32_t OffsetWithinObject = 0;
+    int32_t EntryOffset = 0;
+    uint32_t ArgWord = 0;
+  };
+
 private:
   /// Fixed frame objects for Go ABIInternal register argument home slots.
   SmallVector<GoRegArgSpillSlot, 16> GoRegArgSpillSlots;
+  SmallVector<GoArgPointerSlot, 16> GoArgPointerSlots;
 
   /// NumLocalDynamics - Number of local-dynamic TLS accesses.
   unsigned NumLocalDynamics = 0;
@@ -264,6 +272,16 @@ public:
   }
   ArrayRef<GoRegArgSpillSlot> getGoRegArgSpillSlots() const {
     return GoRegArgSpillSlots;
+  }
+
+  void clearGoArgPointerSlots() { GoArgPointerSlots.clear(); }
+  void addGoArgPointerSlot(int FrameIndex, uint32_t OffsetWithinObject,
+                           int32_t EntryOffset, uint32_t ArgWord) {
+    GoArgPointerSlots.push_back(
+        {FrameIndex, OffsetWithinObject, EntryOffset, ArgWord});
+  }
+  ArrayRef<GoArgPointerSlot> getGoArgPointerSlots() const {
+    return GoArgPointerSlots;
   }
 
   unsigned getNumLocalDynamicTLSAccesses() const { return NumLocalDynamics; }

@@ -240,12 +240,36 @@ static MachineInstrBuilder buildGoStackGrowthStatepoint(MachineFunction &MF,
   auto AddConstant = [&](uint64_t Value) {
     Statepoint.addImm(StackMaps::ConstantOp).addImm(Value);
   };
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+  ArrayRef<X86MachineFunctionInfo::GoArgPointerSlot> PointerSlots =
+      MF.getInfo<X86MachineFunctionInfo>()->getGoArgPointerSlots();
+  uint64_t PointerSize = MF.getDataLayout().getPointerSize();
+  int64_t StackBias =
+      goabi::isGoABI0CallingConv(MF.getFunction().getCallingConv())
+          ? 0
+          : static_cast<int64_t>(PointerSize);
   AddConstant(MF.getFunction().getCallingConv());
-  AddConstant(0); // Statepoint flags.
-  AddConstant(0); // Deopt arguments.
-  AddConstant(0); // GC pointers.
-  AddConstant(0); // GC allocas.
-  AddConstant(0); // GC base/derived map entries.
+  AddConstant(0);                   // Statepoint flags.
+  AddConstant(0);                   // Deopt arguments.
+  AddConstant(PointerSlots.size()); // GC pointers.
+  for (const X86MachineFunctionInfo::GoArgPointerSlot &Slot : PointerSlots) {
+    if (!MFI.isFixedObjectIndex(Slot.FrameIndex))
+      report_fatal_error(
+          "X86 Go entry argument pointer slot is not a fixed object");
+    int64_t ExpectedOffset =
+        StackBias + static_cast<int64_t>(Slot.ArgWord) * PointerSize;
+    if (PointerSize == 0 || Slot.EntryOffset != ExpectedOffset)
+      report_fatal_error(
+          "X86 Go entry argument pointer slot has invalid RSP offset");
+    Statepoint.addImm(StackMaps::IndirectMemRefOp)
+        .addImm(PointerSize)
+        .addReg(X86::RSP)
+        .addImm(Slot.EntryOffset);
+  }
+  AddConstant(0);                   // GC allocas.
+  AddConstant(PointerSlots.size()); // GC base/derived map entries.
+  for (uint64_t I = 0; I != PointerSlots.size(); ++I)
+    Statepoint.addImm(I).addImm(I);
   Statepoint
       .addRegMask(
           MF.getSubtarget<X86Subtarget>()
@@ -302,6 +326,17 @@ static void emitGoStackCheck(MachineFunction &MF,
     CompareMBB->addLiveIn(X86::R14);
   }
   MorestackMBB->addLiveIn(X86::R14);
+  // Formal argument copies can be eliminated when an argument is unused in
+  // the function body, but the pre-frame morestack path still saves every
+  // ABIInternal register argument into its fixed home. Keep those physical
+  // inputs live through the newly inserted check blocks independently of
+  // ordinary IR uses.
+  for (const X86MachineFunctionInfo::GoRegArgSpillSlot &Spill : Spills) {
+    CheckMBB->addLiveIn(Spill.Reg);
+    if (CompareMBB != CheckMBB)
+      CompareMBB->addLiveIn(Spill.Reg);
+    MorestackMBB->addLiveIn(Spill.Reg);
+  }
 
   MF.push_front(MorestackMBB);
   if (CompareMBB != CheckMBB)

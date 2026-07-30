@@ -9,6 +9,7 @@
 #include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <limits>
 
