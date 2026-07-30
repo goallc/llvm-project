@@ -321,14 +321,15 @@ public:
   struct CallsiteInfo {
     const MCExpr *CSOffsetExpr = nullptr;
     uint64_t ID = 0;
+    bool IsIndirectCall = false;
     LocationVec Locations;
     LiveOutVec LiveOuts;
 
     CallsiteInfo() = default;
-    CallsiteInfo(const MCExpr *CSOffsetExpr, uint64_t ID,
+    CallsiteInfo(const MCExpr *CSOffsetExpr, uint64_t ID, bool IsIndirectCall,
                  LocationVec &&Locations, LiveOutVec &&LiveOuts)
-        : CSOffsetExpr(CSOffsetExpr), ID(ID), Locations(std::move(Locations)),
-          LiveOuts(std::move(LiveOuts)) {}
+        : CSOffsetExpr(CSOffsetExpr), ID(ID), IsIndirectCall(IsIndirectCall),
+          Locations(std::move(Locations)), LiveOuts(std::move(LiveOuts)) {}
   };
 
   using FnInfoMap = MapVector<const MCSymbol *, FunctionInfo>;
