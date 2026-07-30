@@ -347,6 +347,7 @@ void FunctionLoweringInfo::clear() {
   ArgDbgValues.clear();
   DescribedArgs.clear();
   ByValArgFrameIndexMap.clear();
+  ArgumentValueHomeMap.clear();
   RegFixups.clear();
   RegsWithFixups.clear();
   StatepointStackSlots.clear();
@@ -554,6 +555,30 @@ int FunctionLoweringInfo::getArgumentFrameIndex(const Argument *A) {
     return I->second;
   LLVM_DEBUG(dbgs() << "Argument does not have assigned frame index!\n");
   return INT_MAX;
+}
+
+void FunctionLoweringInfo::addArgumentValueHome(const Argument *A,
+                                                uint64_t Offset, uint64_t Size,
+                                                int FI) {
+  auto &Homes = ArgumentValueHomeMap[A];
+  assert(none_of(Homes,
+                 [=](const ArgumentValueHome &Home) {
+                   return Home.Offset == Offset && Home.Size == Size;
+                 }) &&
+         "duplicate argument value home");
+  Homes.push_back({Offset, Size, FI});
+}
+
+int FunctionLoweringInfo::getArgumentValueHome(const Argument *A,
+                                               uint64_t Offset,
+                                               uint64_t Size) const {
+  auto I = ArgumentValueHomeMap.find(A);
+  if (I == ArgumentValueHomeMap.end())
+    return INT_MAX;
+  auto Home = find_if(I->second, [=](const ArgumentValueHome &Candidate) {
+    return Candidate.Offset == Offset && Candidate.Size == Size;
+  });
+  return Home == I->second.end() ? INT_MAX : Home->FI;
 }
 
 Register FunctionLoweringInfo::getCatchPadExceptionPointerVReg(

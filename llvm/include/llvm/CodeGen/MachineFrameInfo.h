@@ -147,11 +147,9 @@ private:
     // cannot alias any other memory objects.
     bool isSpillSlot;
 
-    /// If true, this stack slot is used to spill a value (could be deopt
-    /// and/or GC related) over a statepoint. We know that the address of the
-    /// slot can't alias any LLVM IR value.  This is very similar to a Spill
-    /// Slot, but is created by statepoint lowering is SelectionDAG, not the
-    /// register allocator.
+    /// If true, a statepoint operand describes the value stored in this
+    /// object. This includes both non-aliasing spills created by SelectionDAG
+    /// statepoint lowering and reusable fixed incoming argument homes.
     bool isStatepointSpillSlot = false;
 
     /// If true, this stack slot is used for spilling a callee saved register

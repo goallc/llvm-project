@@ -33,6 +33,7 @@
 #include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/CodeGenTypes/MachineValueType.h"
 #include "llvm/IR/CallingConv.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/GCStrategy.h"
 #include "llvm/IR/Instruction.h"
@@ -41,6 +42,7 @@
 #include "llvm/IR/Statepoint.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
@@ -74,6 +76,33 @@ static cl::opt<unsigned> MaxRegistersForGCPointers(
     cl::desc("Max number of VRegs allowed to pass GC pointer meta args in"));
 
 typedef FunctionLoweringInfo::StatepointRelocationRecord RecordType;
+
+static std::optional<std::pair<const Argument *, uint64_t>>
+getArgumentValueOffset(const Value *V, const DataLayout &DL) {
+  uint64_t Offset = 0;
+  while (const auto *Extract = dyn_cast<ExtractValueInst>(V)) {
+    Type *Int32Ty = Type::getInt32Ty(V->getContext());
+    SmallVector<Value *, 4> Indices;
+    Indices.push_back(ConstantInt::get(Int32Ty, 0));
+    for (unsigned Index : Extract->indices())
+      Indices.push_back(ConstantInt::get(Int32Ty, Index));
+
+    int64_t ExtractOffset = DL.getIndexedOffsetInType(
+        Extract->getAggregateOperand()->getType(), Indices);
+    if (ExtractOffset < 0)
+      return std::nullopt;
+    auto NewOffset = checkedAddUnsigned(Offset, uint64_t(ExtractOffset));
+    if (!NewOffset)
+      return std::nullopt;
+    Offset = *NewOffset;
+    V = Extract->getAggregateOperand();
+  }
+
+  const auto *Arg = dyn_cast<Argument>(V);
+  if (!Arg)
+    return std::nullopt;
+  return std::pair(Arg, Offset);
+}
 
 static void pushStackMapConstant(SmallVectorImpl<SDValue>& Ops,
                                  SelectionDAGBuilder &Builder, uint64_t Value) {
@@ -426,6 +455,9 @@ spillIncomingStatepointValue(SDValue Incoming, SDValue Chain,
     MMO = getMachineMemOperand(MF, *cast<FrameIndexSDNode>(Loc));
 
     Builder.StatepointLowering.setLocation(Incoming, Loc);
+  } else {
+    auto &MF = Builder.DAG.getMachineFunction();
+    MMO = getMachineMemOperand(MF, *cast<FrameIndexSDNode>(Loc));
   }
 
   assert(Loc.getNode());
@@ -593,6 +625,22 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
     if (!LoweredGCPtrs.insert(PtrSD))
       return; // skip duplicates
     GCPtrIndexMap[PtrSD] = LoweredGCPtrs.size() - 1;
+
+    if (auto ArgValue =
+            getArgumentValueOffset(V, Builder.DAG.getDataLayout())) {
+      uint64_t Size = PtrSD.getValueType().getStoreSize().getKnownMinValue();
+      int FI = Builder.FuncInfo.getArgumentValueHome(ArgValue->first,
+                                                     ArgValue->second, Size);
+      if (FI != INT_MAX) {
+        MachineFrameInfo &MFI = Builder.DAG.getMachineFunction().getFrameInfo();
+        MFI.setIsImmutableObjectIndex(FI, false);
+        MFI.markAsStatepointSpillSlotObjectIndex(FI);
+        Builder.StatepointLowering.setLocation(
+            PtrSD,
+            Builder.DAG.getTargetFrameIndex(FI, Builder.getFrameIndexTy()));
+        return;
+      }
+    }
 
     assert(!LowerAsVReg.count(PtrSD) && "must not have been seen");
     if (LowerAsVReg.size() == MaxVRegPtrs)
