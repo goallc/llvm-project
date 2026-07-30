@@ -125,6 +125,7 @@ public:
   struct GoObjStackMapEntry {
     const MCExpr *CallsiteOffsetExpr;
     uint64_t ID;
+    bool IsIndirectCall;
     uint64_t StackSize;
     uint32_t PointerSize;
     std::vector<GoObjStackMapLocation> Locations;

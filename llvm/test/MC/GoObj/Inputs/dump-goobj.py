@@ -43,6 +43,19 @@ AUX_TYPES = {
     11: "pcdata",
 }
 
+PKG_INDEX_NAMES = {
+    PKGIDX_NONE: "none",
+    PKGIDX_HASHED64: "hashed64",
+    PKGIDX_HASHED: "hashed",
+    PKGIDX_SELF: "self",
+}
+
+RELOC_TYPES = {
+    7: "R_CALL",
+    9: "R_CALLARM64",
+    10: "R_CALLIND",
+}
+
 
 def string_at(data, offset):
     size, string_offset = struct.unpack_from("<II", data, offset)
@@ -150,6 +163,10 @@ def main(path):
                 f"flag={symbol['flag']} flag2={symbol['flag2']}"
             )
 
+    for index in range((offsets[11] - offsets[10]) // 16):
+        offset = offsets[10] + 16 * index
+        print(f"hash {index}: {data[offset : offset + 16].hex()}")
+
     defined = symdef + hashed64def + hasheddef + nonpkgdef
     reloc_indexes = [
         struct.unpack_from("<I", data, offsets[11] + 4 * index)[0]
@@ -213,7 +230,9 @@ def main(path):
                 extra = f" pc={decode_pctab(payload)}"
             print(
                 f"aux {symbol_index}.{aux_index}: type={aux_name} "
-                f"target={resolve_ref(pkg_index, sym_index)}{extra}"
+                f"target={resolve_ref(pkg_index, sym_index)}{extra} "
+                f"pkg={PKG_INDEX_NAMES.get(pkg_index, pkg_index)} "
+                f"sym={sym_index}"
             )
         for reloc_index in range(
             reloc_indexes[symbol_index], reloc_indexes[symbol_index + 1]
@@ -227,7 +246,10 @@ def main(path):
             print(
                 f"reloc {symbol_index}.{reloc_index}: off={reloc_offset} "
                 f"size={size} type={reloc_type} add={addend} "
-                f"target={resolve_ref(pkg_index, sym_index)}"
+                f"target={resolve_ref(pkg_index, sym_index)} "
+                f"kind={RELOC_TYPES.get(reloc_type, 'unknown')} "
+                f"pkg={PKG_INDEX_NAMES.get(pkg_index, pkg_index)} "
+                f"sym={sym_index}"
             )
 
     print("data:", data[offsets[16] : offsets[17]].hex())
