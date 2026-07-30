@@ -22,7 +22,7 @@ TEST(GoObjStackMapUtilsTest, ClassifiesLocalsAndArgs) {
 
   auto Classify = [&](int64_t Offset, bool IsIndirect) {
     return goobj::classifyOrdinaryStackMapSlot(Offset, IsIndirect, PointerSize,
-                                               LocalsStart, LocalsSize,
+                                               LocalsStart, LocalsSize, 0,
                                                ArgsStart, ArgsSize);
   };
 
@@ -46,7 +46,8 @@ TEST(GoObjStackMapUtilsTest, RejectsReservedUnalignedAndOutOfRangeSlots) {
   auto Classify = [](int64_t Offset) {
     return goobj::classifyOrdinaryStackMapSlot(
         Offset, true, /*PointerSize=*/8, /*LocalsStart=*/8,
-        /*LocalsSize=*/32, /*ArgsStart=*/56, /*ArgsSize=*/40);
+        /*LocalsSize=*/32, /*LocalsBitOffset=*/0, /*ArgsStart=*/56,
+        /*ArgsSize=*/40);
   };
 
   EXPECT_EQ(Classify(-8).Kind, goobj::StackMapSlotKind::Invalid);
@@ -55,6 +56,21 @@ TEST(GoObjStackMapUtilsTest, RejectsReservedUnalignedAndOutOfRangeSlots) {
   EXPECT_EQ(Classify(40).Kind, goobj::StackMapSlotKind::Invalid);
   EXPECT_EQ(Classify(52).Kind, goobj::StackMapSlotKind::Invalid);
   EXPECT_EQ(Classify(96).Kind, goobj::StackMapSlotKind::Invalid);
+}
+
+TEST(GoObjStackMapUtilsTest, AppliesX86LocalsCallSlotBias) {
+  auto Classify = [](int64_t Offset) {
+    return goobj::classifyOrdinaryStackMapSlot(
+        Offset, true, /*PointerSize=*/8, /*LocalsStart=*/0,
+        /*LocalsSize=*/32, /*LocalsBitOffset=*/1, /*ArgsStart=*/48,
+        /*ArgsSize=*/16);
+  };
+
+  EXPECT_EQ(Classify(0).Kind, goobj::StackMapSlotKind::Locals);
+  EXPECT_EQ(Classify(0).Bit, 1u);
+  EXPECT_EQ(Classify(24).Kind, goobj::StackMapSlotKind::Locals);
+  EXPECT_EQ(Classify(24).Bit, 4u);
+  EXPECT_EQ(Classify(32).Kind, goobj::StackMapSlotKind::Invalid);
 }
 
 } // namespace

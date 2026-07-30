@@ -297,15 +297,41 @@ struct GoObjGCFrameLayout {
   uint32_t FuncInfoLocalsSize;
   uint32_t GCLocalsStart;
   uint32_t GCLocalsSize;
+  uint32_t GCLocalsBitOffset;
   uint32_t EntryArgsStart;
 };
 
 GoObjGCFrameLayout getGoObjGCFrameLayout(const Triple &TT, uint32_t StackSize,
-                                         uint32_t PointerSize) {
+                                         uint32_t PointerSize,
+                                         bool HasFramePointer) {
+  // At an amd64 function entry, RSP points at the return address. Entry
+  // argument pointer locations in the stack-growth statepoint are relative to
+  // that pre-frame RSP, so the caller's argument area begins one word above it.
+  // The same bias applies after subtracting StackSize for ordinary statepoints.
+  if (TT.getArch() == Triple::x86_64) {
+    if (StackSize == 0)
+      return {0, 0, 0, 0, PointerSize};
+    if (!PointerSize || StackSize < PointerSize ||
+        StackSize % PointerSize != 0)
+      report_fatal_error("X86 GoObj frame has invalid GC layout");
+
+    if (HasFramePointer) {
+      // A suspended amd64 frame includes the next callee's return-address word
+      // below its current SP in _func.locals. LLVM stack-map locations are
+      // relative to the pre-call SP, so bit 0 has no non-negative location.
+      // The saved frame pointer at the top of the frame is excluded from the
+      // scannable locals area.
+      return {StackSize, 0, StackSize - PointerSize, 1, PointerSize};
+    }
+
+    // Frameless functions do not reserve the saved-frame-pointer word. Their
+    // entire physical frame is scannable and the first stack-map word is bit 0.
+    return {StackSize, 0, StackSize, 0, PointerSize};
+  }
   if (TT.getArch() != Triple::aarch64)
-    return {StackSize, 0, StackSize, 0};
+    return {StackSize, 0, StackSize, 0, 0};
   if (StackSize == 0)
-    return {0, 0, 0, PointerSize};
+    return {0, 0, 0, 0, PointerSize};
   if (!PointerSize || StackSize < 2 * PointerSize ||
       StackSize % PointerSize != 0)
     report_fatal_error("AArch64 GoObj frame has invalid GC layout");
@@ -316,7 +342,7 @@ GoObjGCFrameLayout getGoObjGCFrameLayout(const Triple &TT, uint32_t StackSize,
   // physical frame size. Locals pointer maps exclude both reserved words and
   // therefore describe [SP+PointerSize, frame.varp).
   return {StackSize - PointerSize, PointerSize, StackSize - 2 * PointerSize,
-          PointerSize};
+          0, PointerSize};
 }
 
 struct GoObjStackMapPair {
@@ -371,11 +397,16 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
     report_fatal_error(
         "GoObj statepoint pointer size does not match its target");
   GoObjGCFrameLayout FrameLayout = getGoObjGCFrameLayout(
-      Asm.getContext().getTargetTriple(), StackSize, PointerSize);
+      Asm.getContext().getTargetTriple(), StackSize, PointerSize,
+      Asm.getContext()
+          .getGoObjSymbolHasFramePointer(Function.Symbol)
+          .value_or(false));
   uint16_t StackPointerDwarfRegNum =
       getGoObjStackPointerDwarfReg(Asm.getContext().getTargetTriple());
   uint32_t NBits = checkedUint32(
-      divideCeil(static_cast<uint64_t>(FrameLayout.GCLocalsSize), PointerSize),
+      FrameLayout.GCLocalsBitOffset +
+          divideCeil(static_cast<uint64_t>(FrameLayout.GCLocalsSize),
+                     PointerSize),
       "GoObj locals stack map bit count");
   if (ArgSize % PointerSize != 0)
     report_fatal_error("GoObj argument area is not pointer-aligned");
@@ -427,7 +458,7 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
       goobj::StackMapSlot Slot = goobj::classifyOrdinaryStackMapSlot(
           Loc.Offset, Loc.Type == MCContext::GoObjStackMapLocation::Indirect,
           PointerSize, FrameLayout.GCLocalsStart, FrameLayout.GCLocalsSize,
-          OrdinaryArgsStart, ArgSize);
+          FrameLayout.GCLocalsBitOffset, OrdinaryArgsStart, ArgSize);
       switch (Slot.Kind) {
       case goobj::StackMapSlotKind::Invalid:
         report_fatal_error(
@@ -922,7 +953,10 @@ uint64_t GoObjObjectWriter::writeObject() {
       uint32_t PointerSize =
           Asm->getContext().getAsmInfo().getCodePointerSize();
       GoObjGCFrameLayout FrameLayout = getGoObjGCFrameLayout(
-          Asm->getContext().getTargetTriple(), StackSize, PointerSize);
+          Asm->getContext().getTargetTriple(), StackSize, PointerSize,
+          Asm->getContext()
+              .getGoObjSymbolHasFramePointer(Symbols[I].Symbol)
+              .value_or(false));
       uint64_t CodeSize = Symbols[I].Size;
 
       SmallVector<GoObjPCTabEntry, 8> PCSPEntries;

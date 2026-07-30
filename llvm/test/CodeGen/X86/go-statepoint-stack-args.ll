@@ -71,7 +71,7 @@ declare ptr addrspace(1) @llvm.experimental.gc.relocate.p1(
 
 ; CHECK-LABEL: name: scalar_stack_arg
 ; CHECK: fixedStack:
-; CHECK: - { id: 0, type: default, offset: 64, size: 8,
+; CHECK: - { id: 0, type: default, offset: 56, size: 8,
 ; CHECK: isImmutable: false
 ; CHECK: stack:           []
 ; CHECK: STATEPOINT 1,
@@ -84,8 +84,8 @@ declare ptr addrspace(1) @llvm.experimental.gc.relocate.p1(
 ; CHECK: stack:           []
 ; CHECK: STATEPOINT 2,
 ; CHECK-SAME: 2, 2, 1, 8, %fixed-stack.0, 0, 1, 8, %fixed-stack.2, 0,
-; CHECK-SAME: (volatile load store (s64) on %fixed-stack.0),
-; CHECK-SAME: (volatile load store (s64) on %fixed-stack.2)
+; CHECK-SAME: (volatile load store (s64) on %fixed-stack.0{{[^)]*}}),
+; CHECK-SAME: (volatile load store (s64) on %fixed-stack.2{{[^)]*}})
 ; CHECK-NEXT: ADJCALLSTACKUP64
 ; CHECK-NEXT: [[AGGREGATE_RELOC:%[0-9]+]]:gr64 = MOV64rm %fixed-stack.2
 
