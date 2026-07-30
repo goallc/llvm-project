@@ -29,7 +29,8 @@ entry:
 ; CHECK-NEXT: symdef 2: g abi=0 type=7 size=8 align=8
 ; CHECK-NEXT: symdef 3:  abi=65535 type=3 size=28
 ; CHECK-NEXT: symdef 4:  abi=65535 type=3 size=28
-; CHECK: nonpkgdef-count: 12
+; CHECK: hasheddef-count: 5
+; CHECK: nonpkgdef-count: 0
 ; CHECK: nonpkgref-count: 1
 ; CHECK-NEXT: nonpkgref 0: ext abi=0 type=0 size=0
 ; CHECK: aux 0.0: type=funcinfo target= args=0 locals=0
@@ -39,12 +40,14 @@ entry:
 ; CHECK-NEXT: aux 0.4: type=pcfile target=
 ; CHECK-NEXT: aux 0.5: type=pcline target=
 ; CHECK-NEXT: aux 0.6: type=pcdata target= pc=
+; CHECK-NEXT: aux 0.7: type=pcdata target= pc=
 ; CHECK-NEXT: reloc 0.0: off=3 size=4 type=14 add=0 target=g
-; CHECK-NEXT: aux 1.7: type=funcinfo target= args=0 locals=8
-; CHECK-NEXT: aux 1.8: type=funcdata target= data=0100000000000000
+; CHECK-NEXT: aux 1.8: type=funcinfo target= args=0 locals=8
 ; CHECK-NEXT: aux 1.9: type=funcdata target= data=0100000000000000
-; CHECK-NEXT: aux 1.10: type=pcsp target=
-; CHECK-NEXT: aux 1.11: type=pcfile target=
-; CHECK-NEXT: aux 1.12: type=pcline target=
-; CHECK-NEXT: aux 1.13: type=pcdata target= pc=
+; CHECK-NEXT: aux 1.10: type=funcdata target= data=0100000000000000
+; CHECK-NEXT: aux 1.11: type=pcsp target=
+; CHECK-NEXT: aux 1.12: type=pcfile target=
+; CHECK-NEXT: aux 1.13: type=pcline target=
+; CHECK-NEXT: aux 1.14: type=pcdata target= pc=
+; CHECK-NEXT: aux 1.15: type=pcdata target= pc=
 ; CHECK-NEXT: reloc 1.1: off=2 size=4 type=7 add=0 target=ext

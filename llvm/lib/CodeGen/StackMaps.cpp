@@ -502,7 +502,26 @@ void StackMaps::recordStackMapOpers(const MCSymbol &MILabel,
       MCSymbolRefExpr::create(&MILabel, OutContext),
       MCSymbolRefExpr::create(AP.CurrentFnSymForSize, OutContext), OutContext);
 
-  CSInfos.emplace_back(CSOffsetExpr, ID, std::move(Locations),
+  bool IsIndirectCall = false;
+  if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
+    StatepointOpers Opers(&MI);
+    if (Opers.getNumPatchBytes() == 0) {
+      switch (Opers.getCallTarget().getType()) {
+      case MachineOperand::MO_GlobalAddress:
+      case MachineOperand::MO_ExternalSymbol:
+      case MachineOperand::MO_Immediate:
+        break;
+      case MachineOperand::MO_Register:
+        IsIndirectCall = true;
+        break;
+      default:
+        report_fatal_error(
+            "unsupported statepoint call target machine operand");
+      }
+    }
+  }
+
+  CSInfos.emplace_back(CSOffsetExpr, ID, IsIndirectCall, std::move(Locations),
                        std::move(LiveOuts));
 
   // Record the stack size of the current function and update callsite count.

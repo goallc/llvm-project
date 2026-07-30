@@ -27,6 +27,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/SHA256.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Triple.h"
 #include <algorithm>
@@ -87,6 +88,7 @@ struct GoObjSymbol {
   uint64_t Size = 0;
   uint32_t Align = 0;
   SmallString<0> Data;
+  std::optional<std::array<uint8_t, GoObj::HashSize>> ContentHash;
   std::vector<Relocation> Relocations;
   std::vector<Auxiliary> Auxiliaries;
 };
@@ -291,6 +293,7 @@ struct GoObjStatepointStackMaps {
   SmallString<0> Args;
   SmallString<0> Locals;
   SmallString<0> PCData;
+  SmallVector<uint32_t, 4> IndirectCallOffsets;
 };
 
 struct GoObjGCFrameLayout {
@@ -466,11 +469,21 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   Pairs.push_back(BuildPair(*StackGrowthEntry->Entry));
   SmallVector<GoObjPCTabEntry, 16> PCDataEntries;
   std::optional<uint64_t> PreviousCallsitePC;
+  SmallVector<uint32_t, 4> IndirectCallOffsets;
   for (const ResolvedEntry &Resolved : ResolvedEntries) {
     if (PreviousCallsitePC && *PreviousCallsitePC == Resolved.CallsitePC)
       report_fatal_error("GoObj statepoint callsites have duplicate PCs");
     PreviousCallsitePC = Resolved.CallsitePC;
     const MCContext::GoObjStackMapEntry &Entry = *Resolved.Entry;
+    if (Entry.ID == GoObj::StackGrowthStatepointID && Entry.IsIndirectCall)
+      report_fatal_error("GoObj stack-growth statepoint call is indirect");
+    if (Entry.IsIndirectCall) {
+      if (Resolved.CallsitePC >= Function.Size)
+        report_fatal_error(
+            "GoObj indirect statepoint callsite is outside its function");
+      IndirectCallOffsets.push_back(checkedUint32(
+          Resolved.CallsitePC, "GoObj indirect statepoint callsite offset"));
+    }
     if (Entry.PointerSize != PointerSize)
       report_fatal_error(
           "GoObj statepoint pointer size changes within a function");
@@ -521,6 +534,7 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   Result.Locals = makeStackMap(NBits, LocalsBitmaps);
   Result.PCData =
       makePCTab(-1, NormalizedPCDataEntries, Function.Size, PCQuantum);
+  Result.IndirectCallOffsets = std::move(IndirectCallOffsets);
   return Result;
 }
 
@@ -578,6 +592,57 @@ uint32_t addAuxCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
   Sym.Data.append(Data.begin(), Data.end());
   uint32_t Index = checkedUint32(Symbols.size(), "symbol count");
   Symbols.push_back(std::move(Sym));
+  return Index;
+}
+
+std::array<uint8_t, GoObj::HashSize>
+makeAuxCarrierContentHash(char SectionMarker, ArrayRef<char> Data) {
+  SHA256 Hasher;
+  const char Version = 1;
+  Hasher.update(StringRef(&Version, 1));
+
+  SmallString<9> Header;
+  raw_svector_ostream HeaderOS(Header);
+  support::endian::Writer HeaderWriter(HeaderOS, llvm::endianness::little);
+  HeaderWriter.write<uint64_t>(Data.size());
+  HeaderWriter.write<uint8_t>(SectionMarker);
+  Hasher.update(StringRef(Header.data(), Header.size()));
+
+  while (!Data.empty() && Data.back() == 0)
+    Data = Data.drop_back();
+  if (!Data.empty())
+    Hasher.update(StringRef(Data.data(), Data.size()));
+
+  std::array<uint8_t, 32> FullHash = Hasher.final();
+  std::array<uint8_t, GoObj::HashSize> Hash;
+  std::copy_n(FullHash.begin(), Hash.size(), Hash.begin());
+  return Hash;
+}
+
+uint32_t getOrAddHashedAuxCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
+                                        StringMap<uint32_t> &CarrierIndexes,
+                                        char SectionMarker,
+                                        ArrayRef<char> Data) {
+  std::string Key;
+  Key.reserve(Data.size() + 1);
+  Key.push_back(SectionMarker);
+  if (!Data.empty())
+    Key.append(Data.data(), Data.size());
+  auto It = CarrierIndexes.find(Key);
+  if (It != CarrierIndexes.end())
+    return It->second;
+
+  GoObjSymbol Sym;
+  Sym.DefinedBlock = GoObj::DefinedSymbolBlock::Hasheddef;
+  Sym.ABI = GoObj::SymABIstatic;
+  Sym.Type = GoObj::SRODATA;
+  Sym.Align = 1;
+  Sym.Size = Data.size();
+  Sym.Data.append(Data.begin(), Data.end());
+  Sym.ContentHash = makeAuxCarrierContentHash(SectionMarker, Data);
+  uint32_t Index = checkedUint32(Symbols.size(), "symbol count");
+  Symbols.push_back(std::move(Sym));
+  CarrierIndexes.insert({Key, Index});
   return Index;
 }
 
@@ -846,8 +911,7 @@ uint64_t GoObjObjectWriter::writeObject() {
         }
       }
       if (std::optional<uint64_t> ExactSize =
-              Asm->getContext().getGoObjSymbolSize(
-                  SectionSymbols[I].Symbol)) {
+              Asm->getContext().getGoObjSymbolSize(SectionSymbols[I].Symbol)) {
         if (*ExactSize > SectionSize - Begin ||
             Begin + *ExactSize > End)
           report_fatal_error(
@@ -863,6 +927,7 @@ uint64_t GoObjObjectWriter::writeObject() {
   std::vector<GoObjFuncDebugLines> FuncDebugLines(Symbols.size());
   std::vector<std::string> FilePaths;
   StringMap<uint32_t> FileIndexes;
+  StringMap<uint32_t> AuxCarrierIndexes;
   auto GetFallbackFile = [&]() {
     return getOrAddFileIndex(FileIndexes, FilePaths, "llvm-ir");
   };
@@ -957,8 +1022,8 @@ uint64_t GoObjObjectWriter::writeObject() {
           Symbols, GoObj::DefinedSymbolBlock::Symdef,
           makeFuncInfoData(ArgSize, FrameLayout.FuncInfoLocalsSize,
                            LineInfo.Files, LineInfo.StartLine));
-      uint32_t PcspSym = addAuxCarrierSymbol(
-          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
+      uint32_t PcspSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'P',
           PCSPEntries.empty()
               ? makeConstantPCTab(static_cast<int32_t>(StackSize), CodeSize,
                                   PCQuantum)
@@ -967,11 +1032,11 @@ uint64_t GoObjObjectWriter::writeObject() {
           LineInfo.hasLines() ? LineInfo.PCFile.front().Value : 0;
       int32_t InitialLine =
           LineInfo.hasLines() ? LineInfo.PCLine.front().Value : 1;
-      uint32_t PcfileSym = addAuxCarrierSymbol(
-          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
+      uint32_t PcfileSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'P',
           makePCTab(InitialFile, LineInfo.PCFile, CodeSize, PCQuantum));
-      uint32_t PclineSym = addAuxCarrierSymbol(
-          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
+      uint32_t PclineSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'P',
           makePCTab(InitialLine, LineInfo.PCLine, CodeSize, PCQuantum));
       SmallString<0> ArgsMap = makeEmptyStackMap();
       SmallString<0> LocalsMap = makeEmptyStackMap();
@@ -981,20 +1046,23 @@ uint64_t GoObjObjectWriter::writeObject() {
         if (!Entries->empty()) {
           GoObjStatepointStackMaps Maps = makeStatepointStackMaps(
               *Asm, Symbols[I], StackSize, ArgSize, PCQuantum, *Entries);
+          for (uint32_t Offset : Maps.IndirectCallOffsets)
+            Symbols[I].Relocations.push_back(
+                {Offset, 0, GoObj::R_CALLIND, 0, GoObj::PkgIdxInvalid, 0});
           ArgsMap = std::move(Maps.Args);
           LocalsMap = std::move(Maps.Locals);
           StackMapIndex = std::move(Maps.PCData);
         }
       }
-      uint32_t ArgsMapSym = addAuxCarrierSymbol(
-          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef, ArgsMap);
-      uint32_t LocalsMapSym = addAuxCarrierSymbol(
-          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef, LocalsMap);
-      uint32_t StackMapIndexSym = addAuxCarrierSymbol(
-          Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef, StackMapIndex);
-      uint32_t UnsafePointSym =
-          addAuxCarrierSymbol(Symbols, GoObj::DefinedSymbolBlock::Nonpkgdef,
-                              makeConstantPCTab(-1, CodeSize, PCQuantum));
+      uint32_t ArgsMapSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'F', ArgsMap);
+      uint32_t LocalsMapSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'F', LocalsMap);
+      uint32_t StackMapIndexSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'P', StackMapIndex);
+      uint32_t UnsafePointSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'P',
+          makeConstantPCTab(-1, CodeSize, PCQuantum));
 
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncInfo, FuncInfoSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, ArgsMapSym});
@@ -1302,6 +1370,13 @@ uint64_t GoObjObjectWriter::writeObject() {
   MarkBlock(GoObj::BlkRefFlags);
   MarkBlock(GoObj::BlkHash64);
   MarkBlock(GoObj::BlkHash);
+  for (uint32_t Index : HasheddefSymbols) {
+    const GoObjSymbol &Symbol = Symbols[Index];
+    if (!Symbol.ContentHash)
+      report_fatal_error("GoObj hashed definition has no content hash");
+    for (uint8_t Byte : *Symbol.ContentHash)
+      W.write<uint8_t>(Byte);
+  }
 
   MarkBlock(GoObj::BlkRelocIdx);
   uint32_t RelocCount = 0;

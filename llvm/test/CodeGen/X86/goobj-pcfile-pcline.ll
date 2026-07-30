@@ -1,5 +1,7 @@
-; RUN: llc -mtriple=x86_64-unknown-linux-goobj -goobj-package-path=main -filetype=obj < %s -o %t.o
-; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | FileCheck %s
+; RUN: llc -mtriple=x86_64-unknown-linux-goobj -goobj-package-path=main -filetype=obj < %s -o %t.x86.o
+; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.x86.o | FileCheck %s --check-prefixes=COMMON,X86
+; RUN: llc -mtriple=aarch64-unknown-linux-goobj -goobj-package-path=main -filetype=obj < %s -o %t.arm64.o
+; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.arm64.o | FileCheck %s --check-prefixes=COMMON,ARM64
 ;
 ; This IR mirrors a small C source used only as a debug-info reference:
 ;
@@ -51,11 +53,23 @@ done:
 !22 = !DILocation(line: 4, column: 7, scope: !10)
 !23 = !DILocation(line: 5, column: 3, scope: !10)
 
-; CHECK: file-count: 1
-; CHECK-NEXT: file 0: {{.*}}cdebug.c
-; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=pcfile target= pc=[
-; CHECK-SAME: :0
-; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=pcline target= pc=[
-; CHECK-SAME: :2
-; CHECK-SAME: :3
-; CHECK-SAME: :5
+; COMMON: file-count: 1
+; COMMON-NEXT: file 0: {{.*}}cdebug.c
+; COMMON: hasheddef-count: 4
+; COMMON: nonpkgdef-count: 0
+; X86: hash 0: a21821a940f91b1a89b53461b092269e
+; X86-NEXT: hash 1: 699ffe10973b9c71f84745b4aa867da7
+; ARM64: hash 0: 105a58e8d53963b571ff833d8449eeda
+; ARM64-NEXT: hash 1: 3bef6118e9cf260f78533cdf1a6375ec
+; COMMON-NEXT: hash 2: 4b0e7a681c0340c9a97ef4802a3af2f8
+; COMMON: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000 pkg=hashed sym=2
+; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000 pkg=hashed sym=2
+; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcsp target= pc={{.*}} pkg=hashed sym=0
+; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcfile target= pc={{.*}}:0{{.*}} pkg=hashed sym=0
+; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcline target= pc=[
+; COMMON-SAME: :2
+; COMMON-SAME: :3
+; COMMON-SAME: :5
+; COMMON-SAME: pkg=hashed sym=1
+; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc={{.*}} pkg=hashed sym=3
+; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc={{.*}} pkg=hashed sym=0
