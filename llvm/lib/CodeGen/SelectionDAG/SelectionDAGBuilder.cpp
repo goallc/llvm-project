@@ -11636,7 +11636,9 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
   CLI.OutVals.clear();
   for (unsigned i = 0, e = Args.size(); i != e; ++i) {
     SmallVector<Type *, 4> OrigArgTys;
-    ComputeValueTypes(DL, Args[i].OrigTy, OrigArgTys);
+    SmallVector<TypeSize, 4> OrigArgOffsets;
+    ComputeValueTypes(DL, Args[i].OrigTy, OrigArgTys,
+                      IsGoCallingConv ? &OrigArgOffsets : nullptr);
     // FIXME: Split arguments if CLI.IsPostTypeLegalization
     Type *FinalType = Args[i].Ty;
     if (Args[i].IsByVal)
@@ -11784,9 +11786,12 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
         // if it isn't first piece, alignment must be 1
         // For scalable vectors the scalable part is currently handled
         // by individual targets, so we just use the known minimum size here.
-        ISD::OutputArg MyFlags(
-            Flags, Parts[j].getValueType().getSimpleVT(), VT, OrigArgTy, i,
-            j * Parts[j].getValueType().getStoreSize().getKnownMinValue());
+        unsigned PartOffset =
+            j * Parts[j].getValueType().getStoreSize().getKnownMinValue();
+        if (IsGoCallingConv)
+          PartOffset += OrigArgOffsets[Value].getFixedValue();
+        ISD::OutputArg MyFlags(Flags, Parts[j].getValueType().getSimpleVT(), VT,
+                               OrigArgTy, i, PartOffset);
         if (NumParts > 1 && j == 0)
           MyFlags.Flags.setSplit();
         else if (j != 0) {
@@ -12178,7 +12183,10 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
   for (const Argument &Arg : F.args()) {
     unsigned ArgNo = Arg.getArgNo();
     SmallVector<Type *, 4> Types;
-    ComputeValueTypes(DAG.getDataLayout(), Arg.getType(), Types);
+    SmallVector<TypeSize, 4> Offsets;
+    bool IsGoCallingConv = goabi::isGoCallingConv(F.getCallingConv());
+    ComputeValueTypes(DAG.getDataLayout(), Arg.getType(), Types,
+                      IsGoCallingConv ? &Offsets : nullptr);
     bool isArgValueUsed = !Arg.use_empty();
     Type *FinalType = Arg.getType();
     if (Arg.hasAttribute(Attribute::ByVal))
@@ -12296,9 +12304,12 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
         // For scalable vectors, use the minimum size; individual targets
         // are responsible for handling scalable vector arguments and
         // return values.
-        ISD::InputArg MyFlags(
-            Flags, RegisterVT, VT, ArgTy, isArgValueUsed, ArgNo,
-            i * RegisterVT.getStoreSize().getKnownMinValue());
+        unsigned PartOffset =
+            i * RegisterVT.getStoreSize().getKnownMinValue();
+        if (IsGoCallingConv)
+          PartOffset += Offsets[Value].getFixedValue();
+        ISD::InputArg MyFlags(Flags, RegisterVT, VT, ArgTy, isArgValueUsed,
+                              ArgNo, PartOffset);
         if (NumRegs > 1 && i == 0)
           MyFlags.Flags.setSplit();
         // if it isn't first piece, alignment must be 1
