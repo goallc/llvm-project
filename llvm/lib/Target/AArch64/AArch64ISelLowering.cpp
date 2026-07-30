@@ -9416,31 +9416,53 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
   SmallVector<SDValue, 8> ResultVals(Ins.size());
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
     const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
+    if (!ResultLayout.InRegs)
+      continue;
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
     for (unsigned I = Group.Start; I != Group.End; ++I) {
       const ISD::InputArg &In = Ins[I];
-      if (ResultLayout.InRegs) {
-        MVT CopyVT = getAArch64GoCopyVT(In.VT);
-        unsigned PReg = getAArch64GoPhysReg(In.VT, In.OrigTy,
-                                            ResultLayout.IntRegStart + IntPiece,
-                                            ResultLayout.FPRegStart + FPPiece);
-        SDValue Val = DAG.getCopyFromReg(Chain, DL, PReg, CopyVT, InGlue);
-        Chain = Val.getValue(1);
-        InGlue = Val.getValue(2);
-        if (isAArch64GoFloatPiece(In.OrigTy))
-          ++FPPiece;
-        else
-          ++IntPiece;
-        if (In.VT != CopyVT)
-          ResultVals[I] = DAG.getNode(ISD::TRUNCATE, DL, In.VT, Val);
-        else
-          ResultVals[I] = Val;
-        continue;
-      }
+      MVT CopyVT = getAArch64GoCopyVT(In.VT);
+      unsigned PReg = getAArch64GoPhysReg(In.VT, In.OrigTy,
+                                          ResultLayout.IntRegStart + IntPiece,
+                                          ResultLayout.FPRegStart + FPPiece);
+      SDValue Val = DAG.getCopyFromReg(Chain, DL, PReg, CopyVT, InGlue);
+      Chain = Val.getValue(1);
+      InGlue = Val.getValue(2);
+      if (isAArch64GoFloatPiece(In.OrigTy))
+        ++FPPiece;
+      else
+        ++IntPiece;
+      if (In.VT != CopyVT)
+        ResultVals[I] = DAG.getNode(ISD::TRUNCATE, DL, In.VT, Val);
+      else
+        ResultVals[I] = Val;
+    }
+  }
 
+  // Read every register result before introducing stack loads into the chain.
+  // A Go result that does not fit in the remaining register budget is placed
+  // on the stack without consuming that budget, so a later result can still
+  // be register-assigned. Interleaving those stack loads with glued physical
+  // register copies can create a cyclic scheduler dependency at statepoints.
+  SDValue ResultStackPtr;
+  if (llvm::any_of(groupGoArgs(ArrayRef(Ins)), [&](const auto &Group) {
+        return !Layout.Results[Group.Index].InRegs;
+      })) {
+    // A Go stack can grow while the callee is running. Do not retain the
+    // pre-call SP value used to store arguments: it may point into the old
+    // stack segment after the call returns.
+    ResultStackPtr = DAG.getCopyFromReg(Chain, DL, AArch64::SP, PtrVT);
+    Chain = ResultStackPtr.getValue(1);
+  }
+  for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
+    const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
+    if (ResultLayout.InRegs)
+      continue;
+    for (unsigned I = Group.Start; I != Group.End; ++I) {
+      const ISD::InputArg &In = Ins[I];
       SDValue Addr = DAG.getNode(
-          ISD::ADD, DL, PtrVT, StackPtr,
+          ISD::ADD, DL, PtrVT, ResultStackPtr,
           DAG.getIntPtrConstant(
               StackBias + ResultLayout.StackOffset + In.PartOffset, DL));
       SDValue Load = DAG.getLoad(
