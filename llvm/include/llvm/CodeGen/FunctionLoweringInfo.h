@@ -27,6 +27,7 @@
 #include "llvm/IR/Value.h"
 #include "llvm/Support/KnownBits.h"
 #include <cassert>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -133,6 +134,18 @@ public:
 
   /// ByValArgFrameIndexMap - Keep track of frame indices for byval arguments.
   DenseMap<const Argument*, int> ByValArgFrameIndexMap;
+
+  struct ArgumentValueHome {
+    uint64_t Offset;
+    uint64_t Size;
+    int FI;
+  };
+
+  /// Exact fixed stack homes from which formal argument values were loaded.
+  /// Unlike ByValArgFrameIndexMap, these describe the value stored in the
+  /// object, not an address passed as an argument.
+  DenseMap<const Argument *, SmallVector<ArgumentValueHome, 4>>
+      ArgumentValueHomeMap;
 
   /// ArgDbgValues - A list of DBG_VALUE instructions created during isel for
   /// function arguments that are inserted after scheduling is completed.
@@ -284,6 +297,11 @@ public:
 
   /// getArgumentFrameIndex - Get frame index for the byval argument.
   LLVM_ABI int getArgumentFrameIndex(const Argument *A);
+
+  LLVM_ABI void addArgumentValueHome(const Argument *A, uint64_t Offset,
+                                     uint64_t Size, int FI);
+  LLVM_ABI int getArgumentValueHome(const Argument *A, uint64_t Offset,
+                                    uint64_t Size) const;
 
   LLVM_ABI Register getCatchPadExceptionPointerVReg(
       const Value *CPI, const TargetRegisterClass *RC);
