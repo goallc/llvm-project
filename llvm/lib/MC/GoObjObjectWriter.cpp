@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "GoObjStackMapUtils.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
@@ -381,6 +382,8 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   uint32_t ArgsNBits = ArgSize / PointerSize;
   size_t LocalsBytesPerBitmap = divideCeil(NBits, 8u);
   size_t ArgsBytesPerBitmap = divideCeil(ArgsNBits, 8u);
+  uint64_t OrdinaryArgsStart =
+      static_cast<uint64_t>(StackSize) + FrameLayout.EntryArgsStart;
 
   auto BuildPair = [&](const MCContext::GoObjStackMapEntry &Entry) {
     bool IsStackGrowth = Entry.ID == GoObj::StackGrowthStatepointID;
@@ -421,27 +424,28 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
         continue;
       }
 
-      if (Loc.Offset < 0 ||
-          static_cast<uint64_t>(Loc.Offset) < FrameLayout.GCLocalsStart ||
-          static_cast<uint64_t>(Loc.Offset) + PointerSize >
-              static_cast<uint64_t>(FrameLayout.GCLocalsStart) +
-                  FrameLayout.GCLocalsSize ||
-          static_cast<uint64_t>(Loc.Offset) % PointerSize != 0)
+      goobj::StackMapSlot Slot = goobj::classifyOrdinaryStackMapSlot(
+          Loc.Offset, Loc.Type == MCContext::GoObjStackMapLocation::Indirect,
+          PointerSize, FrameLayout.GCLocalsStart, FrameLayout.GCLocalsSize,
+          OrdinaryArgsStart, ArgSize);
+      switch (Slot.Kind) {
+      case goobj::StackMapSlotKind::Invalid:
         report_fatal_error(
-            "GoObj ordinary statepoint contains an invalid locals pointer "
+            "GoObj ordinary statepoint contains an invalid pointer stack "
             "slot");
-
-      // Direct describes the pointer value SP+Offset, not a pointer stored at
-      // SP+Offset. Statepoint lowering rematerializes that address after stack
-      // movement; marking it in FUNCDATA_LocalsPointerMaps would instead make
-      // the runtime scan the alloca contents as a pointer. Address-taken stack
-      // objects with pointer fields require FUNCDATA_StackObjects.
-      if (Loc.Type == MCContext::GoObjStackMapLocation::Direct)
-        continue;
-      uint32_t Bit =
-          (static_cast<uint32_t>(Loc.Offset) - FrameLayout.GCLocalsStart) /
-          PointerSize;
-      Pair.Locals[Bit / 8] |= uint8_t(1u << (Bit % 8));
+      case goobj::StackMapSlotKind::Direct:
+        // Direct describes the pointer value SP+Offset, not a pointer stored
+        // at SP+Offset. Statepoint lowering rematerializes that address after
+        // stack movement; neither the locals nor args bitmap should scan the
+        // slot's contents.
+        break;
+      case goobj::StackMapSlotKind::Args:
+        Pair.Args[Slot.Bit / 8] |= uint8_t(1u << (Slot.Bit % 8));
+        break;
+      case goobj::StackMapSlotKind::Locals:
+        Pair.Locals[Slot.Bit / 8] |= uint8_t(1u << (Slot.Bit % 8));
+        break;
+      }
     }
     return Pair;
   };
