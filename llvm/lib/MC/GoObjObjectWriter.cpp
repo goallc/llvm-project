@@ -8,6 +8,7 @@
 
 #include "GoObjStackMapUtils.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
@@ -630,8 +631,8 @@ uint32_t addAuxCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
   return Index;
 }
 
-std::array<uint8_t, GoObj::HashSize>
-makeAuxCarrierContentHash(char SectionMarker, ArrayRef<char> Data) {
+std::array<uint8_t, GoObj::HashSize> makeGoObjContentHash(char SectionMarker,
+                                                          ArrayRef<char> Data) {
   SHA256 Hasher;
   const char Version = 1;
   Hasher.update(StringRef(&Version, 1));
@@ -674,7 +675,7 @@ uint32_t getOrAddHashedAuxCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
   Sym.Align = 1;
   Sym.Size = Data.size();
   Sym.Data.append(Data.begin(), Data.end());
-  Sym.ContentHash = makeAuxCarrierContentHash(SectionMarker, Data);
+  Sym.ContentHash = makeGoObjContentHash(SectionMarker, Data);
   uint32_t Index = checkedUint32(Symbols.size(), "symbol count");
   Symbols.push_back(std::move(Sym));
   CarrierIndexes.insert({Key, Index});
@@ -854,6 +855,14 @@ uint64_t GoObjObjectWriter::writeObject() {
   const uint64_t StartOffset = OS.tell();
 
   std::vector<GoObjSymbol> Symbols;
+  DenseSet<const MCSymbol *> SeenPrivateRelocationTargets;
+  SmallVector<const MCSymbol *, 8> PrivateRelocationTargets;
+  for (const GoObjRelocationEntry &Reloc : Relocations) {
+    if (Reloc.Symbol && Reloc.Symbol->isTemporary() &&
+        Reloc.Symbol->isInSection() &&
+        SeenPrivateRelocationTargets.insert(Reloc.Symbol).second)
+      PrivateRelocationTargets.push_back(Reloc.Symbol);
+  }
 
   for (const MCSymbol &Symbol : Asm->symbols()) {
     if (!Symbol.isCommon())
@@ -874,6 +883,7 @@ uint64_t GoObjObjectWriter::writeObject() {
     uint64_t SectionSize = Asm->getSectionAddressSize(Section);
     if (SectionSize == 0)
       continue;
+    const size_t FirstSectionSymbol = Symbols.size();
 
     SmallString<0> Contents;
     if (!Section.isBssSection())
@@ -933,28 +943,75 @@ uint64_t GoObjObjectWriter::writeObject() {
 
     if (SectionSymbols.empty()) {
       AddSectionSymbol(nullptr, Section.getName(), 0, SectionSize);
-      continue;
+    } else {
+      for (size_t I = 0, E = SectionSymbols.size(); I != E; ++I) {
+        uint64_t Begin = SectionSymbols[I].Offset;
+        uint64_t End = SectionSize;
+        for (size_t J = I + 1; J != E; ++J) {
+          if (SectionSymbols[J].Offset > Begin) {
+            End = SectionSymbols[J].Offset;
+            break;
+          }
+        }
+        if (std::optional<uint64_t> ExactSize =
+                Asm->getContext().getGoObjSymbolSize(
+                    SectionSymbols[I].Symbol)) {
+          if (*ExactSize > SectionSize - Begin || Begin + *ExactSize > End)
+            report_fatal_error(
+                "GoObj global size overlaps the next section symbol");
+          End = Begin + *ExactSize;
+        }
+        AddSectionSymbol(SectionSymbols[I].Symbol,
+                         SectionSymbols[I].Symbol->getName(), Begin, End);
+      }
     }
 
-    for (size_t I = 0, E = SectionSymbols.size(); I != E; ++I) {
-      uint64_t Begin = SectionSymbols[I].Offset;
-      uint64_t End = SectionSize;
-      for (size_t J = I + 1; J != E; ++J) {
-        if (SectionSymbols[J].Offset > Begin) {
-          End = SectionSymbols[J].Offset;
+    // LLVM private constants are emitted as temporary MC symbols. Usually a
+    // surrounding section or global symbol is a sufficient GoObj carrier, but
+    // an exact-sized preceding global can leave a private constant in an
+    // uncovered section gap. Materialize only referenced, exact-sized,
+    // read-only temporaries. This is the MC equivalent of the Go compiler's
+    // local, content-addressable string/constant symbols.
+    if (getGoObjSymbolType(&Section) != GoObj::SRODATA)
+      continue;
+    for (const MCSymbol *MCSym : PrivateRelocationTargets) {
+      if (&MCSym->getSection() != &Section)
+        continue;
+      uint64_t Begin = Asm->getSymbolOffset(*MCSym);
+      bool Covered = false;
+      for (size_t I = FirstSectionSymbol; I != Symbols.size(); ++I) {
+        const GoObjSymbol &Sym = Symbols[I];
+        if (Sym.Section == &Section && Sym.SectionBegin <= Begin &&
+            Begin < Sym.SectionEnd) {
+          Covered = true;
           break;
         }
       }
-      if (std::optional<uint64_t> ExactSize =
-              Asm->getContext().getGoObjSymbolSize(SectionSymbols[I].Symbol)) {
-        if (*ExactSize > SectionSize - Begin ||
-            Begin + *ExactSize > End)
+      if (Covered)
+        continue;
+
+      std::optional<uint64_t> ExactSize =
+          Asm->getContext().getGoObjSymbolSize(MCSym);
+      if (!ExactSize || *ExactSize == 0 || *ExactSize > SectionSize - Begin)
+        continue;
+      uint64_t End = Begin + *ExactSize;
+      for (size_t I = FirstSectionSymbol; I != Symbols.size(); ++I) {
+        const GoObjSymbol &Sym = Symbols[I];
+        if (Sym.Section == &Section && Begin < Sym.SectionEnd &&
+            Sym.SectionBegin < End)
           report_fatal_error(
-              "GoObj global size overlaps the next section symbol");
-        End = Begin + *ExactSize;
+              "GoObj private constant overlaps an existing symbol carrier");
       }
-      AddSectionSymbol(SectionSymbols[I].Symbol,
-                       SectionSymbols[I].Symbol->getName(), Begin, End);
+
+      ArrayRef<char> Data(Contents.data() + Begin, *ExactSize);
+      uint32_t Align =
+          Asm->getContext().getGoObjSymbolAlignment(MCSym).value_or(1);
+      addDefinedSymbol(Symbols, MCSym, &Section, Begin, End,
+                       GoObj::DefinedSymbolBlock::Hasheddef, MCSym->getName(),
+                       GoObj::SRODATA,
+                       GoObj::SymFlagDupok | GoObj::SymFlagLocal, 0,
+                       GoObj::SymABI0, *ExactSize, Align, Data);
+      Symbols.back().ContentHash = makeGoObjContentHash(0, Data);
     }
   }
 
@@ -1244,6 +1301,10 @@ uint64_t GoObjObjectWriter::writeObject() {
     if (LocalOffset >
         static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
       report_fatal_error("GoObj relocation offset exceeds int32 range");
+    if (Source.DefinedBlock == GoObj::DefinedSymbolBlock::Hasheddef &&
+        Source.Symbol && Source.Symbol->isTemporary())
+      report_fatal_error(
+          "GoObj private constants with relocations are not supported");
 
     int64_t Addend = getGoObjRelocAddend(Reloc);
     GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
