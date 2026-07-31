@@ -44,6 +44,7 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 #include <cassert>
@@ -76,6 +77,10 @@ static cl::opt<unsigned> MaxRegistersForGCPointers(
     cl::desc("Max number of VRegs allowed to pass GC pointer meta args in"));
 
 typedef FunctionLoweringInfo::StatepointRelocationRecord RecordType;
+typedef StatepointLoweringState::FixedStackHome FixedStackHome;
+
+static constexpr StringLiteral FixedStackHomeMD =
+    "llvm.statepoint.fixed_stack_home";
 
 static std::optional<std::pair<const Argument *, uint64_t>>
 getArgumentValueOffset(const Value *V, const DataLayout &DL) {
@@ -104,6 +109,68 @@ getArgumentValueOffset(const Value *V, const DataLayout &DL) {
   return std::pair(Arg, Offset);
 }
 
+static std::optional<FixedStackHome>
+getMarkedFixedStackHome(const Value *V, SelectionDAGBuilder &Builder) {
+  const auto *Load = dyn_cast<LoadInst>(V);
+  if (!Load)
+    return std::nullopt;
+  const MDNode *Marker = Load->getMetadata(FixedStackHomeMD);
+  if (!Marker)
+    return std::nullopt;
+
+  auto Invalid = [](const Twine &Reason) -> void {
+    report_fatal_error(Twine("invalid ") + FixedStackHomeMD +
+                       " load: " + Reason);
+  };
+
+  if (Marker->getNumOperands() != 0)
+    Invalid("metadata must be an empty node");
+  if (!Load->getType()->isPointerTy())
+    Invalid("result is not a scalar pointer");
+  // Canonical producers make these loads volatile so SelectionDAG cannot
+  // forward or CSE distinct logical roots before their fixed homes are
+  // recorded. Volatile is valid here and adds no extra stack object; atomic
+  // accesses are outside this internal marker's contract.
+  if (Load->isAtomic())
+    Invalid("load is atomic");
+
+  const DataLayout &DL = Builder.DAG.getDataLayout();
+  const Value *Pointer = Load->getPointerOperand();
+  APInt Offset(DL.getIndexTypeSizeInBits(Pointer->getType()), 0,
+               /*isSigned=*/true);
+  const Value *Base = Pointer->stripAndAccumulateConstantOffsets(
+      DL, Offset, /*AllowNonInbounds=*/true);
+  const auto *Alloca = dyn_cast<AllocaInst>(Base);
+  if (!Alloca || !Alloca->isStaticAlloca())
+    Invalid("address is not a static alloca plus a constant offset");
+  if (Offset.isNegative() || Offset.getActiveBits() > 64)
+    Invalid("byte offset is negative or does not fit in uint64");
+
+  auto AllocaIt = Builder.FuncInfo.StaticAllocaMap.find(Alloca);
+  if (AllocaIt == Builder.FuncInfo.StaticAllocaMap.end())
+    Invalid("static alloca has no fixed frame index");
+
+  TypeSize StoreSize = DL.getTypeStoreSize(Load->getType());
+  if (StoreSize.isScalable())
+    Invalid("pointer store size is scalable");
+  uint64_t Size = StoreSize.getFixedValue();
+  uint64_t ByteOffset = Offset.getZExtValue();
+  auto End = checkedAddUnsigned(ByteOffset, Size);
+  if (!End)
+    Invalid("stack subslot end offset overflows");
+
+  MachineFrameInfo &MFI = Builder.DAG.getMachineFunction().getFrameInfo();
+  int FI = AllocaIt->second;
+  int64_t ObjectSize = MFI.getObjectSize(FI);
+  if (ObjectSize < 0 || *End > uint64_t(ObjectSize))
+    Invalid("stack subslot is outside the alloca frame object");
+  if (MFI.getStackID(FI) != TargetStackID::Default)
+    Invalid("alloca uses a non-default target stack");
+
+  return FixedStackHome{FI, int64_t(ByteOffset), Size,
+                        commonAlignment(MFI.getObjectAlign(FI), ByteOffset)};
+}
+
 static void pushStackMapConstant(SmallVectorImpl<SDValue>& Ops,
                                  SelectionDAGBuilder &Builder, uint64_t Value) {
   SDLoc L = Builder.getCurSDLoc();
@@ -112,11 +179,24 @@ static void pushStackMapConstant(SmallVectorImpl<SDValue>& Ops,
   Ops.push_back(Builder.DAG.getTargetConstant(Value, L, MVT::i64));
 }
 
+static void pushStackMapIndirectLocation(SmallVectorImpl<SDValue> &Ops,
+                                         SelectionDAGBuilder &Builder,
+                                         const FixedStackHome &Home) {
+  SDLoc L = Builder.getCurSDLoc();
+  Ops.push_back(Builder.DAG.getTargetConstant(StackMaps::IndirectMemRefOp, L,
+                                              MVT::i64));
+  Ops.push_back(Builder.DAG.getTargetConstant(Home.Size, L, MVT::i64));
+  Ops.push_back(
+      Builder.DAG.getTargetFrameIndex(Home.FI, Builder.getFrameIndexTy()));
+  Ops.push_back(Builder.DAG.getTargetConstant(Home.Offset, L, MVT::i64));
+}
+
 void StatepointLoweringState::startNewStatepoint(SelectionDAGBuilder &Builder) {
   // Consistency check
   assert(PendingGCRelocateCalls.empty() &&
          "Trying to visit statepoint before finished processing previous one");
   Locations.clear();
+  FixedStackHomes.clear();
   NextSlotToAllocate = 0;
   // Need to resize this on each safepoint - we need the two to stay in sync and
   // the clear patterns of a SelectionDAGBuilder have no relation to
@@ -127,6 +207,7 @@ void StatepointLoweringState::startNewStatepoint(SelectionDAGBuilder &Builder) {
 
 void StatepointLoweringState::clear() {
   Locations.clear();
+  FixedStackHomes.clear();
   AllocatedStackSlots.clear();
   assert(PendingGCRelocateCalls.empty() &&
          "cleared before statepoint sequence completed");
@@ -212,7 +293,10 @@ static std::optional<int> findPreviousSpillSlot(const Value *Val,
     if (Record.type != RecordType::Spill)
       return std::nullopt;
 
-    return Record.payload.FI;
+    int FI = Record.payload.Spill.FI;
+    if (!is_contained(Builder.FuncInfo.StatepointStackSlots, FI))
+      return std::nullopt;
+    return FI;
   }
 
   // Look through bitcast instructions.
@@ -410,6 +494,15 @@ static MachineMemOperand* getMachineMemOperand(MachineFunction &MF,
                                  MFI.getObjectAlign(FI.getIndex()));
 }
 
+static MachineMemOperand *
+getMachineMemOperand(MachineFunction &MF, const FixedStackHome &Home) {
+  auto PtrInfo =
+      MachinePointerInfo::getFixedStack(MF, Home.FI, Home.Offset);
+  auto MMOFlags = MachineMemOperand::MOStore | MachineMemOperand::MOLoad |
+                  MachineMemOperand::MOVolatile;
+  return MF.getMachineMemOperand(PtrInfo, MMOFlags, Home.Size, Home.Alignment);
+}
+
 /// Spill a value incoming to the statepoint. It might be either part of
 /// vmstate
 /// or gcstate. In both cases unconditionally spill it on the stack unless it
@@ -472,6 +565,13 @@ lowerIncomingStatepointValue(SDValue Incoming, bool RequireSpillSlot,
                              SmallVectorImpl<SDValue> &Ops,
                              SmallVectorImpl<MachineMemOperand *> &MemRefs,
                              SelectionDAGBuilder &Builder) {
+  if (const FixedStackHome *Home =
+          Builder.StatepointLowering.getFixedStackHome(Incoming)) {
+    pushStackMapIndirectLocation(Ops, Builder, *Home);
+    MemRefs.push_back(
+        getMachineMemOperand(Builder.DAG.getMachineFunction(), *Home));
+    return;
+  }
   
   if (willLowerDirectly(Incoming)) {
     if (FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(Incoming)) {
@@ -620,11 +720,64 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
     return !willLowerDirectly(SD);
   };
 
+  // Validate and collect marked homes before deduplicating pointer SDValues or
+  // deciding which values may use vregs. Two conflicting marked homes for the
+  // same lowered value are not safe to choose between. Neither is a marked IR
+  // value colliding with a distinct unmarked GC IR value: pre-call DAG CSE does
+  // not imply that the two values have the same post-statepoint semantics.
+  DenseMap<SDValue, FixedStackHome> MarkedHomes;
+  DenseMap<SDValue, const Value *> MarkedSources;
+  DenseMap<SDValue, const Value *> UnmarkedSources;
+  auto collectRootSource = [&](const Value *V) {
+    std::optional<FixedStackHome> Home = getMarkedFixedStackHome(V, Builder);
+    SDValue PtrSD = Builder.getValue(V);
+    if (!Home) {
+      UnmarkedSources.try_emplace(PtrSD, V);
+      return;
+    }
+    MarkedSources.try_emplace(PtrSD, V);
+    auto [It, Inserted] = MarkedHomes.try_emplace(PtrSD, *Home);
+    if (!Inserted &&
+        (It->second.FI != Home->FI || It->second.Offset != Home->Offset ||
+         It->second.Size != Home->Size ||
+         It->second.Alignment != Home->Alignment))
+      report_fatal_error(
+          "conflicting llvm.statepoint.fixed_stack_home locations for one "
+          "lowered GC pointer");
+  };
+  // SI.Ptrs has already been deduplicated by lowered SDValue. Inspect the
+  // original IR carrier lists as well so that deduplication cannot hide a
+  // marked/unmarked identity collision from this check.
+  for (const Use &U : SI.GCLives)
+    collectRootSource(U.get());
+  for (const GCRelocateInst *Relocate : SI.GCRelocates) {
+    collectRootSource(Relocate->getDerivedPtr());
+    collectRootSource(Relocate->getBasePtr());
+  }
+  for (const Value *V : SI.Ptrs)
+    collectRootSource(V);
+  for (const Value *V : SI.Bases)
+    collectRootSource(V);
+  for (const auto &[PtrSD, Home] : MarkedHomes) {
+    auto Unmarked = UnmarkedSources.find(PtrSD);
+    assert(MarkedSources.count(PtrSD) && "marked home has no IR source");
+    if (Unmarked != UnmarkedSources.end() &&
+        Unmarked->second != MarkedSources.find(PtrSD)->second)
+      report_fatal_error(
+          "llvm.statepoint.fixed_stack_home value and a distinct unmarked GC "
+          "value lower to the same pre-call value");
+  }
+
   auto processGCPtr = [&](const Value *V) {
     SDValue PtrSD = Builder.getValue(V);
     if (!LoweredGCPtrs.insert(PtrSD))
       return; // skip duplicates
     GCPtrIndexMap[PtrSD] = LoweredGCPtrs.size() - 1;
+
+    if (auto Home = MarkedHomes.find(PtrSD); Home != MarkedHomes.end()) {
+      Builder.StatepointLowering.setFixedStackHome(PtrSD, Home->second);
+      return;
+    }
 
     if (auto ArgValue =
             getArgumentValueOffset(V, Builder.DAG.getDataLayout())) {
@@ -977,6 +1130,8 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
     SDValue Loc = StatepointLowering.getLocation(SDV);
 
     bool IsLocal = (Relocate->getParent() == StatepointInstr->getParent());
+    const FixedStackHome *Home =
+        StatepointLowering.getFixedStackHome(SDV);
 
     RecordType Record;
     if (LowerAsVReg.count(SDV)) {
@@ -989,9 +1144,17 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
         assert(It != VirtRegs.end());
         Record.payload.Reg = It->second;
       }
+    } else if (Home) {
+      Record.type = RecordType::Spill;
+      Record.payload.Spill = {Home->FI, Home->Offset, Home->Size,
+                              Home->Alignment.value()};
     } else if (Loc.getNode()) {
       Record.type = RecordType::Spill;
-      Record.payload.FI = cast<FrameIndexSDNode>(Loc)->getIndex();
+      int FI = cast<FrameIndexSDNode>(Loc)->getIndex();
+      MachineFrameInfo &MFI = DAG.getMachineFunction().getFrameInfo();
+      Record.payload.Spill = {
+          FI, 0, uint64_t(MFI.getObjectSize(FI)),
+          MFI.getObjectAlign(FI).value()};
     } else {
       Record.type = RecordType::NoRelocate;
       // If we didn't relocate a value, we'll essentialy end up inserting an
@@ -1323,8 +1486,12 @@ void SelectionDAGBuilder::visitGCRelocate(const GCRelocateInst &Relocate) {
   }
 
   if (Record.type == RecordType::Spill) {
-    unsigned Index = Record.payload.FI;
+    int Index = Record.payload.Spill.FI;
     SDValue SpillSlot = DAG.getFrameIndex(Index, getFrameIndexTy());
+    int64_t Offset = Record.payload.Spill.Offset;
+    if (Offset != 0)
+      SpillSlot = DAG.getObjectPtrOffset(getCurSDLoc(), SpillSlot,
+                                         TypeSize::getFixed(Offset));
 
     // All the reloads are independent and are reading memory only modified by
     // statepoints (i.e. no other aliasing stores); informing SelectionDAG of
@@ -1336,14 +1503,16 @@ void SelectionDAGBuilder::visitGCRelocate(const GCRelocateInst &Relocate) {
     const SDValue Chain = DAG.getRoot(); // != Builder.getRoot()
 
     auto &MF = DAG.getMachineFunction();
-    auto &MFI = MF.getFrameInfo();
-    auto PtrInfo = MachinePointerInfo::getFixedStack(MF, Index);
-    auto *LoadMMO = MF.getMachineMemOperand(PtrInfo, MachineMemOperand::MOLoad,
-                                            MFI.getObjectSize(Index),
-                                            MFI.getObjectAlign(Index));
+    auto PtrInfo = MachinePointerInfo::getFixedStack(MF, Index, Offset);
+    auto *LoadMMO = MF.getMachineMemOperand(
+        PtrInfo, MachineMemOperand::MOLoad, Record.payload.Spill.Size,
+        Align(Record.payload.Spill.Alignment));
 
     auto LoadVT = DAG.getTargetLoweringInfo().getValueType(DAG.getDataLayout(),
                                                            Relocate.getType());
+    assert(LoadVT.getStoreSize().getKnownMinValue() ==
+               Record.payload.Spill.Size &&
+           "relocated value size does not match its fixed stack home");
 
     SDValue SpillLoad =
         DAG.getLoad(LoadVT, getCurSDLoc(), Chain, SpillSlot, LoadMMO);

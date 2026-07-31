@@ -111,11 +111,19 @@ public:
       // relocates only.
       SDValueNode,
     } type = NoRelocate;
-    // Payload contains either frame index of the stack slot in which the value
-    // was spilled, or virtual register which contains the re-definition.
-    union payload_t {
-      payload_t() : FI(-1) {}
+    struct SpillLocation {
       int FI;
+      int64_t Offset;
+      uint64_t Size;
+      uint64_t Alignment;
+    };
+
+    // Payload contains either the exact stack subslot in which the value was
+    // spilled/already homed, or the virtual register which contains the
+    // re-definition.
+    union payload_t {
+      payload_t() : Spill({-1, 0, 0, 1}) {}
+      SpillLocation Spill;
       Register Reg;
     } payload;
   };

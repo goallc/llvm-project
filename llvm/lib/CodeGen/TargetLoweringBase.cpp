@@ -1626,6 +1626,37 @@ TargetLoweringBase::emitPatchPoint(MachineInstr &InitialMI,
                     [](MachineOperand &Operand) { return Operand.isFI(); }))
     return MBB;
 
+  BitVector PreEncodedMemRefFIs(MI->getNumOperands());
+  if (MI->getOpcode() == TargetOpcode::STATEPOINT) {
+    StatepointOpers Opers(MI);
+    auto CollectSection = [&](unsigned CountIdx) {
+      uint64_t Count = MI->getOperand(CountIdx).getImm();
+      unsigned CurIdx = CountIdx + 1;
+      while (Count--) {
+        const MachineOperand &Tag = MI->getOperand(CurIdx);
+        if (Tag.isImm() && Tag.getImm() == StackMaps::DirectMemRefOp) {
+          assert(CurIdx + 2 < MI->getNumOperands() &&
+                 MI->getOperand(CurIdx + 1).isFI() &&
+                 MI->getOperand(CurIdx + 2).isImm() &&
+                 "malformed pre-encoded direct statepoint location");
+          PreEncodedMemRefFIs.set(CurIdx + 1);
+        } else if (Tag.isImm() &&
+                   Tag.getImm() == StackMaps::IndirectMemRefOp) {
+          assert(CurIdx + 3 < MI->getNumOperands() &&
+                 MI->getOperand(CurIdx + 1).isImm() &&
+                 MI->getOperand(CurIdx + 2).isFI() &&
+                 MI->getOperand(CurIdx + 3).isImm() &&
+                 "malformed pre-encoded indirect statepoint location");
+          PreEncodedMemRefFIs.set(CurIdx + 2);
+        }
+        CurIdx = StackMaps::getNextMetaArgIdx(MI, CurIdx);
+      }
+    };
+    CollectSection(Opers.getNumDeoptArgsIdx());
+    CollectSection(Opers.getNumGCPtrIdx());
+    CollectSection(Opers.getNumAllocaIdx());
+  }
+
   MachineInstrBuilder MIB = BuildMI(MF, MI->getDebugLoc(), MI->getDesc());
 
   // Inherit previous memory operands.
@@ -1650,6 +1681,15 @@ TargetLoweringBase::emitPatchPoint(MachineInstr &InitialMI,
     // foldMemoryOperand builds a new MI after replacing a single FI operand
     // with the canonical set of five x86 addressing-mode operands.
     int FI = MO.getIndex();
+
+    // Statepoint lowering can already encode an exact fixed-stack subslot as a
+    // DirectMemRefOp/IndirectMemRefOp tuple. Preserve that FI here; PEI will
+    // replace it with the frame register and add the final frame offset to the
+    // tuple's existing byte offset.
+    if (PreEncodedMemRefFIs.test(i)) {
+      MIB.add(MO);
+      continue;
+    }
 
     // Add frame index operands recognized by stackmaps.cpp
     if (MFI.isStatepointSpillSlotObjectIndex(FI)) {
