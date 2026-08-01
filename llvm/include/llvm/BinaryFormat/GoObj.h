@@ -43,6 +43,10 @@ inline constexpr int64_t AllocaPtrMapEndMagic = 0x414c4c43;   // "ALLC"
 inline constexpr int64_t AllocaPtrMapRecordTag = 0x5054524d;  // "PTRM"
 inline constexpr uint32_t AllocaPtrMapBitmapWordBits = 64;
 
+// Special values in PCDATA_UnsafePoint (PCDATA stream 0).
+inline constexpr int32_t UnsafePointSafe = -1;
+inline constexpr int32_t UnsafePointUnsafe = -2;
+
 inline constexpr char Magic[] = {'\0', 'g', 'o', '1', '2', '0', 'l', 'd'};
 inline constexpr uint32_t MagicSize = sizeof(Magic);
 inline constexpr uint32_t FingerprintSize = 8;

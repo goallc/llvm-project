@@ -244,6 +244,10 @@ private:
   DenseMap<const MCSymbol *, std::vector<GoObjPCSPEntry>>
       GoObjSymbolPCSPEntries;
 
+  /// Whether a Go object function is unsafe for asynchronous preemption over
+  /// its complete PC range.
+  DenseMap<const MCSymbol *, bool> GoObjSymbolAsyncUnsafe;
+
   /// Go object statepoint stack maps keyed by function MC symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjStackMapEntry>>
       GoObjSymbolStackMapEntries;
@@ -775,6 +779,14 @@ public:
     if (It == GoObjSymbolPCSPEntries.end())
       return nullptr;
     return &It->second;
+  }
+
+  void setGoObjSymbolAsyncUnsafe(const MCSymbol *Sym, bool AsyncUnsafe) {
+    GoObjSymbolAsyncUnsafe[Sym] = AsyncUnsafe;
+  }
+
+  bool isGoObjSymbolAsyncUnsafe(const MCSymbol *Sym) const {
+    return GoObjSymbolAsyncUnsafe.lookup(Sym);
   }
 
   void addGoObjSymbolStackMapEntry(const MCSymbol *Sym,

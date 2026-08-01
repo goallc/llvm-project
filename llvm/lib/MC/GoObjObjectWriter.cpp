@@ -1291,6 +1291,11 @@ uint64_t GoObjObjectWriter::writeObject() {
         });
       }
 
+      int32_t InitialUnsafePointValue =
+          Asm->getContext().isGoObjSymbolAsyncUnsafe(Symbols[I].Symbol)
+              ? GoObj::UnsafePointUnsafe
+              : GoObj::UnsafePointSafe;
+
       GoObjFuncDebugLines &LineInfo = FuncDebugLines[I];
       if (!LineInfo.hasLines())
         LineInfo.Files.push_back(GetFallbackFile());
@@ -1345,7 +1350,7 @@ uint64_t GoObjObjectWriter::writeObject() {
           Symbols, AuxCarrierIndexes, 'P', StackMapIndex);
       uint32_t UnsafePointSym = getOrAddHashedAuxCarrierSymbol(
           Symbols, AuxCarrierIndexes, 'P',
-          makeConstantPCTab(-1, CodeSize, PCQuantum));
+          makeConstantPCTab(InitialUnsafePointValue, CodeSize, PCQuantum));
 
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncInfo, FuncInfoSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, ArgsMapSym});

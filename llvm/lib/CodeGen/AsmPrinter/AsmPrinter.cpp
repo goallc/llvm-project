@@ -3520,6 +3520,8 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
         getGoObjArgSize(F, MF.getDataLayout(), TM.getTargetTriple()));
     OutContext.setGoObjSymbolHasFramePointer(
         CurrentFnSym, MF.getSubtarget().getFrameLowering()->hasFP(MF));
+    OutContext.setGoObjSymbolAsyncUnsafe(CurrentFnSym,
+                                         F.hasFnAttribute("go-async-unsafe"));
   }
 
   CurrentFnSymForSize = CurrentFnSym;
