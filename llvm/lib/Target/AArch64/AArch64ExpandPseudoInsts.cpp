@@ -19,6 +19,7 @@
 #include "AArch64Subtarget.h"
 #include "MCTargetDesc/AArch64AddressingModes.h"
 #include "Utils/AArch64BaseInfo.h"
+#include "llvm/BinaryFormat/GoObj.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
@@ -29,6 +30,7 @@
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/DebugLoc.h"
+#include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCInstrDesc.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CodeGen.h"
@@ -1325,6 +1327,34 @@ bool AArch64ExpandPseudoImpl::expandMI(MachineBasicBlock &MBB,
   switch (Opcode) {
   default:
     break;
+
+  case AArch64::GO_GC_WRITE_BARRIER: {
+    static constexpr const char *WriteBarrierNames[] = {
+        "runtime.gcWriteBarrier1", "runtime.gcWriteBarrier2",
+        "runtime.gcWriteBarrier3", "runtime.gcWriteBarrier4",
+        "runtime.gcWriteBarrier5", "runtime.gcWriteBarrier6",
+        "runtime.gcWriteBarrier7", "runtime.gcWriteBarrier8",
+    };
+    int64_t Entries = MI.getOperand(0).getImm();
+    if (Entries < 1 || Entries > 8)
+      report_fatal_error("Go write barrier entry count must be in [1, 8]");
+
+    MachineInstrBuilder Call =
+        BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(AArch64::BL));
+    const char *WriteBarrierName = WriteBarrierNames[Entries - 1];
+    MachineFunction &MF = *MBB.getParent();
+    if (MF.getTarget().getTargetTriple().isOSBinFormatGoObj()) {
+      MCContext &Ctx = MF.getContext();
+      MCSymbol *Callee = Ctx.getOrCreateSymbol(WriteBarrierName);
+      Ctx.setGoObjSymbolABI(Callee, GoObj::SymABIInternal);
+      Call.addSym(Callee);
+    } else {
+      Call.addExternalSymbol(WriteBarrierName);
+    }
+    transferImpOps(MI, Call, Call);
+    MI.eraseFromParent();
+    return true;
+  }
 
   case AArch64::BSPv8i8:
   case AArch64::BSPv16i8: {
