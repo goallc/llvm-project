@@ -3777,6 +3777,31 @@ def BL : CallImm<1, "bl", [(AArch64call tglobaladdr:$addr)]>;
 } // isCall
 def : Pat<(AArch64call texternalsym:$func), (BL texternalsym:$func)>;
 
+// Go's write-barrier buffer entry points use a private ABI: the selected
+// runtime.gcWriteBarrierN wrapper returns the buffer pointer in X25, preserves
+// the allocatable general-purpose registers except X27, and may clobber the
+// linker temporaries, condition flags, LR, and all floating-point/vector
+// registers.
+// Keep this as a call-like pseudo through register allocation so that the
+// fixed-register and clobber constraints are visible without treating the IR
+// intrinsic as an ordinary call/statepoint.
+let isCall = 1, isCodeGenOnly = 1, hasSideEffects = 1,
+    mayLoad = 1, mayStore = 1, Uses = [SP],
+    // Keep the fixed result first so InstrEmitter associates the intrinsic's
+    // value with X25 rather than with one of the private call's clobbers.
+    Defs = [X25, X16, X17, X27, LR, NZCV,
+            Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7,
+            Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15,
+            Q16, Q17, Q18, Q19, Q20, Q21, Q22, Q23,
+            Q24, Q25, Q26, Q27, Q28, Q29, Q30, Q31] in
+def GO_GC_WRITE_BARRIER
+    : Pseudo<(outs), (ins i32imm:$entries),
+             [(set X25,
+                   (int_go_gc_write_barrier (i32 timm:$entries)))]>,
+      Sched<[WriteBr]> {
+  let Size = 4;
+}
+
 //===----------------------------------------------------------------------===//
 // Exception generation instructions.
 //===----------------------------------------------------------------------===//
