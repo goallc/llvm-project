@@ -2311,6 +2311,62 @@ void AsmPrinter::emitDanglingPrefetchTargets() {
   }
 }
 
+static int32_t applyGoObjSPAdjust(int32_t SPDelta, int64_t SPAdjust) {
+  int64_t NewSPDelta = static_cast<int64_t>(SPDelta) + SPAdjust;
+  if (NewSPDelta < std::numeric_limits<int32_t>::min() ||
+      NewSPDelta > std::numeric_limits<int32_t>::max())
+    report_fatal_error("GoObj pcsp value exceeds int32 range");
+  return static_cast<int32_t>(NewSPDelta);
+}
+
+static SmallVector<std::optional<int32_t>, 8>
+computeGoObjMBBEntrySPDelta(const MachineFunction &MF) {
+  // PCSP describes the runtime SP at every emitted PC. Derive each block's
+  // entry value from the semantic machine CFG because physical block layout
+  // need not preserve the predecessor's SP state.
+  SmallVector<std::optional<int32_t>, 8> EntrySPDelta(MF.getNumBlockIDs());
+  if (MF.empty())
+    return EntrySPDelta;
+
+  const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
+  SmallVector<const MachineBasicBlock *, 8> Worklist;
+  EntrySPDelta[MF.front().getNumber()] = 0;
+  Worklist.push_back(&MF.front());
+
+  for (size_t I = 0; I != Worklist.size(); ++I) {
+    const MachineBasicBlock &MBB = *Worklist[I];
+    int32_t ExitSPDelta = *EntrySPDelta[MBB.getNumber()];
+    for (const MachineInstr &MI : MBB) {
+      if (MI.getOpcode() == TargetOpcode::CFI_INSTRUCTION)
+        continue;
+      ExitSPDelta = applyGoObjSPAdjust(ExitSPDelta, TII->getGoObjSPAdjust(MI));
+    }
+
+    for (const MachineBasicBlock *Succ : MBB.successors()) {
+      std::optional<int32_t> &SuccEntrySPDelta =
+          EntrySPDelta[Succ->getNumber()];
+      if (!SuccEntrySPDelta) {
+        SuccEntrySPDelta = ExitSPDelta;
+        Worklist.push_back(Succ);
+        continue;
+      }
+      if (*SuccEntrySPDelta != ExitSPDelta)
+        report_fatal_error(Twine("inconsistent GoObj pcsp value at entry to ") +
+                           Succ->getFullName() + " in function " +
+                           MF.getName());
+    }
+  }
+
+  for (const MachineBasicBlock &MBB : MF) {
+    if (!EntrySPDelta[MBB.getNumber()])
+      report_fatal_error(
+          Twine("cannot determine GoObj pcsp value at entry to ") +
+          MBB.getFullName() + " in function " + MF.getName());
+  }
+
+  return EntrySPDelta;
+}
+
 /// EmitFunctionBody - This method emits the body and trailer for a
 /// function.
 
@@ -2351,6 +2407,9 @@ void AsmPrinter::emitFunctionBody() {
 
   bool TrackGoObjPCSP = TM.getTargetTriple().isOSBinFormatGoObj();
   SmallVector<MCContext::GoObjPCSPEntry, 8> GoObjPCSPEntries;
+  SmallVector<std::optional<int32_t>, 8> GoObjMBBEntrySPDelta;
+  if (TrackGoObjPCSP)
+    GoObjMBBEntrySPDelta = computeGoObjMBBEntrySPDelta(*MF);
   int32_t GoObjSPDelta = 0;
 
   bool CanDoExtraAnalysis = ORE->allowExtraAnalysis(DEBUG_TYPE);
@@ -2371,6 +2430,18 @@ void AsmPrinter::emitFunctionBody() {
   for (auto &MBB : *MF) {
     // Print a label for the basic block.
     emitBasicBlockStart(MBB);
+
+    if (TrackGoObjPCSP) {
+      int32_t EntrySPDelta = *GoObjMBBEntrySPDelta[MBB.getNumber()];
+      if (EntrySPDelta != GoObjSPDelta) {
+        // Restore the state expected by this block when physical layout does
+        // not follow a CFG predecessor with the same SP depth.
+        GoObjSPDelta = EntrySPDelta;
+        MCSymbol *Label = OutContext.createTempSymbol("goobj_pcsp");
+        OutStreamer->emitLabel(Label);
+        GoObjPCSPEntries.push_back({Label, GoObjSPDelta});
+      }
+    }
     DenseMap<StringRef, unsigned> MnemonicCounts;
 
     const SmallVector<unsigned> *PrefetchTargets = nullptr;
@@ -2587,11 +2658,7 @@ void AsmPrinter::emitFunctionBody() {
         int64_t SPAdjust =
             MF->getSubtarget().getInstrInfo()->getGoObjSPAdjust(MI);
         if (SPAdjust != 0) {
-          int64_t NewSPDelta = static_cast<int64_t>(GoObjSPDelta) + SPAdjust;
-          if (NewSPDelta < std::numeric_limits<int32_t>::min() ||
-              NewSPDelta > std::numeric_limits<int32_t>::max())
-            report_fatal_error("GoObj pcsp value exceeds int32 range");
-          GoObjSPDelta = static_cast<int32_t>(NewSPDelta);
+          GoObjSPDelta = applyGoObjSPAdjust(GoObjSPDelta, SPAdjust);
           if (GoObjPCSPEntries.empty() ||
               GoObjPCSPEntries.back().Value != GoObjSPDelta) {
             MCSymbol *Label = OutContext.createTempSymbol("goobj_pcsp");

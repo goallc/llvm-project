@@ -1289,6 +1289,17 @@ uint64_t GoObjObjectWriter::writeObject() {
         llvm::stable_sort(PCSPEntries, [](const auto &LHS, const auto &RHS) {
           return LHS.PC < RHS.PC;
         });
+        // Empty blocks can place multiple state transitions at one PC. Keep
+        // the final transition, which describes the following emitted code.
+        SmallVector<GoObjPCTabEntry, 8> NormalizedPCSPEntries;
+        for (const GoObjPCTabEntry &Entry : PCSPEntries) {
+          if (!NormalizedPCSPEntries.empty() &&
+              NormalizedPCSPEntries.back().PC == Entry.PC)
+            NormalizedPCSPEntries.back().Value = Entry.Value;
+          else
+            NormalizedPCSPEntries.push_back(Entry);
+        }
+        PCSPEntries = std::move(NormalizedPCSPEntries);
       }
 
       int32_t InitialUnsafePointValue =
