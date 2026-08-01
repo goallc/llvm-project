@@ -23,6 +23,26 @@ namespace GoObj {
 // runtime.morestack slow path.
 inline constexpr uint64_t StackGrowthStatepointID = 0x476f537461636b47ULL;
 
+// GoALLC encodes pointer maps for fixed allocas as a self-describing suffix of
+// statepoint deopt locations:
+//
+//   ordinary-deopt*, BEGIN, protocol-length, record-count,
+//     (TAG, record-length, direct-base, byte-offset, byte-size, alignment,
+//      pointer-size, bit-count, word-bits, word-count, bitmap-word*)*,
+//   END, protocol-length
+//
+// Protocol length counts BEGIN through END and excludes its trailing duplicate;
+// record length counts TAG through the final bitmap word. The first contract
+// has no version, requires a whole alloca at byte offset zero, and uses 64-bit
+// bitmap words. Bit N, stored low-bit first, describes the pointer-sized slot at
+// direct-base + byte-offset + N * pointer-size. Padding bits must be zero.
+// These tags are intentionally small enough to remain inline StackMaps
+// constants; bitmap payload words may use the StackMaps constant pool.
+inline constexpr int64_t AllocaPtrMapBeginMagic = 0x47414c41; // "GALA"
+inline constexpr int64_t AllocaPtrMapEndMagic = 0x414c4c43;   // "ALLC"
+inline constexpr int64_t AllocaPtrMapRecordTag = 0x5054524d;  // "PTRM"
+inline constexpr uint32_t AllocaPtrMapBitmapWordBits = 64;
+
 inline constexpr char Magic[] = {'\0', 'g', 'o', '1', '2', '0', 'l', 'd'};
 inline constexpr uint32_t MagicSize = sizeof(Magic);
 inline constexpr uint32_t FingerprintSize = 8;

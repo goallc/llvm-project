@@ -362,6 +362,120 @@ struct GoObjStackMapPair {
   }
 };
 
+struct GoObjAllocaPtrMapRecord {
+  MCContext::GoObjStackMapLocation Base;
+  uint64_t ByteOffset;
+  uint64_t ByteSize;
+  uint64_t Alignment;
+  uint64_t PointerSize;
+  uint64_t BitCount;
+  SmallVector<uint64_t, 4> BitmapWords;
+};
+
+int64_t getAllocaPtrMapConstant(
+    const MCContext::GoObjStackMapLocation &Location, StringRef Description) {
+  if (Location.Type != MCContext::GoObjStackMapLocation::Constant)
+    report_fatal_error("GoObj alloca ptrmap " + Description +
+                       " is not a constant");
+  return Location.Offset;
+}
+
+uint64_t getNonnegativeAllocaPtrMapConstant(
+    const MCContext::GoObjStackMapLocation &Location, StringRef Description) {
+  int64_t Value = getAllocaPtrMapConstant(Location, Description);
+  if (Value < 0)
+    report_fatal_error("GoObj alloca ptrmap " + Description +
+                       " is negative");
+  return static_cast<uint64_t>(Value);
+}
+
+SmallVector<GoObjAllocaPtrMapRecord, 4>
+parseAllocaPtrMapRecords(const MCContext::GoObjStackMapEntry &Entry) {
+  if (Entry.NumDeoptLocations > Entry.Locations.size())
+    report_fatal_error("GoObj statepoint deopt location count is invalid");
+  ArrayRef<MCContext::GoObjStackMapLocation> Deopts =
+      ArrayRef(Entry.Locations).take_front(Entry.NumDeoptLocations);
+
+  auto IsConstant = [](const auto &Location, int64_t Value) {
+    return Location.Type == MCContext::GoObjStackMapLocation::Constant &&
+           Location.Offset == Value;
+  };
+  bool HasProtocolMarker = llvm::any_of(Deopts, [&](const auto &Location) {
+    return IsConstant(Location, GoObj::AllocaPtrMapBeginMagic) ||
+           IsConstant(Location, GoObj::AllocaPtrMapEndMagic);
+  });
+  if (!HasProtocolMarker)
+    return {};
+  if (Deopts.size() < 6 ||
+      !IsConstant(Deopts[Deopts.size() - 2],
+                  GoObj::AllocaPtrMapEndMagic))
+    report_fatal_error("GoObj alloca ptrmap protocol is truncated");
+
+  uint64_t ProtocolLength = getNonnegativeAllocaPtrMapConstant(
+      Deopts.back(), "trailing protocol length");
+  if (ProtocolLength < 4 || ProtocolLength >= Deopts.size())
+    report_fatal_error("GoObj alloca ptrmap protocol length is invalid");
+  size_t ProtocolStart = Deopts.size() - ProtocolLength - 1;
+  if (!IsConstant(Deopts[ProtocolStart], GoObj::AllocaPtrMapBeginMagic) ||
+      getNonnegativeAllocaPtrMapConstant(Deopts[ProtocolStart + 1],
+                                        "leading protocol length") !=
+          ProtocolLength ||
+      !IsConstant(Deopts[ProtocolStart + ProtocolLength - 1],
+                  GoObj::AllocaPtrMapEndMagic))
+    report_fatal_error("GoObj alloca ptrmap protocol envelope is malformed");
+
+  uint64_t RecordCount = getNonnegativeAllocaPtrMapConstant(
+      Deopts[ProtocolStart + 2], "record count");
+  size_t Cursor = ProtocolStart + 3;
+  size_t RecordsEnd = ProtocolStart + ProtocolLength - 1;
+  if (RecordCount > (RecordsEnd - Cursor) / 10)
+    report_fatal_error("GoObj alloca ptrmap record count is invalid");
+  SmallVector<GoObjAllocaPtrMapRecord, 4> Records;
+  Records.reserve(static_cast<size_t>(RecordCount));
+  for (uint64_t RecordIndex = 0; RecordIndex != RecordCount; ++RecordIndex) {
+    if (Cursor > RecordsEnd || RecordsEnd - Cursor < 10 ||
+        !IsConstant(Deopts[Cursor], GoObj::AllocaPtrMapRecordTag))
+      report_fatal_error("GoObj alloca ptrmap record header is malformed");
+    uint64_t RecordLength = getNonnegativeAllocaPtrMapConstant(
+        Deopts[Cursor + 1], "record length");
+    uint64_t WordCount = getNonnegativeAllocaPtrMapConstant(
+        Deopts[Cursor + 9], "bitmap word count");
+    if (WordCount > RecordsEnd - Cursor - 10 ||
+        RecordLength != 10 + WordCount ||
+        RecordLength > RecordsEnd - Cursor)
+      report_fatal_error("GoObj alloca ptrmap record length is invalid");
+
+    const auto &Base = Deopts[Cursor + 2];
+    if (Base.Type != MCContext::GoObjStackMapLocation::Direct)
+      report_fatal_error(
+          "GoObj alloca ptrmap base is not a direct frame location");
+    uint64_t WordBits = getNonnegativeAllocaPtrMapConstant(
+        Deopts[Cursor + 8], "bitmap word width");
+    if (WordBits != GoObj::AllocaPtrMapBitmapWordBits)
+      report_fatal_error("GoObj alloca ptrmap bitmap word width is invalid");
+
+    GoObjAllocaPtrMapRecord Record{
+        Base,
+        getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 3], "byte offset"),
+        getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 4], "byte size"),
+        getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 5], "alignment"),
+        getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 6], "pointer size"),
+        getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 7], "bit count"),
+        {}};
+    Record.BitmapWords.reserve(WordCount);
+    for (uint64_t Word = 0; Word != WordCount; ++Word)
+      Record.BitmapWords.push_back(static_cast<uint64_t>(
+          getAllocaPtrMapConstant(Deopts[Cursor + 10 + Word],
+                                  "bitmap word")));
+    Records.push_back(std::move(Record));
+    Cursor += RecordLength;
+  }
+  if (Cursor != RecordsEnd)
+    report_fatal_error(
+        "GoObj alloca ptrmap record count does not cover protocol payload");
+  return Records;
+}
+
 GoObjStatepointStackMaps makeStatepointStackMaps(
     const MCAssembler &Asm, const GoObjSymbol &Function, uint32_t StackSize,
     uint32_t ArgSize, uint32_t PCQuantum,
@@ -428,7 +542,78 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
     bool IsStackGrowth = Entry.ID == GoObj::StackGrowthStatepointID;
     GoObjStackMapPair Pair{SmallVector<uint8_t, 8>(ArgsBytesPerBitmap, 0),
                            SmallVector<uint8_t, 8>(LocalsBytesPerBitmap, 0)};
-    for (const MCContext::GoObjStackMapLocation &Loc : Entry.Locations) {
+    SmallVector<std::pair<int64_t, int64_t>, 4> AllocaRanges;
+    DenseSet<uint32_t> AllocaPointerBits;
+    for (const GoObjAllocaPtrMapRecord &Record :
+         parseAllocaPtrMapRecords(Entry)) {
+      if (IsStackGrowth)
+        report_fatal_error(
+            "GoObj stack-growth statepoint contains an alloca ptrmap");
+      if (Record.Base.Size != PointerSize ||
+          Record.Base.DwarfRegNum != StackPointerDwarfRegNum)
+        report_fatal_error(
+            "GoObj alloca ptrmap base is not a pointer-sized SP location");
+      if (Record.ByteOffset != 0)
+        report_fatal_error(
+            "GoObj alloca ptrmap first version requires zero byte offset");
+      if (!Record.ByteSize || Record.ByteSize % PointerSize != 0 ||
+          Record.PointerSize != PointerSize ||
+          Record.BitCount != Record.ByteSize / PointerSize ||
+          Record.BitmapWords.size() != divideCeil(Record.BitCount, 64u))
+        report_fatal_error("GoObj alloca ptrmap layout is inconsistent");
+      if (Record.Alignment < PointerSize ||
+          !isPowerOf2_64(Record.Alignment) || Record.Base.Offset < 0 ||
+          static_cast<uint64_t>(Record.Base.Offset) % Record.Alignment != 0)
+        report_fatal_error("GoObj alloca ptrmap alignment is invalid");
+      if (Record.ByteSize >
+          static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) -
+              static_cast<uint64_t>(Record.Base.Offset))
+        report_fatal_error("GoObj alloca ptrmap frame range overflows");
+      int64_t RangeStart = Record.Base.Offset;
+      int64_t RangeEnd = RangeStart + static_cast<int64_t>(Record.ByteSize);
+      for (const auto &[ExistingStart, ExistingEnd] : AllocaRanges) {
+        if (RangeStart == ExistingStart && RangeEnd == ExistingEnd)
+          report_fatal_error(
+              "GoObj alloca ptrmap contains a duplicate frame record");
+        if (RangeStart < ExistingEnd && ExistingStart < RangeEnd)
+          report_fatal_error(
+              "GoObj alloca ptrmap records overlap in one callsite");
+      }
+      AllocaRanges.push_back({RangeStart, RangeEnd});
+
+      uint64_t PaddingBits = Record.BitmapWords.size() * 64 - Record.BitCount;
+      if (PaddingBits &&
+          (Record.BitmapWords.back() >> (64 - PaddingBits)) != 0)
+        report_fatal_error(
+            "GoObj alloca ptrmap bitmap padding bits are nonzero");
+      bool HasPointer = false;
+      for (uint64_t Bit = 0; Bit != Record.BitCount; ++Bit) {
+        int64_t SlotOffset =
+            RangeStart + static_cast<int64_t>(Bit * PointerSize);
+        goobj::StackMapSlot Slot = goobj::classifyOrdinaryStackMapSlot(
+            SlotOffset, /*IsIndirect=*/true, PointerSize,
+            FrameLayout.GCLocalsStart, FrameLayout.GCLocalsSize,
+            FrameLayout.GCLocalsBitOffset, OrdinaryArgsStart, ArgSize);
+        if (Slot.Kind != goobj::StackMapSlotKind::Locals)
+          report_fatal_error(
+              "GoObj alloca ptrmap range is not entirely in locals");
+        if ((Record.BitmapWords[Bit / 64] & (uint64_t(1) << (Bit % 64))) ==
+            0)
+          continue;
+        HasPointer = true;
+        if (!AllocaPointerBits.insert(Slot.Bit).second)
+          report_fatal_error(
+              "GoObj alloca ptrmap contains a duplicate pointer slot");
+        Pair.Locals[Slot.Bit / 8] |= uint8_t(1u << (Slot.Bit % 8));
+      }
+      if (!HasPointer)
+        report_fatal_error("GoObj alloca ptrmap contains no pointer slots");
+    }
+
+    if (Entry.NumDeoptLocations > Entry.Locations.size())
+      report_fatal_error("GoObj statepoint deopt location count is invalid");
+    for (const MCContext::GoObjStackMapLocation &Loc :
+         ArrayRef(Entry.Locations).drop_front(Entry.NumDeoptLocations)) {
       switch (Loc.Type) {
       case MCContext::GoObjStackMapLocation::Direct:
       case MCContext::GoObjStackMapLocation::Indirect:
@@ -482,6 +667,9 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
         Pair.Args[Slot.Bit / 8] |= uint8_t(1u << (Slot.Bit % 8));
         break;
       case goobj::StackMapSlotKind::Locals:
+        if (AllocaPointerBits.contains(Slot.Bit))
+          report_fatal_error(
+              "GoObj alloca ptrmap overlaps an ordinary GC root slot");
         Pair.Locals[Slot.Bit / 8] |= uint8_t(1u << (Slot.Bit % 8));
         break;
       }
