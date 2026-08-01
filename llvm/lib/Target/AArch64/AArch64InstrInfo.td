@@ -3787,19 +3787,19 @@ def : Pat<(AArch64call texternalsym:$func), (BL texternalsym:$func)>;
 // intrinsic as an ordinary call/statepoint.
 let isCall = 1, isCodeGenOnly = 1, hasSideEffects = 1,
     mayLoad = 1, mayStore = 1, Uses = [SP],
-    Defs = [X16, X17, X25, X27, LR, NZCV,
+    // Keep the fixed result first so InstrEmitter associates the intrinsic's
+    // value with X25 rather than with one of the private call's clobbers.
+    Defs = [X25, X16, X17, X27, LR, NZCV,
             Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7,
             Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15,
             Q16, Q17, Q18, Q19, Q20, Q21, Q22, Q23,
             Q24, Q25, Q26, Q27, Q28, Q29, Q30, Q31] in
 def GO_GC_WRITE_BARRIER
-    : Pseudo<(outs GPR64:$dst), (ins i32imm:$entries),
-             [(set GPR64:$dst,
+    : Pseudo<(outs), (ins i32imm:$entries),
+             [(set X25,
                    (int_go_gc_write_barrier (i32 timm:$entries)))]>,
       Sched<[WriteBr]> {
-  // One BL plus, when register allocation does not coalesce dst with X25, one
-  // physical-register copy.
-  let Size = 8;
+  let Size = 4;
 }
 
 //===----------------------------------------------------------------------===//

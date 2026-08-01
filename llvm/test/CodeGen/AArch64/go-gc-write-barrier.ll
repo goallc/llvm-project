@@ -2,6 +2,7 @@
 ; RUN: opt -S -passes=rewrite-statepoints-for-gc %s | FileCheck %s --check-prefix=STATEPOINT
 ; RUN: llc -mtriple=arm64-apple-macosx -verify-machineinstrs -stop-before=aarch64-expand-pseudo -o - %s | FileCheck %s --check-prefix=PSEUDO
 ; RUN: llc -mtriple=arm64-apple-macosx -verify-machineinstrs -o - %s | FileCheck %s --check-prefix=ASM
+; RUN: llc -O0 -mtriple=arm64-apple-macosx -verify-machineinstrs -o - %s | FileCheck %s --check-prefix=ASM
 ; RUN: llc -mtriple=aarch64-apple-darwin-goobj -goobj-package-path=main \
 ; RUN:   -verify-machineinstrs -filetype=obj -o %t.o %s
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | \
@@ -18,25 +19,39 @@ define goabiinternal ptr @acquire_one() gc "statepoint-example" {
 ; STATEPOINT-NOT: gc.statepoint
 ;
 ; PSEUDO-LABEL: name: acquire_one
-; PSEUDO: renamable $x0 = GO_GC_WRITE_BARRIER 1
-; PSEUDO-SAME: implicit-def {{(dead )?}}$x25
+; PSEUDO: GO_GC_WRITE_BARRIER 1
+; PSEUDO-SAME: implicit-def $x25
 ; PSEUDO-SAME: implicit-def {{(dead )?}}$x27
 ; PSEUDO-SAME: implicit $sp
 ;
 ; ASM-LABEL: _acquire_one:
 ; ASM: bl _runtime.gcWriteBarrier1
+; ASM-NEXT: mov x0, x25
   %buf = call ptr @llvm.go.gc.write.barrier(i32 1)
   ret ptr %buf
 }
 
 define goabiinternal ptr @acquire_eight() gc "statepoint-example" {
 ; PSEUDO-LABEL: name: acquire_eight
-; PSEUDO: renamable $x0 = GO_GC_WRITE_BARRIER 8
+; PSEUDO: GO_GC_WRITE_BARRIER 8
 ;
 ; ASM-LABEL: _acquire_eight:
 ; ASM: bl _runtime.gcWriteBarrier8
+; ASM-NEXT: mov x0, x25
   %buf = call ptr @llvm.go.gc.write.barrier(i32 8)
   ret ptr %buf
+}
+
+define goabiinternal void @store_one(ptr %value) gc "statepoint-example" {
+; PSEUDO-LABEL: name: store_one
+; PSEUDO: GO_GC_WRITE_BARRIER 1
+;
+; ASM-LABEL: _store_one:
+; ASM: bl _runtime.gcWriteBarrier1
+; ASM-NEXT: str x0, [x25]
+  %buf = call ptr @llvm.go.gc.write.barrier(i32 1)
+  store ptr %value, ptr %buf
+  ret void
 }
 
 ; OBJ: nonpkgref {{[0-9]+}}: runtime.gcWriteBarrier1 abi=1 type=0 size=0

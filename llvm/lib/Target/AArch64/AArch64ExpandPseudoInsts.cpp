@@ -1335,8 +1335,7 @@ bool AArch64ExpandPseudoImpl::expandMI(MachineBasicBlock &MBB,
         "runtime.gcWriteBarrier5", "runtime.gcWriteBarrier6",
         "runtime.gcWriteBarrier7", "runtime.gcWriteBarrier8",
     };
-    Register DstReg = MI.getOperand(0).getReg();
-    int64_t Entries = MI.getOperand(1).getImm();
+    int64_t Entries = MI.getOperand(0).getImm();
     if (Entries < 1 || Entries > 8)
       report_fatal_error("Go write barrier entry count must be in [1, 8]");
 
@@ -1353,24 +1352,6 @@ bool AArch64ExpandPseudoImpl::expandMI(MachineBasicBlock &MBB,
       Call.addExternalSymbol(WriteBarrierName);
     }
     transferImpOps(MI, Call, Call);
-
-    // X25 carries the private-ABI result.  On the pseudo it is both an
-    // implicit fixed-register def and the source of the explicit virtual
-    // result, so register allocation can mark the implicit def dead.  The
-    // physical copy below is introduced after register allocation; make the
-    // transferred BL def live whenever the explicit pseudo result is live.
-    for (MachineOperand &MO : Call->operands()) {
-      if (MO.isReg() && MO.isDef() && MO.getReg() == AArch64::X25)
-        MO.setIsDead(MI.getOperand(0).isDead());
-    }
-    if (DstReg != AArch64::X25)
-      // This pass does not revisit instructions inserted before the current
-      // pseudo.  Emit the encodable form directly instead of copyPhysReg's
-      // ORRXrr pseudo.
-      BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(AArch64::ORRXrs), DstReg)
-          .addReg(AArch64::XZR)
-          .addReg(AArch64::X25)
-          .addImm(0);
     MI.eraseFromParent();
     return true;
   }
