@@ -1,0 +1,185 @@
+# REQUIRES: aarch64-registered-target
+# RUN: llc -mtriple=aarch64-apple-darwin-goobj -start-after=block-placement \
+# RUN:   -verify-machineinstrs -goobj-package-path=main -filetype=obj %s -o %t.o
+# RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | FileCheck %s
+
+# The fixed physical order places bb.3, whose entry SP delta is 32, after
+# bb.6's epilogue and return. bb.1 then restores the frameless morestack path.
+# CHECK: aux 0.3: type=pcsp target= pc=[0-4:0,4-18:32,18-19:0,19-23:32,23-30:0]
+# CHECK: reloc 0.2: off=76 size=4 type=9 add=0 target=runtime.GC
+
+--- |
+  ; ModuleID = 'llvm/test/CodeGen/AArch64/goobj-pcsp-cfg.ll'
+  source_filename = "llvm/test/CodeGen/AArch64/goobj-pcsp-cfg.ll"
+  target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32"
+  target triple = "aarch64-apple-darwin-goobj"
+
+  declare goabiinternal void @runtime.GC()
+
+  declare goabiinternal void @runtime.panicmem()
+
+  define goabiinternal void @pcsp_cfg(ptr %p, i1 %cond) #0 {
+  entry:
+    call goabiinternal void @runtime.GC()
+    br i1 %cond, label %then, label %join, !prof !0
+
+  then:                                             ; preds = %entry
+    call goabiinternal void @runtime.GC()
+    br label %join
+
+  join:                                             ; preds = %then, %entry
+    %isnil = icmp eq ptr %p, null
+    br i1 %isnil, label %nil, label %cont
+
+  nil:                                              ; preds = %join
+    call goabiinternal void @runtime.panicmem()
+    br label %cont
+
+  cont:                                             ; preds = %nil, %join
+    %0 = load volatile i8, ptr %p, align 1
+    ret void
+  }
+
+  attributes #0 = { "frame-pointer"="non-leaf" }
+
+  !0 = !{!"branch_weights", i32 1, i32 1000}
+...
+---
+name:            pcsp_cfg
+alignment:       4
+exposesReturnsTwice: false
+legalized:       false
+regBankSelected: false
+selected:        false
+failedISel:      false
+tracksRegLiveness: true
+hasWinCFI:       false
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+callsEHReturn:   false
+callsUnwindInit: false
+hasEHContTarget: false
+hasEHScopes:     false
+hasEHFunclets:   false
+isOutlined:      false
+debugInstrRef:   false
+failsVerification: false
+tracksDebugUserValues: true
+registers:       []
+liveins:
+  - { reg: '$x0', virtual-reg: '' }
+  - { reg: '$w1', virtual-reg: '' }
+frameInfo:
+  isFrameAddressTaken: false
+  isReturnAddressTaken: false
+  hasStackMap:     false
+  hasPatchPoint:   false
+  stackSize:       32
+  offsetAdjustment: 0
+  maxAlignment:    8
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: non-leaf
+  stackProtector:  ''
+  functionContext: ''
+  maxCallFrameSize: 8
+  cvBytesOfCalleeSavedRegisters: 0
+  hasOpaqueSPAdjustment: false
+  hasVAStart:      false
+  hasMustTailInVarArgFunc: false
+  hasTailCall:     false
+  isCalleeSavedInfoValid: true
+  localFrameSize:  0
+fixedStack:
+  - { id: 0, type: default, offset: -8, size: 8, alignment: 8, stack-id: default,
+      isImmutable: true, isAliased: false, callee-saved-register: '', callee-saved-restored: true,
+      debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
+  - { id: 1, type: spill-slot, offset: 16, size: 4, alignment: 16, stack-id: default,
+      callee-saved-register: '', callee-saved-restored: true, debug-info-variable: '',
+      debug-info-expression: '', debug-info-location: '' }
+  - { id: 2, type: spill-slot, offset: 8, size: 8, alignment: 8, stack-id: default,
+      callee-saved-register: '', callee-saved-restored: true, debug-info-variable: '',
+      debug-info-expression: '', debug-info-location: '' }
+stack:
+  - { id: 0, name: '', type: spill-slot, offset: -16, size: 8, alignment: 8,
+      stack-id: default, callee-saved-register: '', callee-saved-restored: true,
+      debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
+  - { id: 1, name: '', type: spill-slot, offset: -20, size: 4, alignment: 4,
+      stack-id: default, callee-saved-register: '', callee-saved-restored: true,
+      debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
+entry_values:    []
+callSites:       []
+debugValueSubstitutions: []
+constants:       []
+machineFunctionInfo:
+  hasRedZone:      false
+  stackSizeZPR:    0
+  stackSizePPR:    0
+  hasStackFrame:   true
+body:             |
+  bb.0:
+    successors: %bb.1(0x00000000), %bb.2(0x80000000)
+    liveins: $w1, $x0, $fp, $lr, $x28, $lr, $x0, $w1
+
+    $x17 = LDRXui $x28, 2
+    $xzr = SUBSXrx64 $sp, killed $x17, 24, implicit-def $nzcv
+    Bcc 9, %bb.1, implicit $nzcv
+
+  bb.2.entry:
+    successors: %bb.3(0x0020bc3a), %bb.4(0x7fdf43c6)
+    liveins: $w1, $x0, $fp, $lr
+
+    early-clobber $sp = frame-setup STRXpre $lr, $sp, -32
+    frame-setup STURXi $fp, $sp, -8
+    $fp = frame-setup SUBXri $sp, 8, 0
+    frame-setup CFI_INSTRUCTION def_cfa $w29, 40
+    frame-setup CFI_INSTRUCTION offset $w30, -32
+    frame-setup CFI_INSTRUCTION offset $w29, -40
+    STRWui killed $w1, $sp, 3 :: (store (s32) into %stack.1)
+    STRXui killed $x0, $sp, 2 :: (store (s64) into %stack.0)
+    BL @runtime.GC, csr_aarch64_go, implicit-def dead $lr, implicit $sp, implicit-def $sp
+    renamable $w8 = LDRWui $sp, 3 :: (load (s32) from %stack.1)
+    TBNZW killed renamable $w8, 0, %bb.3
+
+  bb.4.join:
+    successors: %bb.5(0x30000000), %bb.6(0x50000000)
+
+    renamable $x8 = LDRXui $sp, 2 :: (load (s64) from %stack.0)
+    CBNZX renamable $x8, %bb.6
+
+  bb.5.nil:
+    successors: %bb.6(0x80000000)
+
+    BL @runtime.panicmem, csr_aarch64_go, implicit-def dead $lr, implicit $sp, implicit-def $sp
+    renamable $x8 = LDRXui $sp, 2 :: (load (s64) from %stack.0)
+
+  bb.6.cont:
+    liveins: $x8
+
+    dead $wzr = LDRBBui killed renamable $x8, 0 :: (volatile load (s8) from %ir.p)
+    $fp = frame-destroy LDURXi $sp, -8
+    early-clobber $sp, $lr = frame-destroy LDRXpost $sp, 32
+    RET undef $lr
+
+  bb.3.then:
+    successors: %bb.5(0x30000000), %bb.6(0x50000000)
+
+    BL @runtime.GC, csr_aarch64_go, implicit-def dead $lr, implicit $sp, implicit-def $sp
+    renamable $x8 = LDRXui $sp, 2 :: (load (s64) from %stack.0)
+    CBNZX renamable $x8, %bb.6
+    B %bb.5
+
+  bb.1:
+    successors: %bb.2(0x80000000)
+    liveins: $w1, $x0, $fp, $lr, $x28, $lr, $x0, $w1
+
+    $x3 = ORRXrs $xzr, $lr, 0
+    STRXui killed $x0, $sp, 1
+    STRWui killed $w1, $sp, 4
+    BL &runtime.morestack_noctxt, implicit-def $lr, implicit $sp, implicit killed $x3
+    $x0 = LDRXui $sp, 1
+    $w1 = LDRWui $sp, 4
+    B %bb.2
+...
