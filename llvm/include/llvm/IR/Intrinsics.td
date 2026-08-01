@@ -1921,6 +1921,21 @@ def int_experimental_patchpoint : Intrinsic<[llvm_any_ty],
 //===------------------------ Garbage Collection Intrinsics ---------------===//
 // These are documented in docs/Statepoint.rst
 
+// Acquire Entries pointer-sized slots from the current P's Go write-barrier
+// buffer.  This is deliberately an intrinsic rather than an ordinary call:
+// the runtime entry point uses a private ABI and returns the buffer pointer in
+// a target-specific fixed register.
+//
+// Do not narrow this to inaccessible memory.  In addition to updating runtime
+// state, the operation orders the caller's stores to the returned buffer with
+// the surrounding write-barrier sequence.  Likewise, do not give it the
+// default nosync/nofree/willreturn attributes; the slow path may flush the
+// buffer through the runtime.  The entry count is the number of pointer-sized
+// slots and currently follows Go's 1..8 batching limit.
+def int_go_gc_write_barrier : Intrinsic<
+    [llvm_ptr_ty], [llvm_i32_ty],
+    [IntrNoCallback, ImmArg<ArgIndex<0>>, Range<ArgIndex<0>, 1, 9>]>;
+
 def int_experimental_gc_statepoint : Intrinsic<[llvm_token_ty],
                                [llvm_i64_ty, llvm_i32_ty,
                                 llvm_anyptr_ty, llvm_i32_ty,
