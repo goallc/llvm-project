@@ -119,7 +119,7 @@ public:
     LocationType Type;
     uint16_t Size;
     uint16_t DwarfRegNum;
-    int32_t Offset;
+    int64_t Offset;
   };
 
   struct GoObjStackMapEntry {
@@ -128,6 +128,7 @@ public:
     bool IsIndirectCall;
     uint64_t StackSize;
     uint32_t PointerSize;
+    uint32_t NumDeoptLocations;
     std::vector<GoObjStackMapLocation> Locations;
   };
 
