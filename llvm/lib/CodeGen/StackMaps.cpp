@@ -44,6 +44,16 @@ static cl::opt<int> StackMapVersion(
 
 const char *StackMaps::WSMP = "Stack Maps: ";
 
+std::optional<int64_t>
+StackMaps::getConstantValue(const StackMaps::Location &Loc) const {
+  if (Loc.Type == Location::Constant)
+    return Loc.Offset;
+  if (Loc.Type != Location::ConstantIndex || Loc.Offset < 0 ||
+      static_cast<size_t>(Loc.Offset) >= ConstPool.size())
+    return std::nullopt;
+  return std::next(ConstPool.begin(), Loc.Offset)->second;
+}
+
 static uint64_t getConstMetaVal(const MachineInstr &MI, unsigned Idx) {
   assert(MI.getOperand(Idx).isImm() &&
          MI.getOperand(Idx).getImm() == StackMaps::ConstantOp);
