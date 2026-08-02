@@ -64,6 +64,48 @@ entry:
   ret ptr addrspace(1) %relocated
 }
 
+define goabiinternal ptr addrspace(1) @relocated_stack_arg(
+    ptr addrspace(1) %p0,
+    i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5,
+    i64 %a6, i64 %a7, i64 %a8, i64 %a9, i64 %a10,
+    i64 %a11, i64 %a12, i64 %a13, i64 %a14, i64 %a15,
+    ptr addrspace(1) %p16, i1 %condition) gc "statepoint-example" {
+entry:
+  %token1 = call goabiinternal token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 4, i32 0, ptr elementtype(void ()) @safepoint,
+          i32 0, i32 0, i32 0, i32 0)
+      [ "gc-live"(ptr addrspace(1) %p16) ]
+  %relocated1 = call ptr addrspace(1) @llvm.experimental.gc.relocate.p1(
+      token %token1, i32 0, i32 0)
+  br i1 %condition, label %safepoint, label %skip
+
+safepoint:
+  %token2 = call goabiinternal token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 5, i32 0, ptr elementtype(void ()) @safepoint,
+          i32 0, i32 0, i32 0, i32 0)
+      [ "gc-live"(ptr addrspace(1) %relocated1) ]
+  %relocated2 = call ptr addrspace(1) @llvm.experimental.gc.relocate.p1(
+      token %token2, i32 0, i32 0)
+  br label %merge
+
+skip:
+  br label %merge
+
+merge:
+  %merged = phi ptr addrspace(1) [ %relocated2, %safepoint ],
+                                 [ %relocated1, %skip ]
+  %token3 = call goabiinternal token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 6, i32 0, ptr elementtype(void ()) @safepoint,
+          i32 0, i32 0, i32 0, i32 0)
+      [ "gc-live"(ptr addrspace(1) %merged) ]
+  %relocated3 = call ptr addrspace(1) @llvm.experimental.gc.relocate.p1(
+      token %token3, i32 0, i32 0)
+  ret ptr addrspace(1) %relocated3
+}
+
 declare token @llvm.experimental.gc.statepoint.p0(
     i64 immarg, i32 immarg, ptr, i32 immarg, i32 immarg, ...)
 declare ptr addrspace(1) @llvm.experimental.gc.relocate.p1(
@@ -96,3 +138,12 @@ declare ptr addrspace(1) @llvm.experimental.gc.relocate.p1(
 ; CHECK: STATEPOINT 3,
 ; CHECK-SAME: 2, 1, 1, 8, %stack.0, 0,
 ; CHECK-SAME: (volatile load store (s64) on %stack.0)
+
+; CHECK-LABEL: name: relocated_stack_arg
+; CHECK: stack:           []
+; CHECK: STATEPOINT 4,
+; CHECK-SAME: 2, 1, 1, 8, %fixed-stack.[[HOME:[0-9]+]], 0,
+; CHECK: STATEPOINT 5,
+; CHECK-SAME: 2, 1, 1, 8, %fixed-stack.[[HOME]], 0,
+; CHECK: STATEPOINT 6,
+; CHECK-SAME: 2, 1, 1, 8, %fixed-stack.[[HOME]], 0,
