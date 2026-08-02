@@ -1020,9 +1020,18 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
           mdconst::dyn_extract<ConstantInt>(Entry->getOperand(2));
       const auto *Addend =
           mdconst::dyn_extract<ConstantInt>(Entry->getOperand(3));
-      if (!isa<Function>(Source) || !Type ||
-          Type->getValue().ugt(UINT16_MAX) || !Addend)
+      if (!isa<GlobalObject>(Source) || Source->isDeclarationForLinker() ||
+          !Type || Type->getValue().ugt(UINT16_MAX) || !Addend)
         report_fatal_error("invalid !goobj.marker_relocs entry");
+      switch (Type->getZExtValue()) {
+      case GoObj::R_USEIFACE:
+      case GoObj::R_USEIFACEMETHOD:
+      case GoObj::R_USENAMEDMETHOD:
+      case GoObj::R_INITORDER:
+        break;
+      default:
+        report_fatal_error("unsupported !goobj.marker_relocs type");
+      }
       Relocs[Source].push_back(
           {AP.getSymbol(Target), static_cast<uint16_t>(Type->getZExtValue()),
            Addend->getSExtValue()});
