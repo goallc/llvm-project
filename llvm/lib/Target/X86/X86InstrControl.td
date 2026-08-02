@@ -443,6 +443,28 @@ let isPseudo = 1, isCall = 1, isCodeGenOnly = 1,
             Requires<[In64BitMode,NotUseIndirectThunkCalls,ImportCallOptimizationEnabled]>;
 }
 
+// Go's write-barrier buffer entry points use a private ABI: the selected
+// runtime.gcWriteBarrierN wrapper returns the buffer pointer in R11, preserves
+// the allocatable general-purpose registers, and may clobber condition flags
+// and the allocatable floating-point/vector registers. XMM15 is Go's reserved
+// zero register and is preserved by the private ABI.
+// Keep this as a call-like pseudo through register allocation so that the
+// fixed-register and clobber constraints are visible without treating the IR
+// intrinsic as an ordinary call/statepoint.
+let isCall = 1, isCodeGenOnly = 1, hasSideEffects = 1,
+    mayLoad = 1, mayStore = 1, Uses = [RSP, SSP],
+    // Keep the fixed result first so InstrEmitter associates the intrinsic's
+    // value with R11 rather than with one of the private call's clobbers.
+    Defs = [R11, EFLAGS,
+            XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
+            XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14],
+    SchedRW = [WriteJump] in
+def GO_GC_WRITE_BARRIER
+    : PseudoI<(outs), (ins i32imm:$entries),
+              [(set R11,
+                    (int_go_gc_write_barrier (i32 timm:$entries)))]>,
+      Requires<[In64BitMode]>;
+
 // Conditional tail calls are similar to the above, but they are branches
 // rather than barriers, and they use EFLAGS.
 let isCall = 1, isTerminator = 1, isReturn = 1, isBranch = 1,

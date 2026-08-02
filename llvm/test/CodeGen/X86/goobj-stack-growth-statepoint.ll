@@ -13,7 +13,7 @@
 
 define goabiinternal i64 @morestack_statepoint(i64 %value) "go-stack-growth-statepoint" {
 entry:
-  %buf = alloca [5000 x i8], align 16
+  %buf = alloca [5000 x i8], align 8
   %slot = getelementptr inbounds [5000 x i8], ptr %buf, i64 0, i64 4999
   store volatile i8 1, ptr %slot, align 1
   ret i64 %value
@@ -22,7 +22,7 @@ entry:
 define goabiinternal %many.results @initialized_pointer_result(ptr %pointer)
     "go-stack-growth-statepoint" "go_results_tuple" {
 entry:
-  %buf = alloca [5000 x i8], align 16
+  %buf = alloca [5000 x i8], align 8
   %slot = getelementptr inbounds [5000 x i8], ptr %buf, i64 0, i64 4999
   store volatile i8 1, ptr %slot, align 1
   ret %many.results zeroinitializer
@@ -32,7 +32,7 @@ define goabiinternal %partial.results @partial_aggregate_result(
     ptr %first, ptr %second)
     "go-stack-growth-statepoint" "go_results_tuple" {
 entry:
-  %buf = alloca [5000 x i8], align 16
+  %buf = alloca [5000 x i8], align 8
   %slot = getelementptr inbounds [5000 x i8], ptr %buf, i64 0, i64 4999
   store volatile i8 1, ptr %slot, align 1
   ret %partial.results zeroinitializer
@@ -44,7 +44,7 @@ define goabiinternal ptr @scalar_stack_argument(
     i64 %a11, i64 %a12, i64 %a13, i64 %a14, i64 %a15,
     ptr %pointer) "go-stack-growth-statepoint" {
 entry:
-  %buf = alloca [5000 x i8], align 16
+  %buf = alloca [5000 x i8], align 8
   %slot = getelementptr inbounds [5000 x i8], ptr %buf, i64 0, i64 4999
   store volatile i8 1, ptr %slot, align 1
   ret ptr %pointer
@@ -56,7 +56,7 @@ define goabiinternal { ptr, ptr } @aggregate_stack_argument(
     i64 %a11, i64 %a12, i64 %a13, %pointer.aggregate %value)
     "go-stack-growth-statepoint" "go_results_tuple" {
 entry:
-  %buf = alloca [5000 x i8], align 16
+  %buf = alloca [5000 x i8], align 8
   %slot = getelementptr inbounds [5000 x i8], ptr %buf, i64 0, i64 4999
   store volatile i8 1, ptr %slot, align 1
   %first = extractvalue %pointer.aggregate %value, 0
