@@ -235,6 +235,9 @@ enum RelocType : uint16_t {
   R_ARM64_LDST64 = 44,
   R_ARM64_LDST128 = 45,
 
+  // A zero-width ordering edge between package initialization records.
+  R_INITORDER = 102,
+
   R_WEAK = 1u << 15,
   R_WEAKADDR = R_WEAK | R_ADDR,
   R_WEAKADDROFF = R_WEAK | R_ADDROFF,
