@@ -1069,8 +1069,6 @@ uint64_t GoObjObjectWriter::writeObject() {
 
   for (const MCSection &Section : *Asm) {
     uint64_t SectionSize = Asm->getSectionAddressSize(Section);
-    if (SectionSize == 0)
-      continue;
     const size_t FirstSectionSymbol = Symbols.size();
 
     SmallString<0> Contents;
@@ -1098,11 +1096,19 @@ uint64_t GoObjObjectWriter::writeObject() {
                        return LHS.Offset < RHS.Offset;
                      });
 
+    bool HasReferencedPrivateSymbol =
+        llvm::any_of(PrivateRelocationTargets, [&](const MCSymbol *MCSym) {
+          return &MCSym->getSection() == &Section;
+        });
+    if (SectionSize == 0 && SectionSymbols.empty() &&
+        !HasReferencedPrivateSymbol)
+      continue;
+
     auto AddSectionSymbol = [&](const MCSymbol *MCSym, StringRef Name,
                                 uint64_t Begin, uint64_t End) {
       uint64_t Size = End - Begin;
       ArrayRef<char> Data;
-      if (!Section.isBssSection()) {
+      if (!Section.isBssSection() && Size != 0) {
         if (End > Contents.size())
           report_fatal_error("GoObj section data is smaller than its layout");
         Data = ArrayRef<char>(Contents.data() + Begin, Size);
@@ -1129,9 +1135,9 @@ uint64_t GoObjObjectWriter::writeObject() {
                        Flag2, ABI, Size, Align, Data);
     };
 
-    if (SectionSymbols.empty()) {
+    if (SectionSymbols.empty() && SectionSize != 0) {
       AddSectionSymbol(nullptr, Section.getName(), 0, SectionSize);
-    } else {
+    } else if (!SectionSymbols.empty()) {
       for (size_t I = 0, E = SectionSymbols.size(); I != E; ++I) {
         uint64_t Begin = SectionSymbols[I].Offset;
         uint64_t End = SectionSize;
@@ -1158,8 +1164,10 @@ uint64_t GoObjObjectWriter::writeObject() {
     // surrounding section or global symbol is a sufficient GoObj carrier, but
     // an exact-sized preceding global can leave a private constant in an
     // uncovered section gap. Materialize only referenced, exact-sized,
-    // read-only temporaries. This is the MC equivalent of the Go compiler's
-    // local, content-addressable string/constant symbols.
+    // read-only temporaries. This includes zero-sized constants: their empty
+    // ranges can never be found by FindContainingSymbol, so relocations must
+    // refer to their directly indexed symbols. This is the MC equivalent of
+    // the Go compiler's local, content-addressable string/constant symbols.
     if (getGoObjSymbolType(&Section) != GoObj::SRODATA)
       continue;
     for (const MCSymbol *MCSym : PrivateRelocationTargets) {
@@ -1180,7 +1188,7 @@ uint64_t GoObjObjectWriter::writeObject() {
 
       std::optional<uint64_t> ExactSize =
           Asm->getContext().getGoObjSymbolSize(MCSym);
-      if (!ExactSize || *ExactSize == 0 || *ExactSize > SectionSize - Begin)
+      if (!ExactSize || *ExactSize > SectionSize - Begin)
         continue;
       uint64_t End = Begin + *ExactSize;
       for (size_t I = FirstSectionSymbol; I != Symbols.size(); ++I) {
@@ -1191,7 +1199,9 @@ uint64_t GoObjObjectWriter::writeObject() {
               "GoObj private constant overlaps an existing symbol carrier");
       }
 
-      ArrayRef<char> Data(Contents.data() + Begin, *ExactSize);
+      ArrayRef<char> Data;
+      if (*ExactSize != 0)
+        Data = ArrayRef<char>(Contents.data() + Begin, *ExactSize);
       uint32_t Align =
           Asm->getContext().getGoObjSymbolAlignment(MCSym).value_or(1);
       addDefinedSymbol(Symbols, MCSym, &Section, Begin, End,
@@ -1556,7 +1566,18 @@ uint64_t GoObjObjectWriter::writeObject() {
       return GoObjSymRef{GoObj::PkgIdxNone, GetNonPkgRefSymIdx(Reloc.Symbol)};
     }
 
-    report_fatal_error("unsupported GoObj relocation target symbol");
+    report_fatal_error(
+        Twine("unsupported GoObj relocation target symbol: name=") +
+        Reloc.Symbol->getName() + " temporary=" +
+        Twine(static_cast<unsigned>(Reloc.Symbol->isTemporary())) +
+        " variable=" +
+        Twine(static_cast<unsigned>(Reloc.Symbol->isVariable())) +
+        " absolute=" +
+        Twine(static_cast<unsigned>(Reloc.Symbol->isAbsolute())) +
+        " in-section=" +
+        Twine(static_cast<unsigned>(Reloc.Symbol->isInSection())) +
+        " undefined=" +
+        Twine(static_cast<unsigned>(Reloc.Symbol->isUndefined())));
   };
 
   for (const GoObjRelocationEntry &Reloc : Relocations) {
