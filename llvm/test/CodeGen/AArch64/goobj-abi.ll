@@ -23,6 +23,15 @@ entry:
   ret void
 }
 
+define goabiinternal i64 @local_calls(i64 %value) #0 {
+entry:
+  %slot = alloca i64, align 8
+  store volatile i64 %value, ptr %slot, align 8
+  call goabiinternal void @"runtime.GC"()
+  %result = load volatile i64, ptr %slot, align 8
+  ret i64 %result
+}
+
 define goabiinternal i64 @largeframe(i64 %value) #0 {
 entry:
   %buf = alloca [8192 x i8], align 16
@@ -39,6 +48,26 @@ entry:
   %capture = load i64, ptr %ctxt, align 8
   %sum = add i64 %capture, %value
   ret i64 %sum
+}
+
+%aggregate = type { i64, i64, i64, i64, i64, i64, i64, i64 }
+
+define goabiinternal %aggregate @aggregate_frame(
+    i64 %a0, i64 %a1, i64 %a2, i64 %a3,
+    i64 %a4, i64 %a5, i64 %a6, i64 %a7) #0 {
+entry:
+  %slot = alloca %aggregate, align 16
+  %v0 = insertvalue %aggregate poison, i64 %a0, 0
+  %v1 = insertvalue %aggregate %v0, i64 %a1, 1
+  %v2 = insertvalue %aggregate %v1, i64 %a2, 2
+  %v3 = insertvalue %aggregate %v2, i64 %a3, 3
+  %v4 = insertvalue %aggregate %v3, i64 %a4, 4
+  %v5 = insertvalue %aggregate %v4, i64 %a5, 5
+  %v6 = insertvalue %aggregate %v5, i64 %a6, 6
+  %v7 = insertvalue %aggregate %v6, i64 %a7, 7
+  store volatile %aggregate %v7, ptr %slot, align 16
+  %result = load volatile %aggregate, ptr %slot, align 16
+  ret %aggregate %result
 }
 
 ; ASM-LABEL: stackadd:
@@ -58,6 +87,13 @@ entry:
 ; ASM: [[CALLS_MORESTACK]]:
 ; ASM: mov x3, x30
 ; ASM: bl runtime.morestack_noctxt
+
+; ASM-LABEL: local_calls:
+; ASM: str x30, [sp, #-32]!
+; ASM: str x0, [sp, #16]
+; ASM: bl runtime.GC
+; ASM: ldr x0, [sp, #16]
+; ASM: ldr x30, [sp], #32
 
 ; ASM-LABEL: largeframe:
 ; ASM: sub x16, sp, #{{[0-9]+}}
@@ -81,12 +117,20 @@ entry:
 ; ASM: mov x3, x30
 ; ASM: bl runtime.morestack
 
+; ASM-LABEL: aggregate_frame:
+; ASM: str x30, [sp, #-96]!
+; ASM: str x0, [sp, #16]
+; ASM-NOT: str x0, [sp]
+; ASM: ldr x30, [sp], #96
+
 ; OBJ: header: go object darwin arm64
 ; OBJ: symdef {{[0-9]+}}: add abi=1 type=1
 ; OBJ: symdef {{[0-9]+}}: stackadd abi=0 type=1
 ; OBJ: symdef {{[0-9]+}}: calls abi=1 type=1
+; OBJ: symdef {{[0-9]+}}: local_calls abi=1 type=1
 ; OBJ: symdef {{[0-9]+}}: largeframe abi=1 type=1
 ; OBJ: symdef {{[0-9]+}}: largeclosure abi=1 type=1
+; OBJ: symdef {{[0-9]+}}: aggregate_frame abi=1 type=1
 ; OBJ: nonpkgref {{[0-9]+}}: runtime.GC abi=1 type=0 size=0
 ; OBJ: nonpkgref {{[0-9]+}}: runtime.morestack_noctxt abi=0 type=0 size=0
 ; OBJ: nonpkgref {{[0-9]+}}: runtime.morestack abi=0 type=0 size=0
