@@ -137,6 +137,12 @@ private:
   int StackHazardSlotIndex = std::numeric_limits<int>::max();
   int StackHazardCSRSlotIndex = std::numeric_limits<int>::max();
 
+  /// Frame index reserving the word occupied by LR at the bottom of a Go
+  /// frame. The Go prologue writes LR directly rather than through this frame
+  /// index; the object exists so generic frame layout cannot place a local or
+  /// spill at the same address.
+  int GoFrameLRSlotIndex = std::numeric_limits<int>::max();
+
   /// True if this function has a subset of CSRs that is handled explicitly via
   /// copies.
   bool IsSplitCSR = false;
@@ -499,6 +505,18 @@ public:
   void setStackHazardCSRSlotIndex(int Index) {
     assert(StackHazardCSRSlotIndex == std::numeric_limits<int>::max());
     StackHazardCSRSlotIndex = Index;
+  }
+
+  bool hasGoFrameLRSlotIndex() const {
+    return GoFrameLRSlotIndex != std::numeric_limits<int>::max();
+  }
+  int getGoFrameLRSlotIndex() const {
+    assert(hasGoFrameLRSlotIndex());
+    return GoFrameLRSlotIndex;
+  }
+  void setGoFrameLRSlotIndex(int Index) {
+    assert(!hasGoFrameLRSlotIndex());
+    GoFrameLRSlotIndex = Index;
   }
 
   bool hasSplitSVEObjects() const { return SplitSVEObjects; }

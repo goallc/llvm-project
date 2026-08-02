@@ -120,6 +120,13 @@ public:
   void processFunctionBeforeFrameFinalized(MachineFunction &MF,
                                            RegScavenger *RS) const override;
 
+  bool allocateScavengingFrameIndexesNearIncomingSP(
+      const MachineFunction &MF) const override {
+    const MachineFrameInfo &MFI = MF.getFrameInfo();
+    return usesGoFrameLayout(MF) &&
+           (!hasReservedCallFrame(MF) || MFI.getMaxCallFrameSize() == 0);
+  }
+
   void
   processFunctionBeforeFrameIndicesReplaced(MachineFunction &MF,
                                             RegScavenger *RS) const override;
@@ -272,6 +279,6 @@ private:
                               bool IsFunclet) const;
 };
 
-} // End llvm namespace
+} // namespace llvm
 
 #endif
