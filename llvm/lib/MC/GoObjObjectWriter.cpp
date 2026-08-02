@@ -1466,6 +1466,57 @@ uint64_t GoObjObjectWriter::writeObject() {
     return SymIdx;
   };
 
+  std::vector<std::string> PackagePrefixes(1, "");
+  StringMap<uint32_t> PackageIndexes;
+  PackageIndexes[""] = GoObj::PkgIdxInvalid;
+  auto GetPackageIndex = [&](StringRef Prefix) {
+    if (Prefix.empty())
+      report_fatal_error("GoObj imported reference has an empty package");
+    auto It = PackageIndexes.find(Prefix);
+    if (It != PackageIndexes.end())
+      return It->second;
+    uint32_t Index =
+        checkedUint32(PackagePrefixes.size(), "package index count");
+    PackagePrefixes.push_back(Prefix.str());
+    PackageIndexes[Prefix] = Index;
+    return Index;
+  };
+
+  struct IndexedRef {
+    GoObjSymRef Ref;
+    std::string Name;
+    uint8_t Flags2 = 0;
+  };
+  std::vector<IndexedRef> IndexedRefs;
+  DenseMap<uint64_t, uint32_t> IndexedRefIndexes;
+  auto TrimInlineHash = [](StringRef Name) {
+    // Match cmd/internal/obj.TrimInlineHash. The Go compiler inserts the
+    // base64 encoding of an 8-byte inline-call-stack hash between '#'
+    // delimiters. RefName is a tooling aid and intentionally omits it.
+    constexpr size_t InlineHashLength = 12;
+    size_t Begin = Name.find('#');
+    if (Begin == StringRef::npos ||
+        Name.size() < Begin + InlineHashLength + 2 ||
+        Name[Begin + InlineHashLength + 1] != '#')
+      return Name.str();
+    return (Name.take_front(Begin) +
+            Name.drop_front(Begin + InlineHashLength + 2))
+        .str();
+  };
+  auto RecordIndexedRef = [&](GoObjSymRef Ref, StringRef Name, uint8_t Flags2) {
+    uint64_t Key = (static_cast<uint64_t>(Ref.PkgIdx) << 32) | Ref.SymIdx;
+    auto It = IndexedRefIndexes.find(Key);
+    if (It != IndexedRefIndexes.end()) {
+      const IndexedRef &Existing = IndexedRefs[It->second];
+      if (Existing.Name != Name || Existing.Flags2 != Flags2)
+        report_fatal_error("conflicting GoObj indexed symbol reference");
+      return;
+    }
+    IndexedRefIndexes[Key] =
+        checkedUint32(IndexedRefs.size(), "indexed reference count");
+    IndexedRefs.push_back({Ref, Name.str(), Flags2});
+  };
+
   auto GetTargetSymRef = [&](const GoObjRelocationEntry &Reloc,
                              int64_t &Addend) {
     if (!Reloc.Symbol)
@@ -1485,8 +1536,25 @@ uint64_t GoObjObjectWriter::writeObject() {
       }
     }
 
-    if (Reloc.Symbol->isUndefined())
+    if (Reloc.Symbol->isUndefined()) {
+      if (const MCContext::GoObjSymbolRef *Metadata =
+              Asm->getContext().getGoObjSymbolRef(Reloc.Symbol)) {
+        switch (Metadata->Kind) {
+        case MCContext::GoObjSymbolRefKind::Imported: {
+          GoObjSymRef Ref{GetPackageIndex(Metadata->PackagePrefix),
+                          Metadata->SymIdx};
+          RecordIndexedRef(Ref, TrimInlineHash(Reloc.Symbol->getName()),
+                           Metadata->Flags2);
+          return Ref;
+        }
+        case MCContext::GoObjSymbolRefKind::Builtin:
+          if (!Metadata->PackagePrefix.empty() || Metadata->Flags2 != 0)
+            report_fatal_error("invalid GoObj builtin symbol reference");
+          return GoObjSymRef{GoObj::PkgIdxBuiltin, Metadata->SymIdx};
+        }
+      }
       return GoObjSymRef{GoObj::PkgIdxNone, GetNonPkgRefSymIdx(Reloc.Symbol)};
+    }
 
     report_fatal_error("unsupported GoObj relocation target symbol");
   };
@@ -1632,12 +1700,19 @@ uint64_t GoObjObjectWriter::writeObject() {
   };
 
   AddString("");
+  for (const MCContext::GoObjImport &Import :
+       Asm->getContext().getGoObjImports())
+    AddString(Import.PackagePath);
+  for (StringRef Prefix : PackagePrefixes)
+    AddString(Prefix);
   for (StringRef File : FilePaths)
     AddString(File);
   for (const GoObjSymbol &Symbol : Symbols)
     AddString(Symbol.Name);
   for (const GoObjSymbol &Symbol : NonPkgRefs)
     AddString(Symbol.Name);
+  for (const IndexedRef &Ref : IndexedRefs)
+    AddString(Ref.Name);
 
   std::array<uint32_t, GoObj::NBlk> Offsets = {};
   auto MarkBlock = [&](GoObj::Block Block) {
@@ -1649,7 +1724,17 @@ uint64_t GoObjObjectWriter::writeObject() {
   };
 
   MarkBlock(GoObj::BlkAutolib);
+  for (const MCContext::GoObjImport &Import :
+       Asm->getContext().getGoObjImports()) {
+    WriteStringRef(Import.PackagePath);
+    for (uint8_t Byte : Import.Fingerprint)
+      W.write<uint8_t>(Byte);
+  }
+
   MarkBlock(GoObj::BlkPkgIdx);
+  for (StringRef Prefix : PackagePrefixes)
+    WriteStringRef(Prefix);
+
   MarkBlock(GoObj::BlkFile);
   for (StringRef File : FilePaths)
     WriteStringRef(File);
@@ -1671,6 +1756,15 @@ uint64_t GoObjObjectWriter::writeObject() {
     WriteSymbolRecord(Symbol);
 
   MarkBlock(GoObj::BlkRefFlags);
+  for (const IndexedRef &Ref : IndexedRefs) {
+    if (Ref.Flags2 == 0)
+      continue;
+    W.write<uint32_t>(Ref.Ref.PkgIdx);
+    W.write<uint32_t>(Ref.Ref.SymIdx);
+    W.write<uint8_t>(0);
+    W.write<uint8_t>(Ref.Flags2);
+  }
+
   MarkBlock(GoObj::BlkHash64);
   MarkBlock(GoObj::BlkHash);
   for (uint32_t Index : HasheddefSymbols) {
@@ -1747,6 +1841,12 @@ uint64_t GoObjObjectWriter::writeObject() {
   }
 
   MarkBlock(GoObj::BlkRefName);
+  for (const IndexedRef &Ref : IndexedRefs) {
+    W.write<uint32_t>(Ref.Ref.PkgIdx);
+    W.write<uint32_t>(Ref.Ref.SymIdx);
+    WriteStringRef(Ref.Name);
+  }
+
   MarkBlock(GoObj::BlkEnd);
 
   SmallString<GoObj::HeaderSize> Header;

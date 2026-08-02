@@ -968,7 +968,91 @@ static const GlobalValue *getGoObjMetadataGlobal(const MDOperand &Operand,
   return GV;
 }
 
+static StringRef getGoObjMetadataString(const MDOperand &Operand,
+                                        StringRef MetadataName) {
+  const auto *S = dyn_cast_or_null<MDString>(Operand.get());
+  if (!S)
+    report_fatal_error(Twine("expected !") + MetadataName + " string operand");
+  return S->getString();
+}
+
 static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
+  if (const NamedMDNode *Imports = M.getNamedMetadata("goobj.imports")) {
+    DenseSet<StringRef> Paths;
+    DenseSet<StringRef> Prefixes;
+    std::vector<MCContext::GoObjImport> ParsedImports;
+    ParsedImports.reserve(Imports->getNumOperands());
+    for (const MDNode *Entry : Imports->operands()) {
+      if (Entry->getNumOperands() != 3)
+        report_fatal_error(
+            "expected !goobj.imports entries to have three operands");
+      StringRef Path =
+          getGoObjMetadataString(Entry->getOperand(0), "goobj.imports");
+      StringRef Prefix =
+          getGoObjMetadataString(Entry->getOperand(1), "goobj.imports");
+      StringRef Fingerprint =
+          getGoObjMetadataString(Entry->getOperand(2), "goobj.imports");
+      if (Path.empty() || Prefix.empty() || Fingerprint.size() != 16)
+        report_fatal_error("invalid !goobj.imports entry");
+      if (!Paths.insert(Path).second || !Prefixes.insert(Prefix).second)
+        report_fatal_error("duplicate !goobj.imports package");
+
+      MCContext::GoObjImport Import;
+      Import.PackagePath = Path.str();
+      Import.PackagePrefix = Prefix.str();
+      for (unsigned I = 0; I != Import.Fingerprint.size(); ++I) {
+        uint8_t Byte = 0;
+        if (!tryGetHexFromNibbles(Fingerprint[I * 2], Fingerprint[I * 2 + 1],
+                                  Byte))
+          report_fatal_error("invalid !goobj.imports fingerprint");
+        Import.Fingerprint[I] = Byte;
+      }
+      ParsedImports.push_back(std::move(Import));
+    }
+    AP.OutContext.setGoObjImports(std::move(ParsedImports));
+  }
+
+  // Only the optimized relocation stream decides which declarations become
+  // GoObj references. Attachments retain the package-local indices that LLVM
+  // symbol names and MC relocations cannot reconstruct.
+  for (const GlobalObject &GO : M.global_objects()) {
+    const MDNode *Imported = GO.getMetadata("goobj.import");
+    const MDNode *Builtin = GO.getMetadata("goobj.builtin");
+    if (!Imported && !Builtin)
+      continue;
+    if (!GO.isDeclaration() || (Imported && Builtin))
+      report_fatal_error("invalid GoObj symbol reference attachment");
+
+    MCContext::GoObjSymbolRef Ref;
+    if (Imported) {
+      if (Imported->getNumOperands() != 3)
+        report_fatal_error("expected !goobj.import to have three operands");
+      StringRef Prefix =
+          getGoObjMetadataString(Imported->getOperand(0), "goobj.import");
+      const auto *SymIdx =
+          mdconst::dyn_extract<ConstantInt>(Imported->getOperand(1));
+      const auto *Flags2 =
+          mdconst::dyn_extract<ConstantInt>(Imported->getOperand(2));
+      if (Prefix.empty() || !SymIdx || SymIdx->getValue().ugt(UINT32_MAX) ||
+          !Flags2 || Flags2->getValue().ugt(UINT8_MAX))
+        report_fatal_error("invalid !goobj.import attachment");
+      Ref.Kind = MCContext::GoObjSymbolRefKind::Imported;
+      Ref.PackagePrefix = Prefix.str();
+      Ref.SymIdx = static_cast<uint32_t>(SymIdx->getZExtValue());
+      Ref.Flags2 = static_cast<uint8_t>(Flags2->getZExtValue());
+    } else {
+      if (Builtin->getNumOperands() != 1)
+        report_fatal_error("expected !goobj.builtin to have one operand");
+      const auto *SymIdx =
+          mdconst::dyn_extract<ConstantInt>(Builtin->getOperand(0));
+      if (!SymIdx || SymIdx->getValue().ugt(UINT32_MAX))
+        report_fatal_error("invalid !goobj.builtin attachment");
+      Ref.Kind = MCContext::GoObjSymbolRefKind::Builtin;
+      Ref.SymIdx = static_cast<uint32_t>(SymIdx->getZExtValue());
+    }
+    AP.OutContext.setGoObjSymbolRef(AP.getSymbol(&GO), std::move(Ref));
+  }
+
   if (const NamedMDNode *Keep = M.getNamedMetadata("goobj.keep")) {
     DenseMap<const GlobalValue *, std::vector<const MCSymbol *>> Targets;
     for (const MDNode *Entry : Keep->operands()) {
