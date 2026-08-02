@@ -3305,21 +3305,41 @@ void AArch64FrameLowering::processFunctionBeforeFrameFinalized(
   (void)determineSVEStackSizes(MF, AssignObjectOffsets::Yes);
 
   MachineFrameInfo &MFI = MF.getFrameInfo();
+  auto *AFI = MF.getInfo<AArch64FunctionInfo>();
   if (usesGoFrameLayout(MF) && hasFP(MF)) {
     // The caller writes its FP link at 8 bytes below its SP. Once this
     // function allocates a frame, that address is the top word of the new
     // physical frame. Model it as a fixed object so PEI cannot place spills
-    // there. The Go call-frame bias already reserves the bottom word for LR.
+    // there.
     MFI.CreateFixedObject(/*Size=*/8, /*SPOffset=*/-8,
                           /*IsImmutable=*/true);
+
+    bool HasLocalOrSpill = false;
+    for (int FI = 0; FI < MFI.getObjectIndexEnd(); ++FI)
+      if (!MFI.isDeadObjectIndex(FI) &&
+          MFI.getStackID(FI) == TargetStackID::Default) {
+        HasLocalOrSpill = true;
+        break;
+      }
+    bool HasReservedCallFrameBias =
+        hasReservedCallFrame(MF) && MFI.getMaxCallFrameSize() != 0;
+    if (HasLocalOrSpill && !HasReservedCallFrameBias) {
+      // LR lives at 0(SP) after the Go prologue has allocated this frame. The
+      // reserved outgoing call-frame bias already protects that word in
+      // functions which make calls, but leaf functions with locals have no
+      // call-frame object. Model the LR word as a normal stack object and keep
+      // it closest to the final SP so PEI reserves it whenever locals or spills
+      // exist without a reserved call frame.
+      int LRSlot = MFI.CreateStackObject(/*Size=*/8, Align(8),
+                                         /*isSpillSlot=*/true);
+      AFI->setGoFrameLRSlotIndex(LRSlot);
+    }
   }
 
   // If this function isn't doing Win64-style C++ EH, we don't need to do
   // anything.
   if (!MF.hasEHFunclets())
     return;
-
-  auto *AFI = MF.getInfo<AArch64FunctionInfo>();
 
   // Win64 C++ EH needs to allocate space for the catch objects in the fixed
   // object area right next to the UnwindHelp object.
@@ -4064,13 +4084,23 @@ void AArch64FrameLowering::orderFrameObjects(
 
   llvm::stable_sort(FrameObjects, FrameObjectCompare);
 
+  std::optional<int> GoFrameLRSlot;
+  if (AFI.hasGoFrameLRSlotIndex())
+    GoFrameLRSlot = AFI.getGoFrameLRSlotIndex();
+
   int i = 0;
   for (auto &Obj : FrameObjects) {
     // All invalid items are sorted at the end, so it's safe to stop.
     if (!Obj.IsValid)
       break;
+    if (GoFrameLRSlot && Obj.ObjectIndex == *GoFrameLRSlot)
+      continue;
     ObjectsToAllocate[i++] = Obj.ObjectIndex;
   }
+  if (GoFrameLRSlot)
+    ObjectsToAllocate[i++] = *GoFrameLRSlot;
+  assert(i == (int)ObjectsToAllocate.size() &&
+         "failed to preserve all frame objects while reserving Go LR slot");
 
   LLVM_DEBUG({
     dbgs() << "Final frame order:\n";
