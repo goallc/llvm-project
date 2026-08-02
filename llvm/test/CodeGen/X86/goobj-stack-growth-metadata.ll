@@ -10,12 +10,12 @@
 
 define goabiinternal i64 @big_frame(i64 %x) {
 entry:
-  %buf = alloca [5000 x i8], align 16
+  %buf = alloca [5000 x i8], align 8
   %p0 = getelementptr inbounds [5000 x i8], ptr %buf, i64 0, i64 0
   %p1 = getelementptr inbounds [5000 x i8], ptr %buf, i64 0, i64 4999
-  store volatile i8 7, ptr %p0, align 16
+  store volatile i8 7, ptr %p0, align 8
   store volatile i8 11, ptr %p1, align 1
-  %v0 = load volatile i8, ptr %p0, align 16
+  %v0 = load volatile i8, ptr %p0, align 8
   %v1 = load volatile i8, ptr %p1, align 1
   %a = zext i8 %v0 to i64
   %b = zext i8 %v1 to i64
@@ -26,7 +26,7 @@ entry:
 
 define goabiinternal i64 @big_closure_frame(i64 %x, ptr nest %ctxt) {
 entry:
-  %buf = alloca [5000 x i8], align 16
+  %buf = alloca [5000 x i8], align 8
   %slot = getelementptr inbounds [5000 x i8], ptr %buf, i64 0, i64 4999
   store volatile i8 1, ptr %slot, align 1
   %capture = load i64, ptr %ctxt, align 8

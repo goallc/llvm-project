@@ -292,6 +292,11 @@ void X86Subtarget::initSubtargetFeatures(StringRef CPU, StringRef TuneCPU,
   // following the i386 psABI, while on Illumos it is always 16 bytes.
   if (StackAlignOverride)
     stackAlignment = *StackAlignOverride;
+  else if (TargetTriple.isOSBinFormatGoObj())
+    // The Go amd64 ABI guarantees only pointer-size stack alignment. Treating
+    // GoObj as the platform SysV ABI lets frame lowering select aligned vector
+    // accesses for stack slots which can be only 8-byte aligned at runtime.
+    stackAlignment = Align(8);
   else if (isTargetDarwin() || isTargetLinux() || isTargetKFreeBSD() ||
            isTargetHurd() || Is64Bit)
     stackAlignment = Align(16);

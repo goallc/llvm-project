@@ -1,0 +1,61 @@
+; RUN: opt -S -passes='default<O2>' %s | FileCheck %s --check-prefix=OPT
+; RUN: opt -S -passes=rewrite-statepoints-for-gc %s | FileCheck %s --check-prefix=STATEPOINT
+; RUN: llc -mtriple=x86_64-unknown-linux -verify-machineinstrs -stop-before=x86-expand-pseudo -o - %s | FileCheck %s --check-prefix=PSEUDO
+; RUN: llc -mtriple=x86_64-unknown-linux -verify-machineinstrs -o - %s | FileCheck %s --check-prefix=ASM
+; RUN: llc -O0 -mtriple=x86_64-unknown-linux -verify-machineinstrs -o - %s | FileCheck %s --check-prefix=ASM
+; RUN: llc -mtriple=x86_64-unknown-linux-goobj -goobj-package-path=main \
+; RUN:   -verify-machineinstrs -filetype=obj -o %t.o %s
+; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | \
+; RUN:   FileCheck %s --check-prefix=OBJ
+
+declare ptr @llvm.go.gc.write.barrier(i32 immarg)
+
+define goabiinternal ptr @acquire_one() gc "statepoint-example" {
+; OPT-LABEL: define goabiinternal ptr @acquire_one()
+; OPT: call ptr @llvm.go.gc.write.barrier(i32 1)
+;
+; STATEPOINT-LABEL: define goabiinternal ptr @acquire_one()
+; STATEPOINT: call ptr @llvm.go.gc.write.barrier(i32 1)
+; STATEPOINT-NOT: gc.statepoint
+;
+; PSEUDO-LABEL: name: acquire_one
+; PSEUDO: GO_GC_WRITE_BARRIER 1
+; PSEUDO-SAME: implicit-def $r11
+; PSEUDO-SAME: implicit-def {{(dead )?}}$eflags
+; PSEUDO-SAME: implicit $rsp
+;
+; ASM-LABEL: acquire_one:
+; ASM: callq runtime.gcWriteBarrier1
+; ASM-NEXT: movq %r11, %rax
+  %buf = call ptr @llvm.go.gc.write.barrier(i32 1)
+  ret ptr %buf
+}
+
+define goabiinternal ptr @acquire_eight() gc "statepoint-example" {
+; PSEUDO-LABEL: name: acquire_eight
+; PSEUDO: GO_GC_WRITE_BARRIER 8
+;
+; ASM-LABEL: acquire_eight:
+; ASM: callq runtime.gcWriteBarrier8
+; ASM-NEXT: movq %r11, %rax
+  %buf = call ptr @llvm.go.gc.write.barrier(i32 8)
+  ret ptr %buf
+}
+
+define goabiinternal void @store_one(ptr %value) gc "statepoint-example" {
+; PSEUDO-LABEL: name: store_one
+; PSEUDO: GO_GC_WRITE_BARRIER 1
+;
+; ASM-LABEL: store_one:
+; ASM: callq runtime.gcWriteBarrier1
+; ASM-NEXT: movq %rax, (%r11)
+  %buf = call ptr @llvm.go.gc.write.barrier(i32 1)
+  store ptr %value, ptr %buf
+  ret void
+}
+
+; OBJ: nonpkgref {{[0-9]+}}: runtime.gcWriteBarrier1 abi=1 type=0 size=0
+; OBJ: nonpkgref {{[0-9]+}}: runtime.gcWriteBarrier8 abi=1 type=0 size=0
+; OBJ-NOT: runtime.gcWriteBarrier{{[18]}} abi=0
+; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.gcWriteBarrier1
+; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.gcWriteBarrier8
