@@ -9,6 +9,7 @@
 #include "MCTargetDesc/AArch64FixupKinds.h"
 #include "MCTargetDesc/AArch64MCAsmInfo.h"
 #include "MCTargetDesc/AArch64MCTargetDesc.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/BinaryFormat/GoObj.h"
 #include "llvm/MC/MCFixup.h"
 #include "llvm/MC/MCGoObjObjectWriter.h"
