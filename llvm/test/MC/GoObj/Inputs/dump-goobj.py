@@ -27,6 +27,7 @@ BLOCKS = [
 PKGIDX_NONE = (1 << 31) - 1
 PKGIDX_HASHED64 = PKGIDX_NONE - 1
 PKGIDX_HASHED = PKGIDX_NONE - 2
+PKGIDX_BUILTIN = PKGIDX_NONE - 3
 PKGIDX_SELF = PKGIDX_NONE - 4
 SYMBOL_SIZE = 21
 RELOC_SIZE = 23
@@ -47,6 +48,7 @@ PKG_INDEX_NAMES = {
     PKGIDX_NONE: "none",
     PKGIDX_HASHED64: "hashed64",
     PKGIDX_HASHED: "hashed",
+    PKGIDX_BUILTIN: "builtin",
     PKGIDX_SELF: "self",
 }
 
@@ -141,6 +143,34 @@ def main(path):
     nonpkgdef = read_symbols(data, offsets[6], offsets[7])
     nonpkgref = read_symbols(data, offsets[7], offsets[8])
 
+    imports = []
+    for offset in range(offsets[0], offsets[1], 16):
+        imports.append((string_at(data, offset), data[offset + 8 : offset + 16].hex()))
+    print("autolib-count:", len(imports))
+    for index, (path, fingerprint) in enumerate(imports):
+        print(f"autolib {index}: {path} fingerprint={fingerprint}")
+
+    packages = []
+    for offset in range(offsets[1], offsets[2], 8):
+        packages.append(string_at(data, offset))
+    print("pkgidx-count:", len(packages))
+    for index, package in enumerate(packages):
+        print(f"pkgidx {index}: {package}")
+
+    ref_names = {}
+    for offset in range(offsets[17], offsets[18], 16):
+        pkg_index, sym_index = struct.unpack_from("<II", data, offset)
+        name = string_at(data, offset + 8)
+        ref_names[(pkg_index, sym_index)] = name
+        print(f"refname {pkg_index}:{sym_index}: {name}")
+
+    for offset in range(offsets[8], offsets[9], 10):
+        pkg_index, sym_index = struct.unpack_from("<II", data, offset)
+        print(
+            f"refflags {pkg_index}:{sym_index}: "
+            f"flag={data[offset + 8]} flag2={data[offset + 9]}"
+        )
+
     files = []
     for offset in range(offsets[2], offsets[3], 8):
         files.append(string_at(data, offset))
@@ -182,6 +212,8 @@ def main(path):
     ]
 
     def resolve_ref(pkg_index, sym_index):
+        if (pkg_index, sym_index) in ref_names:
+            return ref_names[(pkg_index, sym_index)]
         if pkg_index == PKGIDX_NONE:
             symbols = nonpkgdef + nonpkgref
             if sym_index < len(symbols):
@@ -192,6 +224,10 @@ def main(path):
             return hasheddef[sym_index]["name"]
         if pkg_index == PKGIDX_SELF and sym_index < len(symdef):
             return symdef[sym_index]["name"]
+        if pkg_index == PKGIDX_BUILTIN:
+            return f"builtin:{sym_index}"
+        if pkg_index < len(packages):
+            return f"{packages[pkg_index]}:{sym_index}"
         return f"{pkg_index}:{sym_index}"
 
     def resolve_defined_data_index(pkg_index, sym_index):
