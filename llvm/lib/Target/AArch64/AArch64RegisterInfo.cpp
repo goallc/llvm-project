@@ -548,6 +548,9 @@ AArch64RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
 
   if (goabi::isGoCallingConv(MF.getFunction().getCallingConv())) {
     markSuperRegs(Reserved, AArch64::W18);
+    // Go reserves R27 as REGTMP for assembler-generated instruction
+    // sequences, including large stack-offset accesses.
+    markSuperRegs(Reserved, AArch64::W27);
     markSuperRegs(Reserved, AArch64::W28);
     if (MF.getTarget().getTargetTriple().isOSBinFormatGoObj())
       markSuperRegs(Reserved, AArch64::W30);

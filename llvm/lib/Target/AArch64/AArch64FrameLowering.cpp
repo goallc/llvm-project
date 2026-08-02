@@ -1347,6 +1347,10 @@ static unsigned getAArch64GoSpillOpcode(unsigned Size, bool IsFP, bool Reload) {
     }
   } else {
     switch (Size) {
+    case 1:
+      return Reload ? AArch64::LDRBBui : AArch64::STRBBui;
+    case 2:
+      return Reload ? AArch64::LDRHHui : AArch64::STRHHui;
     case 4:
       return Reload ? AArch64::LDRWui : AArch64::STRWui;
     case 8:
@@ -1368,16 +1372,34 @@ emitAArch64GoRegSpills(MachineFunction &MF, MachineBasicBlock &MBB,
     assert(MFI.isFixedObjectIndex(Spill.FrameIndex) &&
            "Go register argument spill slot must be a fixed object");
     int64_t Offset = MFI.getObjectOffset(Spill.FrameIndex);
-    if (Offset < 0 || Offset % Spill.Size != 0 || Offset / Spill.Size > 4095)
-      report_fatal_error(
-          "AArch64 Go ABI register spill offset is out of range");
+    Register BaseReg = AArch64::SP;
+    int64_t ScaledOffset = 0;
+    if (Offset >= 0 && Offset % Spill.Size == 0 &&
+        Offset / Spill.Size <= 4095) {
+      ScaledOffset = Offset / Spill.Size;
+    } else {
+      // These accesses run on the frameless morestack path, so ordinary frame
+      // index elimination cannot materialize an out-of-range entry-SP offset.
+      // Match the Go assembler's large-offset expansion: reserve as much of
+      // the address as possible for the scaled load/store immediate and use
+      // Go's R27/REGTMP for the remaining base adjustment.
+      int64_t BaseOffset = Offset;
+      if (Offset > 0) {
+        ScaledOffset = std::min<int64_t>(Offset / Spill.Size, 4095);
+        BaseOffset -= ScaledOffset * Spill.Size;
+      }
+      BaseReg = AArch64::X27;
+      emitFrameOffset(MBB, MBB.end(), DL, BaseReg, AArch64::SP,
+                      StackOffset::getFixed(BaseOffset), &TII,
+                      MachineInstr::NoFlags);
+    }
     unsigned Opc = getAArch64GoSpillOpcode(Spill.Size, Spill.IsFP, Reload);
     MachineInstrBuilder MIB = Reload
                                   ? BuildMI(&MBB, DL, TII.get(Opc), Spill.Reg)
                                   : BuildMI(&MBB, DL, TII.get(Opc));
     if (!Reload)
       MIB.addReg(Spill.Reg);
-    MIB.addReg(AArch64::SP).addImm(Offset / Spill.Size);
+    MIB.addReg(BaseReg).addImm(ScaledOffset);
   }
 }
 

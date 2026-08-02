@@ -9154,7 +9154,6 @@ static SDValue lowerAArch64GoFormalArguments(
     const goabi::ValueLayout &ArgLayout = Layout.Args[LayoutMap[Group.Index]];
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
-    uint64_t SpillPieceOffset = 0;
     for (unsigned I = Group.Start; I != Group.End; ++I) {
       const ISD::InputArg &In = Ins[I];
       if (ArgLayout.InRegs) {
@@ -9169,16 +9168,17 @@ static SDValue lowerAArch64GoFormalArguments(
         else
           ++IntPiece;
 
+        // The physical register copy may widen a sub-word integer to i32, but
+        // its Go ABI home retains the original piece's size and offset.
         unsigned Size = static_cast<unsigned>(
-            std::max<uint64_t>(1, CopyVT.getStoreSize().getKnownMinValue()));
+            std::max<uint64_t>(1, In.ArgVT.getStoreSize().getKnownMinValue()));
         uint64_t ArgSpillOffset = ArgSpillOffsets[LayoutMap[Group.Index]];
         int FI = MFI.CreateFixedSpillStackObject(
-            Size, StackBias + ArgSpillOffset + SpillPieceOffset,
+            Size, StackBias + ArgSpillOffset + In.PartOffset,
             /*IsImmutable=*/false);
         FuncInfo->addGoRegArgSpillSlot(PReg, FI, Size,
                                        isAArch64GoFloatPiece(In.OrigTy));
-        RecordPointerSlots(FI, ArgSpillOffset + SpillPieceOffset, Size);
-        SpillPieceOffset += Size;
+        RecordPointerSlots(FI, ArgSpillOffset + In.PartOffset, Size);
 
         if (In.VT != CopyVT)
           Val = DAG.getNode(ISD::TRUNCATE, DL, In.VT, Val);
