@@ -317,8 +317,20 @@ static void reservePreviousStackSlotForValue(const Value *IncomingValue,
   const auto &StatepointSlots = Builder.FuncInfo.StatepointStackSlots;
 
   auto SlotIt = find(StatepointSlots, *Index);
-  assert(SlotIt != StatepointSlots.end() &&
-         "Value spilled to the unknown stack slot");
+  if (SlotIt == StatepointSlots.end()) {
+    // A target may keep an incoming argument value in its fixed stack home.
+    // Such a home is a valid statepoint location, but it is deliberately not
+    // one of the reusable temporary slots above.  Preserve it directly across
+    // consecutive statepoints (including through relocates and same-slot
+    // phis) instead of trying to reserve it for general allocation.
+    MachineFrameInfo &MFI = Builder.DAG.getMachineFunction().getFrameInfo();
+    assert(MFI.isStatepointSpillSlotObjectIndex(*Index) &&
+           "Value spilled to an untracked stack slot");
+    Builder.StatepointLowering.setLocation(
+        Incoming,
+        Builder.DAG.getTargetFrameIndex(*Index, Builder.getFrameIndexTy()));
+    return;
+  }
 
   // This is one of our dedicated lowering slots
   const int Offset = std::distance(StatepointSlots.begin(), SlotIt);
