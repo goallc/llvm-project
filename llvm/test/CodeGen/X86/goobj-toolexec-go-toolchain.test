@@ -4,13 +4,14 @@
 # so their symabis declarations and GoObj symbol ABI records come directly from
 # each function's IR calling convention.
 
-# REQUIRES: x86-registered-target
+# The test executes the linked binary, so it requires a native linux/amd64 host.
+# REQUIRES: x86-registered-target, x86_64-linux, native
 
 # RUN: rm -rf %t.dir %t.gocache
 # RUN: cp -R %S/Inputs/goobj-toolexec-module %t.dir
-# RUN: cd %t.dir && env GOCACHE=%t.gocache /home/zgy/02.golang/stablego/go1.26/bin/go build -a -ldflags=-w -toolexec llvm-goobj-toolexec -o toolexec-linked ./cmd/app
+# RUN: cd %t.dir && env GOCACHE=%t.gocache go build -a -ldflags=-w -toolexec llvm-goobj-toolexec -o toolexec-linked ./cmd/app
 # RUN: %t.dir/toolexec-linked 2>&1 | FileCheck %s
-# RUN: cd %t.dir && env GOCACHE=%t.gocache /home/zgy/02.golang/stablego/go1.26/bin/go test -ldflags=-w -toolexec llvm-goobj-toolexec -run 'TestStringEqual|TestLLVMRuntimeStack|TestLLVMTriggerGC|TestLLVMTypeDescriptor' -bench BenchmarkStringEqual -benchtime=1x -count=1 ./dep | FileCheck %s --check-prefix=BENCH
+# RUN: cd %t.dir && env GOCACHE=%t.gocache go test -ldflags=-w -toolexec llvm-goobj-toolexec -run 'TestStringEqual|TestLLVMRuntimeStack|TestLLVMTriggerGC|TestLLVMTypeDescriptor' -bench BenchmarkStringEqual -benchtime=1x -count=1 ./dep | FileCheck %s --check-prefix=BENCH
 
 # CHECK: 123
 # CHECK-NEXT: 42
