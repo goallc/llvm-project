@@ -49,8 +49,8 @@ entry:
 
 define goabiinternal { i64, [2 x i64] } @tuple_stackret(i64 %a, i64 %b, i64 %c) #0 {
 ; X86-LABEL: tuple_stackret:
-; X86-DAG: movq %rbx, 16(%rsp)
-; X86-DAG: movq %rcx, 24(%rsp)
+; X86-DAG: movq %rbx, 8(%rsp)
+; X86-DAG: movq %rcx, 16(%rsp)
 ; X86: retq
 entry:
   %arr0 = insertvalue [2 x i64] poison, i64 %b, 0
@@ -62,9 +62,9 @@ entry:
 
 define goabiinternal { i64, [2 x i64] } @single_struct_stackret(i64 %a, i64 %b, i64 %c) {
 ; X86-LABEL: single_struct_stackret:
-; X86-DAG: movq %rax, 16(%rsp)
-; X86-DAG: movq %rbx, 24(%rsp)
-; X86-DAG: movq %rcx, 32(%rsp)
+; X86-DAG: movq %rax, 8(%rsp)
+; X86-DAG: movq %rbx, 16(%rsp)
+; X86-DAG: movq %rcx, 24(%rsp)
 ; X86: retq
 entry:
   %arr0 = insertvalue [2 x i64] poison, i64 %b, 0

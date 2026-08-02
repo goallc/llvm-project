@@ -1,0 +1,67 @@
+# REQUIRES: x86-registered-target
+# RUN: split-file %s %t
+# RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj \
+# RUN:   -start-after=block-placement -filetype=obj %t/inconsistent.mir -o /dev/null 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=INCONSISTENT
+# RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj \
+# RUN:   -start-after=block-placement -filetype=obj %t/unreachable.mir -o /dev/null 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=UNREACHABLE
+
+# INCONSISTENT: LLVM ERROR: inconsistent GoObj pcsp value{{.*}}in function inconsistent
+# UNREACHABLE: LLVM ERROR: cannot determine GoObj pcsp value{{.*}}in function unreachable
+
+#--- inconsistent.mir
+--- |
+  target triple = "x86_64-unknown-linux-goobj"
+
+  define goabiinternal void @inconsistent() {
+    ret void
+  }
+...
+---
+name: inconsistent
+tracksRegLiveness: true
+frameInfo:
+  stackSize: 16
+  adjustsStack: true
+  hasCalls: true
+body: |
+  bb.0:
+    successors: %bb.1, %bb.2
+
+    JCC_1 %bb.1, 4, implicit undef $eflags
+    JMP_1 %bb.2
+
+  bb.1:
+    successors: %bb.3
+
+    $rsp = frame-setup SUB64ri32 $rsp, 16, implicit-def dead $eflags
+    JMP_1 %bb.3
+
+  bb.2:
+    successors: %bb.3
+
+    JMP_1 %bb.3
+
+  bb.3:
+    RET64
+...
+
+#--- unreachable.mir
+--- |
+  target triple = "x86_64-unknown-linux-goobj"
+
+  define goabiinternal void @unreachable() {
+    ret void
+  }
+...
+---
+name: unreachable
+tracksRegLiveness: true
+body: |
+  bb.0:
+    RET64
+
+  bb.1:
+    RET64
+...

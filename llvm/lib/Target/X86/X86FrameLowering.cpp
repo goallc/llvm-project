@@ -77,7 +77,8 @@ getCalleeSavedSpillRC(MCRegister Reg, const X86Subtarget &STI,
 X86FrameLowering::X86FrameLowering(const X86Subtarget &STI,
                                    MaybeAlign StackAlignOverride)
     : TargetFrameLowering(StackGrowsDown, StackAlignOverride.valueOrOne(),
-                          STI.is64Bit() ? -8 : -4),
+                          STI.is64Bit() ? -8 : -4, Align(1),
+                          !STI.getTargetTriple().isOSBinFormatGoObj()),
       STI(STI), TII(*STI.getInstrInfo()), TRI(STI.getRegisterInfo()) {
   // Cache a bunch of frame-related predicates for this subtarget.
   SlotSize = TRI->getSlotSize();
