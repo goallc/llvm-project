@@ -898,6 +898,21 @@ getGoObjSymbolFlags(const GlobalObject *GO) {
   return std::make_pair(Flag, Flag2);
 }
 
+static std::optional<std::string>
+getGoObjSymbolContentHash(const GlobalVariable *GV) {
+  const MDNode *MD = GV->getMetadata("goobj.content_hash");
+  if (!MD)
+    return std::nullopt;
+  if (MD->getNumOperands() != 1)
+    report_fatal_error("expected !goobj.content_hash to have one operand");
+  const auto *Hash = dyn_cast<MDString>(MD->getOperand(0));
+  if (!Hash || (Hash->getString().size() != GoObj::Hash64Size &&
+                Hash->getString().size() != GoObj::HashSize))
+    report_fatal_error(
+        "expected !goobj.content_hash to contain an 8-byte or 16-byte string");
+  return Hash->getString().str();
+}
+
 static std::optional<std::vector<MCContext::GoObjRelocOverride>>
 getGoObjRelocsMetadata(const GlobalObject *GO) {
   const MDNode *MD = GO->getMetadata("goobj.relocs");
@@ -1165,6 +1180,8 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
     if (std::optional<std::pair<uint8_t, uint8_t>> Flags =
             getGoObjSymbolFlags(GV))
       OutContext.setGoObjSymbolFlags(GVSym, Flags->first, Flags->second);
+    if (std::optional<std::string> Hash = getGoObjSymbolContentHash(GV))
+      OutContext.setGoObjSymbolContentHash(GVSym, std::move(*Hash));
     if (std::optional<std::vector<MCContext::GoObjRelocOverride>> Relocs =
             getGoObjRelocsMetadata(GV))
       OutContext.setGoObjRelocOverrides(GVSym, std::move(*Relocs));
