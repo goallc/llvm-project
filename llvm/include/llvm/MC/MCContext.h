@@ -234,6 +234,9 @@ private:
   /// Go object symbol flags keyed by MC symbol.
   DenseMap<const MCSymbol *, std::pair<uint8_t, uint8_t>> GoObjSymbolFlags;
 
+  /// Native Go content-addressable identity hashes keyed by MC symbol.
+  DenseMap<const MCSymbol *, std::string> GoObjSymbolContentHashes;
+
   /// Go object data-relocation type overrides keyed by MC symbol. LLVM IR
   /// constants describe an address but not Go's weak-address variants.
   DenseMap<const MCSymbol *, std::vector<GoObjRelocOverride>>
@@ -703,6 +706,17 @@ public:
     auto It = GoObjSymbolFlags.find(Sym);
     if (It == GoObjSymbolFlags.end())
       return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjSymbolContentHash(const MCSymbol *Sym, std::string Hash) {
+    GoObjSymbolContentHashes[Sym] = std::move(Hash);
+  }
+
+  StringRef getGoObjSymbolContentHash(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolContentHashes.find(Sym);
+    if (It == GoObjSymbolContentHashes.end())
+      return {};
     return It->second;
   }
 
