@@ -2277,11 +2277,12 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
   } else if (I.getNumOperands() != 0) {
     const Function *F = I.getParent()->getParent();
     CallingConv::ID CC = F->getCallingConv();
+    const bool IsGoCallingConv = goabi::isGoCallingConv(CC);
     bool GoTupleResults =
-        goabi::isGoCallingConv(CC) && goabi::hasTupleResultsAttr(*F);
+        IsGoCallingConv && goabi::hasTupleResultsAttr(*F);
 
     SmallVector<Type *, 4> TopLevelRetTys;
-    if (goabi::isGoCallingConv(CC))
+    if (IsGoCallingConv)
       goabi::getReturnTypes(I.getOperand(0)->getType(), GoTupleResults,
                             TopLevelRetTys);
     else
@@ -2290,6 +2291,7 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
     SmallVector<Type *, 4> Types;
     SmallVector<TypeSize, 4> Offsets;
     SmallVector<unsigned, 4> ResultIndices;
+    SmallBitVector PaddingPieces;
     for (unsigned ResultIndex = 0; ResultIndex != TopLevelRetTys.size();
          ++ResultIndex) {
       SmallVector<Type *, 4> ResultValueTys;
@@ -2299,13 +2301,21 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
       Types.append(ResultValueTys.begin(), ResultValueTys.end());
       Offsets.append(ResultOffsets.begin(), ResultOffsets.end());
       ResultIndices.append(ResultValueTys.size(), ResultIndex);
+      if (IsGoCallingConv) {
+        SmallBitVector ResultPadding =
+            goabi::getPaddingPieces(TopLevelRetTys[ResultIndex]);
+        assert(ResultPadding.size() == ResultValueTys.size() &&
+               "Go return type decomposition mismatch");
+        for (unsigned I = 0; I != ResultPadding.size(); ++I)
+          PaddingPieces.push_back(ResultPadding.test(I));
+      }
     }
 
     unsigned NumValues = Types.size();
     if (NumValues) {
       SDValue RetOp = getValue(I.getOperand(0));
       bool NeedsRegBlock =
-          !goabi::isGoCallingConv(CC) &&
+          !IsGoCallingConv &&
           TLI.functionArgumentNeedsConsecutiveRegisters(
               I.getOperand(0)->getType(), CC,
               /*IsVarArg*/ false, DL);
@@ -2320,16 +2330,18 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
       bool RetInReg = F->getAttributes().hasRetAttr(Attribute::InReg);
 
       for (unsigned j = 0; j != NumValues; ++j) {
+        if (IsGoCallingConv && PaddingPieces.test(j))
+          continue;
         EVT VT = TLI.getValueType(DL, Types[j]);
 
         if (ExtendKind != ISD::ANY_EXTEND && VT.isInteger())
           VT = TLI.getTypeForExtReturn(Context, VT, ExtendKind);
 
-        unsigned NumParts = goabi::isGoCallingConv(CC)
+        unsigned NumParts = IsGoCallingConv
                                 ? TLI.getNumRegisters(Context, VT)
                                 : TLI.getNumRegistersForCallingConv(Context, CC,
                                                                     VT);
-        MVT PartVT = goabi::isGoCallingConv(CC)
+        MVT PartVT = IsGoCallingConv
                          ? TLI.getRegisterType(Context, VT)
                          : TLI.getRegisterTypeForCallingConv(Context, CC, VT);
         SmallVector<SDValue, 4> Parts(NumParts);
@@ -2366,10 +2378,8 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
           Outs.push_back(ISD::OutputArg(Flags,
                                         Parts[i].getValueType().getSimpleVT(),
                                         VT, Types[j],
-                                        goabi::isGoCallingConv(CC)
-                                            ? ResultIndices[j]
-                                            : 0,
-                                        goabi::isGoCallingConv(CC)
+                                        IsGoCallingConv ? ResultIndices[j] : 0,
+                                        IsGoCallingConv
                                             ? Offsets[j].getFixedValue() +
                                                   i * PartVT.getStoreSize()
                                                           .getKnownMinValue()
@@ -11493,6 +11503,7 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
   SmallVector<Type *, 4> RetOrigTys;
   SmallVector<TypeSize, 4> Offsets;
   SmallVector<unsigned, 4> ResultIndices;
+  SmallBitVector RetPaddingPieces;
   for (unsigned ResultIndex = 0; ResultIndex != TopLevelRetTys.size();
        ++ResultIndex) {
     SmallVector<Type *, 4> ResultValueTys;
@@ -11502,6 +11513,14 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
     RetOrigTys.append(ResultValueTys.begin(), ResultValueTys.end());
     Offsets.append(ResultOffsets.begin(), ResultOffsets.end());
     ResultIndices.append(ResultValueTys.size(), ResultIndex);
+    if (IsGoCallingConv) {
+      SmallBitVector ResultPadding =
+          goabi::getPaddingPieces(TopLevelRetTys[ResultIndex]);
+      assert(ResultPadding.size() == ResultValueTys.size() &&
+             "Go return type decomposition mismatch");
+      for (unsigned I = 0; I != ResultPadding.size(); ++I)
+        RetPaddingPieces.push_back(ResultPadding.test(I));
+    }
   }
 
   SmallVector<EVT, 4> RetVTs;
@@ -11575,6 +11594,8 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
         functionArgumentNeedsConsecutiveRegisters(CLI.RetTy, CLI.CallConv,
                                                   CLI.IsVarArg, DL);
     for (unsigned I = 0, E = RetVTs.size(); I != E; ++I) {
+      if (IsGoCallingConv && RetPaddingPieces.test(I))
+        continue;
       ISD::ArgFlagsTy Flags;
       if (NeedsRegBlock) {
         Flags.setInConsecutiveRegs();
@@ -11640,6 +11661,12 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
     SmallVector<TypeSize, 4> OrigArgOffsets;
     ComputeValueTypes(DL, Args[i].OrigTy, OrigArgTys,
                       IsGoCallingConv ? &OrigArgOffsets : nullptr);
+    SmallBitVector ArgPaddingPieces;
+    if (IsGoCallingConv) {
+      ArgPaddingPieces = goabi::getPaddingPieces(Args[i].OrigTy);
+      assert(ArgPaddingPieces.size() == OrigArgTys.size() &&
+             "Go argument type decomposition mismatch");
+    }
     // FIXME: Split arguments if CLI.IsPostTypeLegalization
     Type *FinalType = Args[i].Ty;
     if (Args[i].IsByVal)
@@ -11649,6 +11676,8 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
     for (unsigned Value = 0, NumValues = OrigArgTys.size(); Value != NumValues;
          ++Value) {
       Type *OrigArgTy = OrigArgTys[Value];
+      if (IsGoCallingConv && ArgPaddingPieces.test(Value))
+        continue;
       Type *ArgTy = OrigArgTy;
       if (Args[i].Ty != Args[i].OrigTy) {
         assert(Value == 0 && "Only supported for non-aggregate arguments");
@@ -11878,7 +11907,11 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
     else if (CLI.RetZExt)
       AssertOp = ISD::AssertZext;
     unsigned CurReg = 0;
-    for (EVT VT : RetVTs) {
+    for (auto [Index, VT] : llvm::enumerate(RetVTs)) {
+      if (IsGoCallingConv && RetPaddingPieces.test(Index)) {
+        ReturnValues.push_back(CLI.DAG.getUNDEF(VT));
+        continue;
+      }
       MVT RegisterVT = getRegisterTypeForCallingConv(Context, CLI.CallConv, VT);
       unsigned NumRegs =
           getNumRegistersForCallingConv(Context, CLI.CallConv, VT);
@@ -12058,6 +12091,8 @@ findArgumentCopyElisionCandidates(const DataLayout &DL,
     const auto *Arg = dyn_cast<Argument>(Val);
     std::optional<TypeSize> AllocaSize = AI->getAllocationSize(DL);
     if (!Arg || Arg->hasPassPointeeByValueCopyAttr() ||
+        (goabi::isGoCallingConv(FuncInfo->Fn->getCallingConv()) &&
+         goabi::getPaddingPieces(Arg->getType()).any()) ||
         Arg->getType()->isEmptyTy() || !AllocaSize ||
         DL.getTypeStoreSize(Arg->getType()) != *AllocaSize ||
         !DL.typeSizeEqualsStoreSize(Arg->getType()) ||
@@ -12188,6 +12223,12 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
     bool IsGoCallingConv = goabi::isGoCallingConv(F.getCallingConv());
     ComputeValueTypes(DAG.getDataLayout(), Arg.getType(), Types,
                       IsGoCallingConv ? &Offsets : nullptr);
+    SmallBitVector PaddingPieces;
+    if (IsGoCallingConv) {
+      PaddingPieces = goabi::getPaddingPieces(Arg.getType());
+      assert(PaddingPieces.size() == Types.size() &&
+             "Go argument type decomposition mismatch");
+    }
     bool isArgValueUsed = !Arg.use_empty();
     Type *FinalType = Arg.getType();
     if (Arg.hasAttribute(Attribute::ByVal))
@@ -12197,6 +12238,8 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
     for (unsigned Value = 0, NumValues = Types.size(); Value != NumValues;
          ++Value) {
       Type *ArgTy = Types[Value];
+      if (IsGoCallingConv && PaddingPieces.test(Value))
+        continue;
       EVT VT = TLI->getValueType(DL, ArgTy);
       ISD::ArgFlagsTy Flags;
 
@@ -12373,19 +12416,27 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
     SmallVector<SDValue, 4> ArgValues;
     SmallVector<EVT, 4> ValueVTs;
     SmallVector<TypeSize, 4> ValueOffsets;
+    SmallBitVector PaddingPieces;
     bool IsGoCallingConv = goabi::isGoCallingConv(F.getCallingConv());
     ComputeValueVTs(*TLI, DAG.getDataLayout(), Arg.getType(), ValueVTs,
                     /*MemVTs=*/nullptr,
                     IsGoCallingConv ? &ValueOffsets : nullptr);
+    if (IsGoCallingConv) {
+      PaddingPieces = goabi::getPaddingPieces(Arg.getType());
+      assert(PaddingPieces.size() == ValueVTs.size() &&
+             "Go argument type decomposition mismatch");
+    }
     unsigned NumValues = ValueVTs.size();
     if (NumValues == 0)
       continue;
 
     bool ArgHasUses = !Arg.use_empty();
+    bool HasLoweredValues =
+        !IsGoCallingConv || PaddingPieces.count() != PaddingPieces.size();
 
     // Elide the copying store if the target loaded this argument from a
     // suitable fixed stack object.
-    if (Ins[i].Flags.isCopyElisionCandidate()) {
+    if (HasLoweredValues && Ins[i].Flags.isCopyElisionCandidate()) {
       unsigned NumParts = 0;
       for (EVT VT : ValueVTs)
         NumParts += TLI->getNumRegistersForCallingConv(*CurDAG->getContext(),
@@ -12402,6 +12453,8 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
         TLI->supportSwiftError() &&
         Arg.hasAttribute(Attribute::SwiftError);
     if (!ArgHasUses && !isSwiftErrorArg) {
+      if (!HasLoweredValues)
+        continue;
       SDB->setUnusedArgValue(&Arg, InVals[i]);
 
       // Also remember any frame index for use in FastISel.
@@ -12412,6 +12465,11 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
 
     for (unsigned Val = 0; Val != NumValues; ++Val) {
       EVT VT = ValueVTs[Val];
+      if (IsGoCallingConv && PaddingPieces.test(Val)) {
+        if (ArgHasUses || isSwiftErrorArg)
+          ArgValues.push_back(DAG.getUNDEF(VT));
+        continue;
+      }
       MVT PartVT = TLI->getRegisterTypeForCallingConv(*CurDAG->getContext(),
                                                       F.getCallingConv(), VT);
       unsigned NumParts = TLI->getNumRegistersForCallingConv(

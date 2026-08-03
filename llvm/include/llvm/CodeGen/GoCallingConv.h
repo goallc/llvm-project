@@ -10,6 +10,7 @@
 #define LLVM_CODEGEN_GOCALLINGCONV_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/BinaryFormat/GoObj.h"
@@ -28,6 +29,7 @@ class Type;
 namespace goabi {
 
 inline constexpr StringLiteral TupleResultsAttr = "go_results_tuple";
+inline constexpr StringLiteral PadTypeName = "go.abi.pad";
 // The Go statepoint pass uses this attribute to request that target frame
 // lowering represent the late morestack call with a root-free STATEPOINT.
 inline constexpr StringLiteral StackGrowthStatepointAttr =
@@ -91,6 +93,8 @@ struct EntryArgsInfo {
 bool hasTupleResultsAttr(const AttributeList &Attrs);
 bool hasTupleResultsAttr(const Function &F);
 bool hasTupleResultsAttr(const CallBase &CB);
+// Mirrors ComputeValueTypes and marks leaves originating in %go.abi.pad.
+SmallBitVector getPaddingPieces(Type *Ty);
 
 void getReturnTypes(Type *ReturnType, bool TupleResults,
                     SmallVectorImpl<Type *> &ResultTys);
