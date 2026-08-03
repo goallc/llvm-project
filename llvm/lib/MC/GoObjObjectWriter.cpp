@@ -11,6 +11,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/BinaryFormat/GoObj.h"
 #include "llvm/MC/MCAsmBackend.h"
@@ -63,6 +64,7 @@ struct GoObjSymbol {
     int64_t Addend = 0;
     uint32_t PkgIdx = GoObj::PkgIdxInvalid;
     uint32_t SymIdx = 0;
+    std::optional<uint32_t> TargetSymbolIndex;
   };
 
   struct Auxiliary {
@@ -295,10 +297,23 @@ SmallString<0> makeStackMap(uint32_t NBits,
 }
 
 struct GoObjStatepointStackMaps {
+  struct StackObject {
+    int32_t FrameOffset;
+    uint32_t ByteSize;
+    uint32_t PointerBytes;
+    SmallVector<uint8_t, 8> Bitmap;
+
+    bool operator==(const StackObject &Other) const {
+      return FrameOffset == Other.FrameOffset && ByteSize == Other.ByteSize &&
+             PointerBytes == Other.PointerBytes && Bitmap == Other.Bitmap;
+    }
+  };
+
   SmallString<0> Args;
   SmallString<0> Locals;
   SmallString<0> PCData;
   SmallVector<uint32_t, 4> IndirectCallOffsets;
+  SmallVector<StackObject, 4> StackObjects;
 };
 
 struct GoObjGCFrameLayout {
@@ -319,8 +334,7 @@ GoObjGCFrameLayout getGoObjGCFrameLayout(const Triple &TT, uint32_t StackSize,
   if (TT.getArch() == Triple::x86_64) {
     if (StackSize == 0)
       return {0, 0, 0, 0, PointerSize};
-    if (!PointerSize || StackSize < PointerSize ||
-        StackSize % PointerSize != 0)
+    if (!PointerSize || StackSize < PointerSize || StackSize % PointerSize != 0)
       report_fatal_error("X86 GoObj frame has invalid GC layout");
 
     if (HasFramePointer) {
@@ -349,8 +363,8 @@ GoObjGCFrameLayout getGoObjGCFrameLayout(const Triple &TT, uint32_t StackSize,
   // next callee. _func.locals is frame.varp-SP, so it excludes LR from the
   // physical frame size. Locals pointer maps exclude both reserved words and
   // therefore describe [SP+PointerSize, frame.varp).
-  return {StackSize - PointerSize, PointerSize, StackSize - 2 * PointerSize,
-          0, PointerSize};
+  return {StackSize - PointerSize, PointerSize, StackSize - 2 * PointerSize, 0,
+          PointerSize};
 }
 
 struct GoObjStackMapPair {
@@ -363,6 +377,12 @@ struct GoObjStackMapPair {
 };
 
 struct GoObjAllocaPtrMapRecord {
+  enum class Kind {
+    LocalsOnly,
+    StackObject,
+  };
+
+  Kind RecordKind;
   MCContext::GoObjStackMapLocation Base;
   uint64_t ByteOffset;
   uint64_t ByteSize;
@@ -372,8 +392,9 @@ struct GoObjAllocaPtrMapRecord {
   SmallVector<uint64_t, 4> BitmapWords;
 };
 
-int64_t getAllocaPtrMapConstant(
-    const MCContext::GoObjStackMapLocation &Location, StringRef Description) {
+int64_t
+getAllocaPtrMapConstant(const MCContext::GoObjStackMapLocation &Location,
+                        StringRef Description) {
   if (Location.Type != MCContext::GoObjStackMapLocation::Constant)
     report_fatal_error("GoObj alloca ptrmap " + Description +
                        " is not a constant");
@@ -384,8 +405,7 @@ uint64_t getNonnegativeAllocaPtrMapConstant(
     const MCContext::GoObjStackMapLocation &Location, StringRef Description) {
   int64_t Value = getAllocaPtrMapConstant(Location, Description);
   if (Value < 0)
-    report_fatal_error("GoObj alloca ptrmap " + Description +
-                       " is negative");
+    report_fatal_error("GoObj alloca ptrmap " + Description + " is negative");
   return static_cast<uint64_t>(Value);
 }
 
@@ -407,8 +427,7 @@ parseAllocaPtrMapRecords(const MCContext::GoObjStackMapEntry &Entry) {
   if (!HasProtocolMarker)
     return {};
   if (Deopts.size() < 6 ||
-      !IsConstant(Deopts[Deopts.size() - 2],
-                  GoObj::AllocaPtrMapEndMagic))
+      !IsConstant(Deopts[Deopts.size() - 2], GoObj::AllocaPtrMapEndMagic))
     report_fatal_error("GoObj alloca ptrmap protocol is truncated");
 
   uint64_t ProtocolLength = getNonnegativeAllocaPtrMapConstant(
@@ -418,7 +437,7 @@ parseAllocaPtrMapRecords(const MCContext::GoObjStackMapEntry &Entry) {
   size_t ProtocolStart = Deopts.size() - ProtocolLength - 1;
   if (!IsConstant(Deopts[ProtocolStart], GoObj::AllocaPtrMapBeginMagic) ||
       getNonnegativeAllocaPtrMapConstant(Deopts[ProtocolStart + 1],
-                                        "leading protocol length") !=
+                                         "leading protocol length") !=
           ProtocolLength ||
       !IsConstant(Deopts[ProtocolStart + ProtocolLength - 1],
                   GoObj::AllocaPtrMapEndMagic))
@@ -433,28 +452,35 @@ parseAllocaPtrMapRecords(const MCContext::GoObjStackMapEntry &Entry) {
   SmallVector<GoObjAllocaPtrMapRecord, 4> Records;
   Records.reserve(static_cast<size_t>(RecordCount));
   for (uint64_t RecordIndex = 0; RecordIndex != RecordCount; ++RecordIndex) {
-    if (Cursor > RecordsEnd || RecordsEnd - Cursor < 10 ||
-        !IsConstant(Deopts[Cursor], GoObj::AllocaPtrMapRecordTag))
+    if (Cursor > RecordsEnd || RecordsEnd - Cursor < 10)
       report_fatal_error("GoObj alloca ptrmap record header is malformed");
-    uint64_t RecordLength = getNonnegativeAllocaPtrMapConstant(
-        Deopts[Cursor + 1], "record length");
+    GoObjAllocaPtrMapRecord::Kind RecordKind;
+    if (IsConstant(Deopts[Cursor], GoObj::AllocaPtrMapLocalsRecordTag))
+      RecordKind = GoObjAllocaPtrMapRecord::Kind::LocalsOnly;
+    else if (IsConstant(Deopts[Cursor],
+                        GoObj::AllocaPtrMapStackObjectRecordTag))
+      RecordKind = GoObjAllocaPtrMapRecord::Kind::StackObject;
+    else
+      report_fatal_error("GoObj alloca ptrmap record kind is invalid");
+    uint64_t RecordLength =
+        getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 1], "record length");
     uint64_t WordCount = getNonnegativeAllocaPtrMapConstant(
         Deopts[Cursor + 9], "bitmap word count");
     if (WordCount > RecordsEnd - Cursor - 10 ||
-        RecordLength != 10 + WordCount ||
-        RecordLength > RecordsEnd - Cursor)
+        RecordLength != 10 + WordCount || RecordLength > RecordsEnd - Cursor)
       report_fatal_error("GoObj alloca ptrmap record length is invalid");
 
     const auto &Base = Deopts[Cursor + 2];
     if (Base.Type != MCContext::GoObjStackMapLocation::Direct)
       report_fatal_error(
           "GoObj alloca ptrmap base is not a direct frame location");
-    uint64_t WordBits = getNonnegativeAllocaPtrMapConstant(
-        Deopts[Cursor + 8], "bitmap word width");
+    uint64_t WordBits = getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 8],
+                                                           "bitmap word width");
     if (WordBits != GoObj::AllocaPtrMapBitmapWordBits)
       report_fatal_error("GoObj alloca ptrmap bitmap word width is invalid");
 
     GoObjAllocaPtrMapRecord Record{
+        RecordKind,
         Base,
         getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 3], "byte offset"),
         getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 4], "byte size"),
@@ -465,8 +491,7 @@ parseAllocaPtrMapRecords(const MCContext::GoObjStackMapEntry &Entry) {
     Record.BitmapWords.reserve(WordCount);
     for (uint64_t Word = 0; Word != WordCount; ++Word)
       Record.BitmapWords.push_back(static_cast<uint64_t>(
-          getAllocaPtrMapConstant(Deopts[Cursor + 10 + Word],
-                                  "bitmap word")));
+          getAllocaPtrMapConstant(Deopts[Cursor + 10 + Word], "bitmap word")));
     Records.push_back(std::move(Record));
     Cursor += RecordLength;
   }
@@ -537,6 +562,8 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   size_t ArgsBytesPerBitmap = divideCeil(ArgsNBits, 8u);
   uint64_t OrdinaryArgsStart =
       static_cast<uint64_t>(StackSize) + FrameLayout.EntryArgsStart;
+  SmallVector<GoObjStatepointStackMaps::StackObject, 4> FunctionStackObjects;
+  bool HaveFunctionStackObjects = false;
 
   auto BuildPair = [&](const MCContext::GoObjStackMapEntry &Entry) {
     bool IsStackGrowth = Entry.ID == GoObj::StackGrowthStatepointID;
@@ -544,6 +571,7 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
                            SmallVector<uint8_t, 8>(LocalsBytesPerBitmap, 0)};
     SmallVector<std::pair<int64_t, int64_t>, 4> AllocaRanges;
     DenseSet<uint32_t> AllocaPointerBits;
+    SmallVector<GoObjStatepointStackMaps::StackObject, 4> EntryStackObjects;
     for (const GoObjAllocaPtrMapRecord &Record :
          parseAllocaPtrMapRecords(Entry)) {
       if (IsStackGrowth)
@@ -561,8 +589,8 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
           Record.BitCount != Record.ByteSize / PointerSize ||
           Record.BitmapWords.size() != divideCeil(Record.BitCount, 64u))
         report_fatal_error("GoObj alloca ptrmap layout is inconsistent");
-      if (Record.Alignment < PointerSize ||
-          !isPowerOf2_64(Record.Alignment) || Record.Base.Offset < 0 ||
+      if (Record.Alignment < PointerSize || !isPowerOf2_64(Record.Alignment) ||
+          Record.Base.Offset < 0 ||
           static_cast<uint64_t>(Record.Base.Offset) % Record.Alignment != 0)
         report_fatal_error("GoObj alloca ptrmap alignment is invalid");
       if (Record.ByteSize >
@@ -582,11 +610,11 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
       AllocaRanges.push_back({RangeStart, RangeEnd});
 
       uint64_t PaddingBits = Record.BitmapWords.size() * 64 - Record.BitCount;
-      if (PaddingBits &&
-          (Record.BitmapWords.back() >> (64 - PaddingBits)) != 0)
+      if (PaddingBits && (Record.BitmapWords.back() >> (64 - PaddingBits)) != 0)
         report_fatal_error(
             "GoObj alloca ptrmap bitmap padding bits are nonzero");
       bool HasPointer = false;
+      uint64_t HighestPointerBit = 0;
       for (uint64_t Bit = 0; Bit != Record.BitCount; ++Bit) {
         int64_t SlotOffset =
             RangeStart + static_cast<int64_t>(Bit * PointerSize);
@@ -597,10 +625,10 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
         if (Slot.Kind != goobj::StackMapSlotKind::Locals)
           report_fatal_error(
               "GoObj alloca ptrmap range is not entirely in locals");
-        if ((Record.BitmapWords[Bit / 64] & (uint64_t(1) << (Bit % 64))) ==
-            0)
+        if ((Record.BitmapWords[Bit / 64] & (uint64_t(1) << (Bit % 64))) == 0)
           continue;
         HasPointer = true;
+        HighestPointerBit = Bit;
         if (!AllocaPointerBits.insert(Slot.Bit).second)
           report_fatal_error(
               "GoObj alloca ptrmap contains a duplicate pointer slot");
@@ -608,6 +636,47 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
       }
       if (!HasPointer)
         report_fatal_error("GoObj alloca ptrmap contains no pointer slots");
+
+      if (Record.RecordKind == GoObjAllocaPtrMapRecord::Kind::LocalsOnly)
+        continue;
+
+      int64_t FrameOffset =
+          RangeStart - static_cast<int64_t>(FrameLayout.FuncInfoLocalsSize);
+      if (FrameOffset >= 0 ||
+          FrameOffset < std::numeric_limits<int32_t>::min() ||
+          Record.ByteSize >
+              static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+        report_fatal_error(
+            "GoObj stack object cannot be represented relative to varp");
+      uint64_t PointerBytes = (HighestPointerBit + 1) * PointerSize;
+      if (PointerBytes > Record.ByteSize ||
+          PointerBytes >
+              static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+        report_fatal_error("GoObj stack object pointer bytes are invalid");
+      size_t BitmapBytes = divideCeil(PointerBytes / PointerSize, 8u);
+      size_t PaddedBitmapBytes = alignTo(BitmapBytes, PointerSize);
+      SmallVector<uint8_t, 8> Bitmap(PaddedBitmapBytes, 0);
+      for (uint64_t Bit = 0; Bit <= HighestPointerBit; ++Bit)
+        if (Record.BitmapWords[Bit / 64] & (uint64_t(1) << (Bit % 64)))
+          Bitmap[Bit / 8] |= uint8_t(1u << (Bit % 8));
+      EntryStackObjects.push_back(
+          {static_cast<int32_t>(FrameOffset),
+           checkedUint32(Record.ByteSize, "GoObj stack object size"),
+           checkedUint32(PointerBytes, "GoObj stack object pointer bytes"),
+           std::move(Bitmap)});
+    }
+
+    llvm::sort(EntryStackObjects, [](const auto &LHS, const auto &RHS) {
+      return LHS.FrameOffset < RHS.FrameOffset;
+    });
+    if (!IsStackGrowth) {
+      if (!HaveFunctionStackObjects) {
+        FunctionStackObjects = EntryStackObjects;
+        HaveFunctionStackObjects = true;
+      } else if (FunctionStackObjects != EntryStackObjects) {
+        report_fatal_error(
+            "GoObj alloca ptrmaps change between function statepoints");
+      }
     }
 
     if (Entry.NumDeoptLocations > Entry.Locations.size())
@@ -759,6 +828,7 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   Result.PCData =
       makePCTab(-1, NormalizedPCDataEntries, Function.Size, PCQuantum);
   Result.IndirectCallOffsets = std::move(IndirectCallOffsets);
+  Result.StackObjects = std::move(FunctionStackObjects);
   return Result;
 }
 
@@ -843,6 +913,59 @@ std::array<uint8_t, GoObj::HashSize> makeGoObjContentHash(char SectionMarker,
   return Hash;
 }
 
+std::array<uint8_t, GoObj::HashSize>
+makeGoObjContentHash(const GoObjSymbol &Symbol, ArrayRef<GoObjSymbol> Symbols) {
+  SHA256 Hasher;
+  const char Version = 1;
+  Hasher.update(StringRef(&Version, 1));
+
+  SmallString<16> Encoded;
+  raw_svector_ostream OS(Encoded);
+  support::endian::Writer W(OS, llvm::endianness::little);
+  W.write<uint64_t>(Symbol.Size);
+  W.write<uint8_t>('F');
+  Hasher.update(StringRef(Encoded.data(), Encoded.size()));
+  ArrayRef<char> Data(Symbol.Data);
+  while (!Data.empty() && Data.back() == 0)
+    Data = Data.drop_back();
+  if (!Data.empty())
+    Hasher.update(StringRef(Data.data(), Data.size()));
+
+  for (const GoObjSymbol::Relocation &Reloc : Symbol.Relocations) {
+    Encoded.clear();
+    W.write<uint32_t>(Reloc.Offset);
+    W.write<uint8_t>(Reloc.Size);
+    W.write<uint8_t>(checkedUint16(Reloc.Type, "content hash relocation type"));
+    W.write<uint64_t>(static_cast<uint64_t>(Reloc.Addend));
+    Hasher.update(StringRef(Encoded.data(), Encoded.size()));
+    if (!Reloc.TargetSymbolIndex || *Reloc.TargetSymbolIndex >= Symbols.size())
+      report_fatal_error(
+          "GoObj synthetic hashed relocation has no local target");
+    const GoObjSymbol &Target = Symbols[*Reloc.TargetSymbolIndex];
+    if (Target.DefinedBlock == GoObj::DefinedSymbolBlock::Hashed64def) {
+      if (Target.Data.size() != GoObj::Hash64Size)
+        report_fatal_error("GoObj short-hashed target has invalid size");
+      const char Kind = 0;
+      Hasher.update(StringRef(&Kind, 1));
+      Hasher.update(StringRef(Target.Data.data(), Target.Data.size()));
+    } else if (Target.DefinedBlock == GoObj::DefinedSymbolBlock::Hasheddef) {
+      if (!Target.ContentHash)
+        report_fatal_error("GoObj hashed target has no content hash");
+      const char Kind = 1;
+      Hasher.update(StringRef(&Kind, 1));
+      Hasher.update(ArrayRef<uint8_t>(*Target.ContentHash));
+    } else {
+      report_fatal_error(
+          "GoObj synthetic hashed relocation target is not content-addressed");
+    }
+  }
+
+  std::array<uint8_t, 32> FullHash = Hasher.final();
+  std::array<uint8_t, GoObj::HashSize> Hash;
+  std::copy_n(FullHash.begin(), Hash.size(), Hash.begin());
+  return Hash;
+}
+
 uint32_t getOrAddHashedAuxCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
                                         StringMap<uint32_t> &CarrierIndexes,
                                         char SectionMarker,
@@ -867,6 +990,84 @@ uint32_t getOrAddHashedAuxCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
   uint32_t Index = checkedUint32(Symbols.size(), "symbol count");
   Symbols.push_back(std::move(Sym));
   CarrierIndexes.insert({Key, Index});
+  return Index;
+}
+
+uint32_t getOrAddGCBitmapCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
+                                       StringMap<uint32_t> &CarrierIndexes,
+                                       uint32_t PointerSize,
+                                       ArrayRef<uint8_t> Bitmap) {
+  if (Bitmap.empty() || Bitmap.size() % PointerSize != 0)
+    report_fatal_error("GoObj stack-object GC bitmap has invalid size");
+  StringRef Bytes(reinterpret_cast<const char *>(Bitmap.data()), Bitmap.size());
+  std::string Key = (Twine(PointerSize) + ":" + Bytes).str();
+  auto It = CarrierIndexes.find(Key);
+  if (It != CarrierIndexes.end())
+    return It->second;
+
+  GoObjSymbol Sym;
+  Sym.DefinedBlock = Bitmap.size() == GoObj::Hash64Size
+                         ? GoObj::DefinedSymbolBlock::Hashed64def
+                         : GoObj::DefinedSymbolBlock::Hasheddef;
+  // Match cmd/compile's reflectdata.GCSym identity. Besides making object
+  // inspection useful, the Go linker uses the runtime.gcbits prefix to group
+  // these content-addressed symbols into its dedicated GC-bitmap section.
+  Sym.Name = "runtime.gcbits." + toHex(Bitmap, /*LowerCase=*/true);
+  Sym.ABI = GoObj::SymABI0;
+  Sym.Type = GoObj::SRODATA;
+  Sym.Flag = GoObj::SymFlagDupok | GoObj::SymFlagLocal;
+  Sym.Align = PointerSize;
+  Sym.Size = Bitmap.size();
+  Sym.Data.append(Bytes.begin(), Bytes.end());
+  if (Sym.DefinedBlock == GoObj::DefinedSymbolBlock::Hasheddef)
+    Sym.ContentHash = makeGoObjContentHash(0, Sym.Data);
+  uint32_t Index = checkedUint32(Symbols.size(), "symbol count");
+  Symbols.push_back(std::move(Sym));
+  CarrierIndexes.insert({Key, Index});
+  return Index;
+}
+
+uint32_t addStackObjectCarrierSymbol(
+    std::vector<GoObjSymbol> &Symbols, StringMap<uint32_t> &BitmapIndexes,
+    uint32_t PointerSize,
+    ArrayRef<GoObjStatepointStackMaps::StackObject> StackObjects) {
+  if (StackObjects.empty())
+    report_fatal_error("cannot emit an empty GoObj stack-object carrier");
+  if (PointerSize != 4 && PointerSize != 8)
+    report_fatal_error("unsupported GoObj stack-object pointer size");
+
+  GoObjSymbol Sym;
+  Sym.DefinedBlock = GoObj::DefinedSymbolBlock::Hasheddef;
+  Sym.ABI = GoObj::SymABIstatic;
+  Sym.Type = GoObj::SRODATA;
+  Sym.Align = 4;
+  raw_svector_ostream OS(Sym.Data);
+  support::endian::Writer W(OS, llvm::endianness::little);
+  if (PointerSize == 8)
+    W.write<uint64_t>(StackObjects.size());
+  else
+    W.write<uint32_t>(
+        checkedUint32(StackObjects.size(), "GoObj stack-object count"));
+  for (const GoObjStatepointStackMaps::StackObject &Object : StackObjects) {
+    W.write<uint32_t>(static_cast<uint32_t>(Object.FrameOffset));
+    W.write<uint32_t>(Object.ByteSize);
+    W.write<uint32_t>(Object.PointerBytes);
+    uint32_t RelocOffset =
+        checkedUint32(Sym.Data.size(), "GoObj stack-object relocation");
+    W.write<uint32_t>(0);
+    uint32_t BitmapIndex = getOrAddGCBitmapCarrierSymbol(
+        Symbols, BitmapIndexes, PointerSize, Object.Bitmap);
+    GoObjSymbol::Relocation Reloc;
+    Reloc.Offset = RelocOffset;
+    Reloc.Size = 4;
+    Reloc.Type = GoObj::R_ADDROFF;
+    Reloc.TargetSymbolIndex = BitmapIndex;
+    Sym.Relocations.push_back(Reloc);
+  }
+  Sym.Size = Sym.Data.size();
+  Sym.ContentHash = makeGoObjContentHash(Sym, Symbols);
+  uint32_t Index = checkedUint32(Symbols.size(), "symbol count");
+  Symbols.push_back(std::move(Sym));
   return Index;
 }
 
@@ -1127,8 +1328,7 @@ uint64_t GoObjObjectWriter::writeObject() {
           Flag = Flags->first;
           Flag2 = Flags->second;
         }
-        Align =
-            Asm->getContext().getGoObjSymbolAlignment(MCSym).value_or(0);
+        Align = Asm->getContext().getGoObjSymbolAlignment(MCSym).value_or(0);
       }
       addDefinedSymbol(Symbols, MCSym, &Section, Begin, End,
                        Config.DefaultDefinedSymbolBlock, Name, Type, Flag,
@@ -1218,6 +1418,7 @@ uint64_t GoObjObjectWriter::writeObject() {
   std::vector<std::string> FilePaths;
   StringMap<uint32_t> FileIndexes;
   StringMap<uint32_t> AuxCarrierIndexes;
+  StringMap<uint32_t> GCBitmapCarrierIndexes;
   auto GetFallbackFile = [&]() {
     return getOrAddFileIndex(FileIndexes, FilePaths, "llvm-ir");
   };
@@ -1350,17 +1551,24 @@ uint64_t GoObjObjectWriter::writeObject() {
       SmallString<0> ArgsMap = makeEmptyStackMap();
       SmallString<0> LocalsMap = makeEmptyStackMap();
       SmallString<0> StackMapIndex = makeConstantPCTab(0, CodeSize, PCQuantum);
+      std::optional<uint32_t> StackObjectsSym;
       if (const auto *Entries = Asm->getContext().getGoObjSymbolStackMapEntries(
               Symbols[I].Symbol)) {
         if (!Entries->empty()) {
           GoObjStatepointStackMaps Maps = makeStatepointStackMaps(
               *Asm, Symbols[I], StackSize, ArgSize, PCQuantum, *Entries);
           for (uint32_t Offset : Maps.IndirectCallOffsets)
-            Symbols[I].Relocations.push_back(
-                {Offset, 0, GoObj::R_CALLIND, 0, GoObj::PkgIdxInvalid, 0});
+            Symbols[I].Relocations.push_back({Offset, 0, GoObj::R_CALLIND, 0,
+                                              GoObj::PkgIdxInvalid, 0,
+                                              std::nullopt});
           ArgsMap = std::move(Maps.Args);
           LocalsMap = std::move(Maps.Locals);
           StackMapIndex = std::move(Maps.PCData);
+          if (!Maps.StackObjects.empty())
+            StackObjectsSym = addStackObjectCarrierSymbol(
+                Symbols, GCBitmapCarrierIndexes,
+                Asm->getContext().getAsmInfo().getCodePointerSize(),
+                Maps.StackObjects);
         }
       }
       uint32_t ArgsMapSym = getOrAddHashedAuxCarrierSymbol(
@@ -1376,6 +1584,9 @@ uint64_t GoObjObjectWriter::writeObject() {
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncInfo, FuncInfoSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, ArgsMapSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, LocalsMapSym});
+      if (StackObjectsSym)
+        Symbols[I].Auxiliaries.push_back(
+            {GoObj::AuxFuncdata, *StackObjectsSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcsp, PcspSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcfile, PcfileSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcline, PclineSym});
@@ -1437,6 +1648,18 @@ uint64_t GoObjObjectWriter::writeObject() {
   SetDefinedSymRefs(Hashed64defSymbols, GoObj::PkgIdxHashed64);
   SetDefinedSymRefs(HasheddefSymbols, GoObj::PkgIdxHashed);
   SetDefinedSymRefs(NonpkgdefSymbols, GoObj::PkgIdxNone);
+  for (GoObjSymbol &Symbol : Symbols) {
+    for (GoObjSymbol::Relocation &Reloc : Symbol.Relocations) {
+      if (!Reloc.TargetSymbolIndex)
+        continue;
+      if (*Reloc.TargetSymbolIndex >= DefinedSymRefs.size())
+        report_fatal_error(
+            "GoObj synthetic relocation target index is invalid");
+      GoObjSymRef Ref = DefinedSymRefs[*Reloc.TargetSymbolIndex];
+      Reloc.PkgIdx = Ref.PkgIdx;
+      Reloc.SymIdx = Ref.SymIdx;
+    }
+  }
 
   auto FindContainingSymbol = [&](const MCSection *Section,
                                   uint64_t Offset) -> std::optional<uint32_t> {
@@ -1623,9 +1846,9 @@ uint64_t GoObjObjectWriter::writeObject() {
         RelocType |= GoObj::R_WEAK;
     }
 
-    Source.Relocations.push_back({static_cast<uint32_t>(LocalOffset),
-                                  Reloc.Size, RelocType, Addend,
-                                  TargetSymRef.PkgIdx, TargetSymRef.SymIdx});
+    Source.Relocations.push_back(
+        {static_cast<uint32_t>(LocalOffset), Reloc.Size, RelocType, Addend,
+         TargetSymRef.PkgIdx, TargetSymRef.SymIdx, std::nullopt});
   }
 
   // R_KEEP has no bytes or MC fixup. It is a Go linker reachability edge
@@ -1642,15 +1865,15 @@ uint64_t GoObjObjectWriter::writeObject() {
       int64_t Addend = 0;
       GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
       Source.Relocations.push_back({0, 0, GoObj::R_KEEP, Addend,
-                                    TargetSymRef.PkgIdx, TargetSymRef.SymIdx});
+                                    TargetSymRef.PkgIdx, TargetSymRef.SymIdx,
+                                    std::nullopt});
     }
   }
 
   for (GoObjSymbol &Source : Symbols) {
     if (!Source.Symbol)
       continue;
-    const auto *Markers =
-        Asm->getContext().getGoObjMarkerRelocs(Source.Symbol);
+    const auto *Markers = Asm->getContext().getGoObjMarkerRelocs(Source.Symbol);
     if (!Markers)
       continue;
     for (const MCContext::GoObjMarkerReloc &Marker : *Markers) {
@@ -1658,8 +1881,9 @@ uint64_t GoObjObjectWriter::writeObject() {
       Reloc.Symbol = Marker.Target;
       int64_t Addend = Marker.Addend;
       GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
-      Source.Relocations.push_back(
-          {0, 0, Marker.Type, Addend, TargetSymRef.PkgIdx, TargetSymRef.SymIdx});
+      Source.Relocations.push_back({0, 0, Marker.Type, Addend,
+                                    TargetSymRef.PkgIdx, TargetSymRef.SymIdx,
+                                    std::nullopt});
     }
   }
 
@@ -1787,6 +2011,12 @@ uint64_t GoObjObjectWriter::writeObject() {
   }
 
   MarkBlock(GoObj::BlkHash64);
+  for (uint32_t Index : Hashed64defSymbols) {
+    const GoObjSymbol &Symbol = Symbols[Index];
+    if (Symbol.Data.size() != GoObj::Hash64Size)
+      report_fatal_error("GoObj short-hashed definition has invalid data");
+    BodyOS.write(Symbol.Data.data(), Symbol.Data.size());
+  }
   MarkBlock(GoObj::BlkHash);
   for (uint32_t Index : HasheddefSymbols) {
     const GoObjSymbol &Symbol = Symbols[Index];
