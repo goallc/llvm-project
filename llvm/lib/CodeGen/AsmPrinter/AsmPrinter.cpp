@@ -859,24 +859,26 @@ MCSymbol *AsmPrinter::getSymbolPreferLocal(const GlobalValue &GV) const {
 }
 
 static std::optional<std::pair<uint8_t, uint8_t>>
-getGoObjSymbolFlags(const GlobalVariable *GV) {
+getGoObjSymbolFlags(const GlobalObject *GO) {
   uint8_t Flag = 0;
   uint8_t Flag2 = 0;
 
-  if (GV->hasLocalLinkage())
+  if (GO->hasLocalLinkage())
     Flag |= GoObj::SymFlagLocal;
-  else if (GV->isWeakForLinker())
+  else if (GO->isWeakForLinker())
     Flag |= GoObj::SymFlagDupok;
 
-  if (const auto *ST = dyn_cast<StructType>(GV->getValueType());
-      ST && ST->hasName()) {
-    if (ST->getName().starts_with("go.descriptor."))
-      Flag |= GoObj::SymFlagGoType;
-    if (ST->getName().starts_with("go.itab."))
-      Flag2 |= GoObj::SymFlagItab;
+  if (const auto *GV = dyn_cast<GlobalVariable>(GO)) {
+    if (const auto *ST = dyn_cast<StructType>(GV->getValueType());
+        ST && ST->hasName()) {
+      if (ST->getName().starts_with("go.descriptor."))
+        Flag |= GoObj::SymFlagGoType;
+      if (ST->getName().starts_with("go.itab."))
+        Flag2 |= GoObj::SymFlagItab;
+    }
   }
 
-  if (const MDNode *MD = GV->getMetadata("goobj.symbol.flags")) {
+  if (const MDNode *MD = GO->getMetadata("goobj.symbol.flags")) {
     if (MD->getNumOperands() != 2)
       report_fatal_error("expected !goobj.symbol.flags to have two operands");
 
@@ -3663,6 +3665,10 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
   }
 
   if (TM.getTargetTriple().isOSBinFormatGoObj()) {
+    if (std::optional<std::pair<uint8_t, uint8_t>> Flags =
+            getGoObjSymbolFlags(&F))
+      OutContext.setGoObjSymbolFlags(CurrentFnSym, Flags->first,
+                                     Flags->second);
     if (goabi::isGoABIInternalCallingConv(F.getCallingConv()))
       OutContext.setGoObjSymbolABI(CurrentFnSym, GoObj::SymABIInternal);
     else if (goabi::isGoABI0CallingConv(F.getCallingConv()))
