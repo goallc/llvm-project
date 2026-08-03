@@ -17,9 +17,50 @@ using namespace llvm;
 
 namespace llvm::goabi {
 
+static bool isPaddingType(Type *Ty) {
+  auto *ST = dyn_cast<StructType>(Ty);
+  if (!ST || !ST->hasName() || ST->getName() != PadTypeName)
+    return false;
+  if (ST->isOpaque() || ST->getNumElements() != 1 ||
+      !ST->getElementType(0)->isIntegerTy(8))
+    report_fatal_error("invalid Go ABI pad type");
+  return true;
+}
+
+static void collectPaddingPieces(Type *Ty, SmallBitVector &Pieces) {
+  if (isPaddingType(Ty)) {
+    Pieces.push_back(true);
+    return;
+  }
+
+  if (auto *AT = dyn_cast<ArrayType>(Ty)) {
+    for (uint64_t I = 0; I != AT->getNumElements(); ++I)
+      collectPaddingPieces(AT->getElementType(), Pieces);
+    return;
+  }
+
+  if (auto *ST = dyn_cast<StructType>(Ty)) {
+    for (Type *EltTy : ST->elements())
+      collectPaddingPieces(EltTy, Pieces);
+    return;
+  }
+
+  if (!Ty->isVoidTy())
+    Pieces.push_back(false);
+}
+
+SmallBitVector getPaddingPieces(Type *Ty) {
+  SmallBitVector Pieces;
+  collectPaddingPieces(Ty, Pieces);
+  return Pieces;
+}
+
 static bool classifyType(Type *Ty, const DataLayout &DL,
                          const ABIConfig &Config, unsigned &IntRegs,
                          unsigned &FPRegs) {
+  if (isPaddingType(Ty))
+    return true;
+
   if (Ty->isVoidTy())
     return true;
 
@@ -85,6 +126,12 @@ static ValueLayout computeValueLayout(Type *Ty, const DataLayout &DL,
   Layout.Alignment = DL.getABITypeAlign(Ty);
   Layout.IntRegStart = IntReg;
   Layout.FPRegStart = FPReg;
+
+  SmallBitVector PaddingPieces = getPaddingPieces(Ty);
+  if (PaddingPieces.any() && PaddingPieces.count() == PaddingPieces.size()) {
+    Layout.Size = 0;
+    return Layout;
+  }
 
   unsigned IntAfter = IntReg;
   unsigned FPAfter = FPReg;
