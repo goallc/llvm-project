@@ -26,6 +26,30 @@ entry:
   ret i64 %ret
 }
 
+%go.abi.pad = type { i8 }
+%go.empty = type {}
+%go.empty.carrier = type { %go.empty, %go.abi.pad }
+
+define goabiinternal i64 @pad_does_not_use_register(
+    i64 %a, %go.empty.carrier %pad, i64 %b) {
+; X86-LABEL: pad_does_not_use_register:
+; X86: movq %rbx, %rax
+; X86: retq
+entry:
+  ret i64 %b
+}
+
+define goabiinternal { i64, %go.empty.carrier, i64 }
+    @pad_does_not_use_result_register(i64 %a, i64 %b) #0 {
+; X86-LABEL: pad_does_not_use_result_register:
+; X86-NOT: movq %rcx
+; X86: retq
+entry:
+  %r0 = insertvalue { i64, %go.empty.carrier, i64 } poison, i64 %a, 0
+  %r1 = insertvalue { i64, %go.empty.carrier, i64 } %r0, i64 %b, 2
+  ret { i64, %go.empty.carrier, i64 } %r1
+}
+
 define goabi0 i64 @abi0_second_int(i64 %a, i64 %b) {
 ; X86-LABEL: abi0_second_int:
 ; X86: movq 16(%rsp), %rax

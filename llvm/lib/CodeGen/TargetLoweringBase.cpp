@@ -2129,11 +2129,19 @@ void llvm::GetReturnInfo(CallingConv::ID CC, Type *ReturnType,
     SmallVector<TypeSize, 4> Offsets;
     ComputeValueTypes(DL, ResultTys[ResultIndex], Types,
                       IsGoCallingConv ? &Offsets : nullptr);
+    SmallBitVector PaddingPieces;
+    if (IsGoCallingConv) {
+      PaddingPieces = goabi::getPaddingPieces(ResultTys[ResultIndex]);
+      assert(PaddingPieces.size() == Types.size() &&
+             "Go return type decomposition mismatch");
+    }
     if (Types.empty())
       continue;
 
     for (unsigned TypeIndex = 0; TypeIndex != Types.size(); ++TypeIndex) {
       Type *Ty = Types[TypeIndex];
+      if (IsGoCallingConv && PaddingPieces.test(TypeIndex))
+        continue;
       EVT VT = TLI.getValueType(DL, Ty);
       ISD::NodeType ExtendKind = ISD::ANY_EXTEND;
 

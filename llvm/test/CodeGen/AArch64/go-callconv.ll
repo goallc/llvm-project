@@ -28,6 +28,30 @@ entry:
   ret i64 %ret
 }
 
+%go.abi.pad = type { i8 }
+%go.empty = type {}
+%go.empty.carrier = type { %go.empty, %go.abi.pad }
+
+define goabiinternal i64 @pad_does_not_use_register(
+    i64 %a, %go.empty.carrier %pad, i64 %b) {
+; A64-LABEL: pad_does_not_use_register:
+; A64: mov x0, x1
+; A64: ret
+entry:
+  ret i64 %b
+}
+
+define goabiinternal { i64, %go.empty.carrier, i64 }
+    @pad_does_not_use_result_register(i64 %a, i64 %b) #0 {
+; A64-LABEL: pad_does_not_use_result_register:
+; A64-NOT: mov x2
+; A64: ret
+entry:
+  %r0 = insertvalue { i64, %go.empty.carrier, i64 } poison, i64 %a, 0
+  %r1 = insertvalue { i64, %go.empty.carrier, i64 } %r0, i64 %b, 2
+  ret { i64, %go.empty.carrier, i64 } %r1
+}
+
 define goabi0 i64 @abi0_second_int(i64 %a, i64 %b) {
 ; A64-LABEL: abi0_second_int:
 ; Go's arm64 stack ABI reserves 0(SP) for the return PC.
