@@ -92,6 +92,7 @@ struct GoObjSymbol {
   uint32_t Align = 0;
   SmallString<0> Data;
   std::optional<std::array<uint8_t, GoObj::HashSize>> ContentHash;
+  std::optional<std::array<uint8_t, GoObj::Hash64Size>> ContentHash64;
   std::vector<Relocation> Relocations;
   std::vector<Auxiliary> Auxiliaries;
 };
@@ -1333,6 +1334,22 @@ uint64_t GoObjObjectWriter::writeObject() {
       addDefinedSymbol(Symbols, MCSym, &Section, Begin, End,
                        Config.DefaultDefinedSymbolBlock, Name, Type, Flag,
                        Flag2, ABI, Size, Align, Data);
+      if (MCSym) {
+        StringRef Hash = Asm->getContext().getGoObjSymbolContentHash(MCSym);
+        if (Hash.size() == GoObj::Hash64Size) {
+          Symbols.back().DefinedBlock = GoObj::DefinedSymbolBlock::Hashed64def;
+          std::array<uint8_t, GoObj::Hash64Size> Value;
+          std::copy(Hash.bytes_begin(), Hash.bytes_end(), Value.begin());
+          Symbols.back().ContentHash64 = Value;
+        } else if (Hash.size() == GoObj::HashSize) {
+          Symbols.back().DefinedBlock = GoObj::DefinedSymbolBlock::Hasheddef;
+          std::array<uint8_t, GoObj::HashSize> Value;
+          std::copy(Hash.bytes_begin(), Hash.bytes_end(), Value.begin());
+          Symbols.back().ContentHash = Value;
+        } else if (!Hash.empty()) {
+          report_fatal_error("invalid GoObj content-addressable hash size");
+        }
+      }
     };
 
     if (SectionSymbols.empty() && SectionSize != 0) {
@@ -2013,9 +2030,14 @@ uint64_t GoObjObjectWriter::writeObject() {
   MarkBlock(GoObj::BlkHash64);
   for (uint32_t Index : Hashed64defSymbols) {
     const GoObjSymbol &Symbol = Symbols[Index];
-    if (Symbol.Data.size() != GoObj::Hash64Size)
-      report_fatal_error("GoObj short-hashed definition has invalid data");
-    BodyOS.write(Symbol.Data.data(), Symbol.Data.size());
+    if (Symbol.ContentHash64) {
+      BodyOS.write(reinterpret_cast<const char *>(Symbol.ContentHash64->data()),
+                   Symbol.ContentHash64->size());
+    } else {
+      if (Symbol.Data.size() != GoObj::Hash64Size)
+        report_fatal_error("GoObj short-hashed definition has invalid data");
+      BodyOS.write(Symbol.Data.data(), Symbol.Data.size());
+    }
   }
   MarkBlock(GoObj::BlkHash);
   for (uint32_t Index : HasheddefSymbols) {
