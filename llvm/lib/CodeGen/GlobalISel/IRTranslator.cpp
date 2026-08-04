@@ -3133,13 +3133,14 @@ bool IRTranslator::translateCallBr(const User &U,
   MachineBasicBlock *CallBrMBB = &MIRBuilder.getMBB();
 
   Intrinsic::ID IID = I.getIntrinsicID();
+  const bool IsGoDeferEdge = IID == Intrinsic::go_defer_edge;
   if (I.isInlineAsm()) {
     // FIXME: inline asm is not yet supported for callbr in GlobalISel. As soon
     // as we add support, we need to handle the indirect asm targets, see
     // SelectionDAGBuilder::visitCallBr().
     return false;
   }
-  if (!translateIntrinsic(I, IID, MIRBuilder))
+  if (!IsGoDeferEdge && !translateIntrinsic(I, IID, MIRBuilder))
     return false;
 
   // Retrieve successors.

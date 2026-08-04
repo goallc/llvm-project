@@ -257,9 +257,13 @@ def main(path):
             aux_name = AUX_TYPES.get(aux_type, str(aux_type))
             extra = ""
             payload = symbol_data(pkg_index, sym_index)
-            if aux_type == 1 and payload is not None and len(payload) >= 8:
+            if aux_type == 1 and payload is not None and len(payload) >= 10:
                 args, locals_ = struct.unpack_from("<II", payload, 0)
-                extra = f" args={args} locals={locals_}"
+                func_id, func_flag = struct.unpack_from("<BB", payload, 8)
+                extra = (
+                    f" args={args} locals={locals_} funcid={func_id}"
+                    f" funcflag={func_flag}"
+                )
             if aux_type == 2 and payload is not None:
                 extra = f" data={payload.hex()}"
             if aux_type in (7, 8, 9, 10, 11) and payload is not None:
