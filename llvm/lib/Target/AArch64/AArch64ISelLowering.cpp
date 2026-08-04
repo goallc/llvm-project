@@ -8986,6 +8986,31 @@ static MVT getAArch64GoCopyVT(MVT VT) {
   return VT;
 }
 
+// Keep the original ABI piece width in memory even when SelectionDAG legalizes
+// the value to a wider integer type.
+static SDValue loadAArch64GoStackPiece(SelectionDAG &DAG, SDValue Chain,
+                                       const SDLoc &DL, EVT ValueVT, EVT MemVT,
+                                       SDValue Addr,
+                                       MachinePointerInfo PointerInfo) {
+  if (ValueVT == MemVT)
+    return DAG.getLoad(ValueVT, DL, Chain, Addr, PointerInfo);
+  assert(ValueVT.isInteger() && MemVT.isInteger() &&
+         "unexpected widened Go ABI stack piece");
+  return DAG.getExtLoad(ISD::EXTLOAD, DL, ValueVT, Chain, Addr, PointerInfo,
+                        MemVT);
+}
+
+static SDValue storeAArch64GoStackPiece(SelectionDAG &DAG, SDValue Chain,
+                                        const SDLoc &DL, SDValue Value,
+                                        EVT MemVT, SDValue Addr,
+                                        MachinePointerInfo PointerInfo) {
+  if (Value.getValueType() == MemVT)
+    return DAG.getStore(Chain, DL, Value, Addr, PointerInfo);
+  assert(Value.getValueType().isInteger() && MemVT.isInteger() &&
+         "unexpected widened Go ABI stack piece");
+  return DAG.getTruncStore(Chain, DL, Value, Addr, PointerInfo, MemVT);
+}
+
 static bool isAArch64GoFloatPiece(Type *Ty) {
   return goabi::isFloatingPiece(Ty);
 }
@@ -9179,14 +9204,15 @@ static SDValue lowerAArch64GoFormalArguments(
       }
 
       unsigned Size = static_cast<unsigned>(
-          std::max<uint64_t>(1, In.VT.getStoreSize().getKnownMinValue()));
+          std::max<uint64_t>(1, In.ArgVT.getStoreSize().getKnownMinValue()));
       int FI = MFI.CreateFixedObject(
           Size, StackBias + ArgLayout.StackOffset + In.PartOffset,
           /*IsImmutable=*/true);
       RecordPointerSlots(FI, ArgLayout.StackOffset + In.PartOffset, Size);
       SDValue Addr = DAG.getFrameIndex(FI, PtrVT);
-      InVals.push_back(DAG.getLoad(In.VT, DL, Chain, Addr,
-                                   MachinePointerInfo::getFixedStack(MF, FI)));
+      InVals.push_back(
+          loadAArch64GoStackPiece(DAG, Chain, DL, In.VT, In.ArgVT, Addr,
+                                  MachinePointerInfo::getFixedStack(MF, FI)));
     }
   }
 
@@ -9242,14 +9268,15 @@ static SDValue lowerAArch64GoReturn(const AArch64TargetLowering &TLI,
       }
 
       unsigned Size = static_cast<unsigned>(
-          std::max<uint64_t>(1, Out.VT.getStoreSize().getKnownMinValue()));
+          std::max<uint64_t>(1, Out.ArgVT.getStoreSize().getKnownMinValue()));
       int FI = MFI.CreateFixedObject(
           Size, StackBias + ResultLayout.StackOffset + Out.PartOffset,
           /*IsImmutable=*/false);
       SDValue Addr =
           DAG.getFrameIndex(FI, TLI.getPointerTy(DAG.getDataLayout()));
-      MemOps.push_back(DAG.getStore(Chain, DL, Val, Addr,
-                                    MachinePointerInfo::getFixedStack(MF, FI)));
+      MemOps.push_back(
+          storeAArch64GoStackPiece(DAG, Chain, DL, Val, Out.ArgVT, Addr,
+                                   MachinePointerInfo::getFixedStack(MF, FI)));
     }
   }
 
@@ -9351,8 +9378,8 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
           ISD::ADD, DL, PtrVT, StackPtr,
           DAG.getIntPtrConstant(
               StackBias + ArgLayout.StackOffset + Out.PartOffset, DL));
-      MemOpChains.push_back(DAG.getStore(
-          Chain, DL, Arg, Addr,
+      MemOpChains.push_back(storeAArch64GoStackPiece(
+          DAG, Chain, DL, Arg, Out.ArgVT, Addr,
           MachinePointerInfo::getStack(MF, StackBias + ArgLayout.StackOffset +
                                                Out.PartOffset)));
     }
@@ -9465,8 +9492,8 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
           ISD::ADD, DL, PtrVT, ResultStackPtr,
           DAG.getIntPtrConstant(
               StackBias + ResultLayout.StackOffset + In.PartOffset, DL));
-      SDValue Load = DAG.getLoad(
-          In.VT, DL, Chain, Addr,
+      SDValue Load = loadAArch64GoStackPiece(
+          DAG, Chain, DL, In.VT, In.ArgVT, Addr,
           MachinePointerInfo::getStack(
               MF, StackBias + ResultLayout.StackOffset + In.PartOffset));
       Chain = Load.getValue(1);

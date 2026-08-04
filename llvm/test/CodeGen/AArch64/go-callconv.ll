@@ -132,4 +132,34 @@ entry:
   ret i64 %result
 }
 
+define goabiinternal [8 x i8] @stack_bytes([8 x i8] %value) {
+; A64-LABEL: stack_bytes:
+; A64-DAG: ldrb w{{[0-9]+}}, [sp, #8]
+; A64-DAG: ldrb w{{[0-9]+}}, [sp, #15]
+; A64-DAG: strb w{{[0-9]+}}, [sp, #16]
+; A64-DAG: strb w{{[0-9]+}}, [sp, #23]
+; A64: ret
+entry:
+  ret [8 x i8] %value
+}
+
+define goabiinternal i16 @call_stack_bytes() {
+; A64-LABEL: call_stack_bytes:
+; A64-DAG: strb w{{[0-9]+}}, [x{{[0-9]+}}, #8]
+; A64-DAG: strb w{{[0-9]+}}, [x{{[0-9]+}}, #15]
+; A64: bl stack_bytes
+; A64-DAG: ldrb w{{[0-9]+}}, [x{{[0-9]+}}, #16]
+; A64-DAG: ldrb w{{[0-9]+}}, [x{{[0-9]+}}, #23]
+entry:
+  %result = call goabiinternal [8 x i8] @stack_bytes(
+      [8 x i8] [i8 1, i8 2, i8 3, i8 4, i8 5, i8 6, i8 7, i8 8])
+  %first = extractvalue [8 x i8] %result, 0
+  %last = extractvalue [8 x i8] %result, 7
+  %first.ext = zext i8 %first to i16
+  %last.ext = zext i8 %last to i16
+  %first.high = shl i16 %first.ext, 8
+  %combined = or i16 %first.high, %last.ext
+  ret i16 %combined
+}
+
 attributes #0 = { "go_results_tuple" }
