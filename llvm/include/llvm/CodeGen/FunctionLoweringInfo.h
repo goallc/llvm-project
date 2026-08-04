@@ -101,6 +101,9 @@ public:
     enum RelocType {
       // Value did not need to be relocated and can be used directly.
       NoRelocate,
+      // A Go stack alloca is relocated by recomputing its FrameIndex address
+      // after the statepoint, without a spill slot or reload.
+      FrameIndexRemat,
       // Value was spilled to stack and needs filled at the gc.relocate.
       Spill,
       // Value was lowered to tied def and gc.relocate should be replaced with
