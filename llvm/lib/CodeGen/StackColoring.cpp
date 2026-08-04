@@ -1317,6 +1317,17 @@ bool StackColoring::run(MachineFunction &Func, bool OnlyRemoveMarkers) {
         if (MFI->getStackID(FirstSlot) != MFI->getStackID(SecondSlot))
           continue;
 
+        // Some stack objects have externally visible identity even outside
+        // their IR lifetime. Keep such an object distinct without making its
+        // lifetime conservative or disabling coloring for unrelated slots.
+        auto IsNoMerge = [&](int Slot) {
+          const AllocaInst *Allocation = MFI->getObjectAllocation(Slot);
+          return Allocation &&
+                 Allocation->getMetadata("llvm.stackcoloring.no_merge");
+        };
+        if (IsNoMerge(FirstSlot) || IsNoMerge(SecondSlot))
+          continue;
+
         LiveInterval *First = &*Intervals[FirstSlot];
         LiveInterval *Second = &*Intervals[SecondSlot];
         auto &FirstS = LiveStarts[FirstSlot];

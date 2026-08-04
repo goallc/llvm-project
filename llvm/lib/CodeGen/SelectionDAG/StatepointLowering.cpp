@@ -1158,6 +1158,12 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
   // pointers passed to deopt are base pointers; relaxing that assumption
   // would require relatively large changes to how we represent relocations.
   for (Value *V : I.deopt_operands()) {
+    // GoALLC uses direct static alloca deopt operands as frame-layout carriers
+    // for its per-alloca pointer maps. The alloca is a GC root only when it is
+    // also present in the explicit gc-live bundle; treating the deopt carrier
+    // as a root would make an inactive lifetime scan uninitialized storage.
+    if (GFI->getStrategy().getName() == "goallc" && isa<AllocaInst>(V))
+      continue;
     if (!isGCValue(V, *this))
       continue;
     if (Seen.insert(getValue(V)).second) {
