@@ -22,6 +22,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/CodeGen/GCMetadata.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -1001,6 +1002,11 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
         assert(It != VirtRegs.end());
         Record.payload.Reg = It->second;
       }
+    } else if (goabi::isGoCallingConv(
+                   DAG.getMachineFunction().getFunction().getCallingConv()) &&
+               isa<AllocaInst>(V) && isa<FrameIndexSDNode>(SDV)) {
+      Record.type = RecordType::FrameIndexRemat;
+      Record.payload.FI = cast<FrameIndexSDNode>(SDV)->getIndex();
     } else if (Loc.getNode()) {
       Record.type = RecordType::Spill;
       Record.payload.FI = cast<FrameIndexSDNode>(Loc)->getIndex();
@@ -1369,6 +1375,19 @@ void SelectionDAGBuilder::visitGCRelocate(const GCRelocateInst &Relocate) {
 
     assert(SpillLoad.getNode());
     setValue(&Relocate, SpillLoad);
+    return;
+  }
+
+  if (Record.type == RecordType::FrameIndexRemat) {
+    SDValue FrameAddress =
+        DAG.getFrameIndex(Record.payload.FI, getFrameIndexTy());
+    Register Reg = FuncInfo.CreateReg(FrameAddress.getSimpleValueType());
+    SDValue Chain =
+        DAG.getCopyToReg(DAG.getRoot(), getCurSDLoc(), Reg, FrameAddress);
+    SDValue Rematerialized = DAG.getCopyFromReg(Chain, getCurSDLoc(), Reg,
+                                                FrameAddress.getValueType());
+    DAG.setRoot(Rematerialized.getValue(1));
+    setValue(&Relocate, Rematerialized);
     return;
   }
 
