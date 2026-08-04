@@ -647,7 +647,12 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
           continue;
         HasPointer = true;
         HighestPointerBit = Bit;
-        if (IsActive) {
+        // A direct gc-live alloca address is only an activity/relocation
+        // signal. The deopt record owns its interpretation: LocalsOnly
+        // expands the recorded layout into the local pointer map, while a
+        // StackObject record emits only function-wide stack-object metadata.
+        if (IsActive &&
+            Record.RecordKind == GoObjAllocaPtrMapRecord::Kind::LocalsOnly) {
           if (!AllocaPointerBits.insert(Slot.Bit).second)
             report_fatal_error(
                 "GoObj alloca ptrmap contains a duplicate pointer slot");
