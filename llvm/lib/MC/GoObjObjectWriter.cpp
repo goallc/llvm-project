@@ -573,6 +573,10 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
     SmallVector<std::pair<int64_t, int64_t>, 4> AllocaRanges;
     DenseSet<uint32_t> AllocaPointerBits;
     SmallVector<GoObjStatepointStackMaps::StackObject, 4> EntryStackObjects;
+    if (Entry.NumDeoptLocations > Entry.Locations.size())
+      report_fatal_error("GoObj statepoint deopt location count is invalid");
+    ArrayRef<MCContext::GoObjStackMapLocation> GCLiveLocations =
+        ArrayRef(Entry.Locations).drop_front(Entry.NumDeoptLocations);
     for (const GoObjAllocaPtrMapRecord &Record :
          parseAllocaPtrMapRecords(Entry)) {
       if (IsStackGrowth)
@@ -610,6 +614,19 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
       }
       AllocaRanges.push_back({RangeStart, RangeEnd});
 
+      bool IsActive = llvm::any_of(
+          GCLiveLocations,
+          [&](const MCContext::GoObjStackMapLocation &Location) {
+            return Location.Type == MCContext::GoObjStackMapLocation::Direct &&
+                   Location.Size == Record.Base.Size &&
+                   Location.DwarfRegNum == Record.Base.DwarfRegNum &&
+                   Location.Offset == Record.Base.Offset;
+          });
+      if (Record.RecordKind == GoObjAllocaPtrMapRecord::Kind::LocalsOnly &&
+          !IsActive)
+        report_fatal_error(
+            "GoObj locals alloca ptrmap has no matching gc-live alloca");
+
       uint64_t PaddingBits = Record.BitmapWords.size() * 64 - Record.BitCount;
       if (PaddingBits && (Record.BitmapWords.back() >> (64 - PaddingBits)) != 0)
         report_fatal_error(
@@ -630,10 +647,12 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
           continue;
         HasPointer = true;
         HighestPointerBit = Bit;
-        if (!AllocaPointerBits.insert(Slot.Bit).second)
-          report_fatal_error(
-              "GoObj alloca ptrmap contains a duplicate pointer slot");
-        Pair.Locals[Slot.Bit / 8] |= uint8_t(1u << (Slot.Bit % 8));
+        if (IsActive) {
+          if (!AllocaPointerBits.insert(Slot.Bit).second)
+            report_fatal_error(
+                "GoObj alloca ptrmap contains a duplicate pointer slot");
+          Pair.Locals[Slot.Bit / 8] |= uint8_t(1u << (Slot.Bit % 8));
+        }
       }
       if (!HasPointer)
         report_fatal_error("GoObj alloca ptrmap contains no pointer slots");
@@ -676,14 +695,11 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
         HaveFunctionStackObjects = true;
       } else if (FunctionStackObjects != EntryStackObjects) {
         report_fatal_error(
-            "GoObj alloca ptrmaps change between function statepoints");
+            "GoObj stack objects change between function statepoints");
       }
     }
 
-    if (Entry.NumDeoptLocations > Entry.Locations.size())
-      report_fatal_error("GoObj statepoint deopt location count is invalid");
-    for (const MCContext::GoObjStackMapLocation &Loc :
-         ArrayRef(Entry.Locations).drop_front(Entry.NumDeoptLocations)) {
+    for (const MCContext::GoObjStackMapLocation &Loc : GCLiveLocations) {
       switch (Loc.Type) {
       case MCContext::GoObjStackMapLocation::Direct:
       case MCContext::GoObjStackMapLocation::Indirect:
