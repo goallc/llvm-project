@@ -42,6 +42,23 @@ TEST(GoObjStackMapUtilsTest, ClassifiesLocalsAndArgs) {
   EXPECT_EQ(Classify(64, false).Kind, goobj::StackMapSlotKind::Direct);
 }
 
+TEST(GoObjStackMapUtilsTest, AcceptsUnalignedDirectFrameAddresses) {
+  auto Classify = [](int64_t Offset) {
+    return goobj::classifyOrdinaryStackMapSlot(
+        Offset, false, /*PointerSize=*/8, /*LocalsStart=*/8,
+        /*LocalsSize=*/32, /*LocalsBitOffset=*/0, /*ArgsStart=*/56,
+        /*ArgsSize=*/40);
+  };
+
+  EXPECT_EQ(Classify(12).Kind, goobj::StackMapSlotKind::Direct);
+  EXPECT_EQ(Classify(39).Kind, goobj::StackMapSlotKind::Direct);
+  EXPECT_EQ(Classify(60).Kind, goobj::StackMapSlotKind::Direct);
+  EXPECT_EQ(Classify(0).Kind, goobj::StackMapSlotKind::Invalid);
+  EXPECT_EQ(Classify(40).Kind, goobj::StackMapSlotKind::Invalid);
+  EXPECT_EQ(Classify(52).Kind, goobj::StackMapSlotKind::Invalid);
+  EXPECT_EQ(Classify(96).Kind, goobj::StackMapSlotKind::Invalid);
+}
+
 TEST(GoObjStackMapUtilsTest, RejectsReservedUnalignedAndOutOfRangeSlots) {
   auto Classify = [](int64_t Offset) {
     return goobj::classifyOrdinaryStackMapSlot(

@@ -25,29 +25,37 @@ struct StackMapSlot {
   uint32_t Bit = 0;
 };
 
-inline StackMapSlot classifyOrdinaryStackMapSlot(
-    int64_t Offset, bool IsIndirect, uint32_t PointerSize, uint64_t LocalsStart,
-    uint64_t LocalsSize, uint32_t LocalsBitOffset, uint64_t ArgsStart,
-    uint64_t ArgsSize) {
+inline StackMapSlot
+classifyOrdinaryStackMapSlot(int64_t Offset, bool IsIndirect,
+                             uint32_t PointerSize, uint64_t LocalsStart,
+                             uint64_t LocalsSize, uint32_t LocalsBitOffset,
+                             uint64_t ArgsStart, uint64_t ArgsSize) {
   if (Offset < 0 || PointerSize == 0)
     return {};
 
   uint64_t UOffset = static_cast<uint64_t>(Offset);
+  auto ContainsAddress = [&](uint64_t Start, uint64_t Size) {
+    return UOffset >= Start && UOffset - Start < Size;
+  };
+  if (!IsIndirect) {
+    if (ContainsAddress(LocalsStart, LocalsSize) ||
+        ContainsAddress(ArgsStart, ArgsSize))
+      return {StackMapSlotKind::Direct, 0};
+    return {};
+  }
+
   auto Classify = [&](uint64_t Start, uint64_t Size, StackMapSlotKind Kind,
                       uint32_t BitOffset) -> StackMapSlot {
     if (UOffset < Start || UOffset - Start >= Size ||
         Size - (UOffset - Start) < PointerSize ||
         (UOffset - Start) % PointerSize != 0)
       return {};
-    if (!IsIndirect)
-      return {StackMapSlotKind::Direct, 0};
-    return {Kind, BitOffset +
-                      static_cast<uint32_t>((UOffset - Start) / PointerSize)};
+    return {Kind,
+            BitOffset + static_cast<uint32_t>((UOffset - Start) / PointerSize)};
   };
 
-  if (StackMapSlot Slot =
-          Classify(LocalsStart, LocalsSize, StackMapSlotKind::Locals,
-                   LocalsBitOffset);
+  if (StackMapSlot Slot = Classify(LocalsStart, LocalsSize,
+                                   StackMapSlotKind::Locals, LocalsBitOffset);
       Slot.Kind != StackMapSlotKind::Invalid)
     return Slot;
   return Classify(ArgsStart, ArgsSize, StackMapSlotKind::Args,
