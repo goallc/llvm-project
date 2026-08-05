@@ -678,10 +678,6 @@ public:
     GoObjSymbolNames[Sym] = Name.str();
   }
 
-  bool hasGoObjSymbolName(const MCSymbol *Sym) const {
-    return GoObjSymbolNames.contains(Sym);
-  }
-
   StringRef getGoObjSymbolName(const MCSymbol *Sym) const {
     auto It = GoObjSymbolNames.find(Sym);
     if (It == GoObjSymbolNames.end())

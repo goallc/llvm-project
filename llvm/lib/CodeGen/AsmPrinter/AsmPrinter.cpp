@@ -1065,6 +1065,8 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
       report_fatal_error("expected !goobj.symbol.name to have one operand");
     StringRef Name =
         getGoObjMetadataString(MD->getOperand(0), "goobj.symbol.name");
+    if (Name.empty())
+      report_fatal_error("invalid !goobj.symbol.name attachment");
     AP.OutContext.setGoObjSymbolName(AP.getSymbol(&GO), Name);
   }
 
