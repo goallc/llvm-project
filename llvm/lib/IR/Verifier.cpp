@@ -3484,9 +3484,7 @@ void Verifier::visitIndirectBrInst(IndirectBrInst &BI) {
 }
 
 static bool isSupportedCallBrIntrinsic(Intrinsic::ID ID) {
-  // Currently we only support callbr for amdgcn.kill. Add more checks here as
-  // needed.
-  return isAMDGPUCallBrIntrinsic(ID);
+  return ID == Intrinsic::go_defer_edge || isAMDGPUCallBrIntrinsic(ID);
 }
 
 void Verifier::visitCallBrInst(CallBrInst &CBI) {
@@ -6921,6 +6919,20 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
     const Instruction &First = *LandingPadBB->begin();
     Check(&First == &Call, "No other instructions may proceed intrinsic",
           &Call);
+    break;
+  }
+  case Intrinsic::go_defer_edge: {
+    const auto *CBR = dyn_cast<CallBrInst>(&Call);
+    Check(CBR, "llvm.go.defer.edge must be used with callbr", &Call);
+    if (!CBR)
+      break;
+    Check(CBR->getNumIndirectDests() == 1,
+          "llvm.go.defer.edge callbr must have exactly one indirect "
+          "destination",
+          &Call);
+    if (CBR->getNumIndirectDests() == 1)
+      Check(CBR->getDefaultDest() != CBR->getIndirectDest(0),
+            "llvm.go.defer.edge callbr destinations must be distinct", &Call);
     break;
   }
   case Intrinsic::structured_gep: {

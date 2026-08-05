@@ -234,6 +234,9 @@ private:
   /// Go object symbol flags keyed by MC symbol.
   DenseMap<const MCSymbol *, std::pair<uint8_t, uint8_t>> GoObjSymbolFlags;
 
+  /// Go object function ID and function flags keyed by MC symbol.
+  DenseMap<const MCSymbol *, std::pair<uint8_t, uint8_t>> GoObjFunctionInfos;
+
   /// Native Go content-addressable identity hashes keyed by MC symbol.
   DenseMap<const MCSymbol *, std::string> GoObjSymbolContentHashes;
 
@@ -705,6 +708,19 @@ public:
   getGoObjSymbolFlags(const MCSymbol *Sym) const {
     auto It = GoObjSymbolFlags.find(Sym);
     if (It == GoObjSymbolFlags.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjFunctionInfo(const MCSymbol *Sym, uint8_t FuncID,
+                            uint8_t FuncFlag) {
+    GoObjFunctionInfos[Sym] = {FuncID, FuncFlag};
+  }
+
+  std::optional<std::pair<uint8_t, uint8_t>>
+  getGoObjFunctionInfo(const MCSymbol *Sym) const {
+    auto It = GoObjFunctionInfos.find(Sym);
+    if (It == GoObjFunctionInfos.end())
       return std::nullopt;
     return It->second;
   }

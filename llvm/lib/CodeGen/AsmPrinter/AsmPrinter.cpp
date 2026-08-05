@@ -898,6 +898,23 @@ getGoObjSymbolFlags(const GlobalObject *GO) {
   return std::make_pair(Flag, Flag2);
 }
 
+static std::optional<std::pair<uint8_t, uint8_t>>
+getGoObjFunctionInfo(const Function &F) {
+  const MDNode *MD = F.getMetadata("goobj.func.info");
+  if (!MD)
+    return std::nullopt;
+  if (MD->getNumOperands() != 2)
+    report_fatal_error("expected !goobj.func.info to have two operands");
+
+  auto ReadByte = [&](unsigned I) -> uint8_t {
+    const auto *CI = mdconst::dyn_extract<ConstantInt>(MD->getOperand(I));
+    if (!CI || CI->getType()->getIntegerBitWidth() != 8)
+      report_fatal_error("expected !goobj.func.info operands to be i8");
+    return static_cast<uint8_t>(CI->getZExtValue());
+  };
+  return std::make_pair(ReadByte(0), ReadByte(1));
+}
+
 static std::optional<std::string>
 getGoObjSymbolContentHash(const GlobalVariable *GV) {
   const MDNode *MD = GV->getMetadata("goobj.content_hash");
@@ -3686,6 +3703,9 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
             getGoObjSymbolFlags(&F))
       OutContext.setGoObjSymbolFlags(CurrentFnSym, Flags->first,
                                      Flags->second);
+    if (std::optional<std::pair<uint8_t, uint8_t>> Info =
+            getGoObjFunctionInfo(F))
+      OutContext.setGoObjFunctionInfo(CurrentFnSym, Info->first, Info->second);
     if (goabi::isGoABIInternalCallingConv(F.getCallingConv()))
       OutContext.setGoObjSymbolABI(CurrentFnSym, GoObj::SymABIInternal);
     else if (goabi::isGoABI0CallingConv(F.getCallingConv()))
