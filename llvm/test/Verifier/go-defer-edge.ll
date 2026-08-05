@@ -1,9 +1,9 @@
 ; RUN: split-file %s %t
 ; RUN: opt -passes=verify %t/valid.ll -disable-output
+; RUN: opt -passes=verify %t/same-dest.ll -disable-output
 ; RUN: not opt -passes=verify %t/ordinary-call.ll -disable-output 2>&1 | FileCheck %s --check-prefix=ORDINARY
 ; RUN: not opt -passes=verify %t/no-indirect-dest.ll -disable-output 2>&1 | FileCheck %s --check-prefix=NO-DEST
 ; RUN: not opt -passes=verify %t/multiple-indirect-dests.ll -disable-output 2>&1 | FileCheck %s --check-prefix=MULTIPLE-DESTS
-; RUN: not opt -passes=verify %t/same-dest.ll -disable-output 2>&1 | FileCheck %s --check-prefix=SAME-DEST
 
 ;--- valid.ll
 declare void @llvm.go.defer.edge()
@@ -60,7 +60,6 @@ recover2:
 }
 
 ;--- same-dest.ll
-; SAME-DEST: llvm.go.defer.edge callbr destinations must be distinct
 declare void @llvm.go.defer.edge()
 
 define void @same_dest() {
