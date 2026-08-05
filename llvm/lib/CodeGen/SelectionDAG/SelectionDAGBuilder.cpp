@@ -3627,6 +3627,7 @@ void SelectionDAGBuilder::visitCallBrIntrinsic(const CallBrInst &I) {
 
 void SelectionDAGBuilder::visitCallBr(const CallBrInst &I) {
   MachineBasicBlock *CallBrMBB = FuncInfo.MBB;
+  const bool IsGoDeferEdge = I.getIntrinsicID() == Intrinsic::go_defer_edge;
 
   if (I.isInlineAsm()) {
     // Deopt bundles are lowered in LowerCallSiteWithDeoptBundle, and we don't
@@ -3634,7 +3635,7 @@ void SelectionDAGBuilder::visitCallBr(const CallBrInst &I) {
     failForInvalidBundles(I, "callbrs",
                           {LLVMContext::OB_deopt, LLVMContext::OB_funclet});
     visitInlineAsm(I);
-  } else {
+  } else if (!IsGoDeferEdge) {
     assert(!I.hasOperandBundles() &&
            "Can't have operand bundles for intrinsics");
     visitCallBrIntrinsic(I);
@@ -3653,7 +3654,7 @@ void SelectionDAGBuilder::visitCallBr(const CallBrInst &I) {
   // this changes, we might need to enhance
   // Target->setIsInlineAsmBrIndirectTarget or add something similar for
   // intrinsic indirect branches.
-  if (I.isInlineAsm()) {
+  if (I.isInlineAsm() || IsGoDeferEdge) {
     for (BasicBlock *Dest : I.getIndirectDests()) {
       MachineBasicBlock *Target = FuncInfo.getMBB(Dest);
       Target->setIsInlineAsmBrIndirectTarget();

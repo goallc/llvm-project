@@ -253,14 +253,15 @@ SmallString<0> makeConstantPCTab(int32_t Value, uint64_t CodeSize,
 }
 
 SmallString<0> makeFuncInfoData(uint32_t ArgSize, uint32_t StackSize,
+                                uint8_t FuncID, uint8_t FuncFlag,
                                 ArrayRef<uint32_t> Files, int32_t StartLine) {
   SmallString<0> Data;
   raw_svector_ostream OS(Data);
   support::endian::Writer W(OS, llvm::endianness::little);
   W.write<uint32_t>(ArgSize);   // Args.
   W.write<uint32_t>(StackSize); // Locals.
-  W.write<uint8_t>(0);          // FuncIDNormal.
-  W.write<uint8_t>(0);          // No FuncFlag bits.
+  W.write<uint8_t>(FuncID);
+  W.write<uint8_t>(FuncFlag);
   W.write<uint8_t>(0);
   W.write<uint8_t>(0);
   W.write<uint32_t>(static_cast<uint32_t>(StartLine));
@@ -1566,10 +1567,14 @@ uint64_t GoObjObjectWriter::writeObject() {
         return LHS.PC < RHS.PC;
       });
 
+      auto [FuncID, FuncFlag] =
+          Asm->getContext()
+              .getGoObjFunctionInfo(Symbols[I].Symbol)
+              .value_or(std::make_pair(uint8_t(0), uint8_t(0)));
       uint32_t FuncInfoSym = addAuxCarrierSymbol(
           Symbols, GoObj::DefinedSymbolBlock::Symdef,
-          makeFuncInfoData(ArgSize, FrameLayout.FuncInfoLocalsSize,
-                           LineInfo.Files, LineInfo.StartLine));
+          makeFuncInfoData(ArgSize, FrameLayout.FuncInfoLocalsSize, FuncID,
+                           FuncFlag, LineInfo.Files, LineInfo.StartLine));
       uint32_t PcspSym = getOrAddHashedAuxCarrierSymbol(
           Symbols, AuxCarrierIndexes, 'P',
           PCSPEntries.empty()
