@@ -1,0 +1,141 @@
+name: GoALLC LLVM Payload Release
+
+on:
+  push:
+    tags:
+      - "goallc-llvm23.*"
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: Existing GoALLC LLVM release tag to rebuild
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: goallc-llvm-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-amd64:
+    if: github.repository == 'goallc/llvm-project'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release-tag }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 5G
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release-tag || github.ref }}
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^goallc-llvm23\.1\.0-v[0-9]+$ ]]
+          test "$(git rev-list -n1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ccache \
+            libedit-dev \
+            libxml2-dev \
+            libzstd-dev \
+            ninja-build \
+            zlib1g-dev
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: goallc-llvm23-linux-amd64-${{ github.sha }}
+          restore-keys: |
+            goallc-llvm23-linux-amd64-
+
+      - name: Build installed LLVM payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_base="$RELEASE_TAG-linux-amd64"
+          GOALLC_LLVM_BUILD="$RUNNER_TEMP/goallc-llvm-build" \
+          GOALLC_LLVM_INSTALL="$RUNNER_TEMP/$asset_base" \
+          GOALLC_BUILD_TYPE=Release \
+          GOALLC_LLVM_TARGETS='X86;AArch64' \
+          GOALLC_BUILD_JOBS="$(nproc)" \
+          GOALLC_CCACHE=/usr/bin/ccache \
+            ./llvm/utils/goallc/build-payload.bash
+
+      - name: Validate relocatable payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_base="$RELEASE_TAG-linux-amd64"
+          mkdir -p "$RUNNER_TEMP/relocated"
+          mv "$RUNNER_TEMP/$asset_base" "$RUNNER_TEMP/relocated/$asset_base"
+          payload="$RUNNER_TEMP/relocated/$asset_base"
+
+          test "$("$payload/bin/llvm-config" --prefix)" = "$payload"
+          test "$("$payload/bin/llvm-config" --version)" = 23.1.0git
+          test "$("$payload/bin/llvm-config" --build-mode)" = Release
+          for target in X86 AArch64; do
+            "${payload}/bin/llvm-config" --targets-built | tr ' ' '\n' | grep -Fx "$target"
+          done
+          for path in \
+            bin/FileCheck \
+            bin/llc \
+            bin/llvm-ar \
+            bin/llvm-config \
+            bin/opt \
+            include/llvm-c/Core.h \
+            include/llvm/Config/llvm-config.h \
+            lib/cmake/llvm/AddLLVM.cmake \
+            lib/cmake/llvm/LLVMConfig.cmake \
+            lib/cmake/llvm/LLVMExports.cmake \
+            lib/libLLVMCore.a; do
+            test -e "$payload/$path"
+          done
+          find "$payload/lib" -maxdepth 1 -name 'libLLVM.so*' -print -quit | grep .
+          LD_LIBRARY_PATH= "$payload/bin/llc" --version
+          LD_LIBRARY_PATH= "$payload/bin/opt" --version
+          ldd "$payload/bin/llc"
+
+      - name: Package payload
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_base="$RELEASE_TAG-linux-amd64"
+          archive="$asset_base.tar.zst"
+          tar --zstd -cf "$archive" -C "$RUNNER_TEMP/relocated" "$asset_base"
+          sha256sum "$archive" >"$archive.sha256"
+          echo "archive=$archive" >>"$GITHUB_OUTPUT"
+          cat "$archive.sha256"
+          du -h "$archive"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --title "GoALLC LLVM 23.1.0 v${RELEASE_TAG##*-v}" \
+              --notes "Installed, relocatable GoALLC LLVM 23.1.0 payload from commit $GITHUB_SHA. This release contains the Linux amd64 payload consumed by GoALLC CI."
+          fi
+          gh release upload "$RELEASE_TAG" \
+            "$ARCHIVE" \
+            "$ARCHIVE.sha256" \
+            --clobber

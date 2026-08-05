@@ -1,0 +1,29 @@
+# GoALLC LLVM payloads
+
+`build-payload.bash` is the canonical builder for the installed LLVM payload
+consumed by the GoALLC Go repository. It deliberately keeps the CMake build
+tree separate from the install tree, stages `cmake --install`, validates the
+complete development payload, and replaces the selected install directory as
+one unit.
+
+From the llvm-project checkout root:
+
+```sh
+GOALLC_LLVM_BUILD=/path/to/llvm-build \
+GOALLC_LLVM_INSTALL=/path/to/llvm-payload \
+GOALLC_BUILD_TYPE=Release \
+GOALLC_LLVM_TARGETS='X86;AArch64' \
+GOALLC_CCACHE=/path/to/ccache \
+  ./llvm/utils/goallc/build-payload.bash
+```
+
+The payload contains the LLVM tools, installed source and generated headers,
+CMake package, shared LLVM library, component archives, and `FileCheck`. The
+pass plugin is not part of the LLVM release: Go's `make.bash` builds and
+installs the matching plugin through `cmd/dist`.
+
+Tags matching `goallc-llvm23.1.0-vN` trigger
+`.github/workflows/goallc-release.yml`. The workflow builds a relocatable
+Linux amd64 payload and publishes both the `.tar.zst` archive and its SHA-256
+file on the tag's GitHub Release. Consumers must pin both the tag and the
+archive digest.
