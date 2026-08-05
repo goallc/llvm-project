@@ -222,6 +222,15 @@ private:
   /// Go object symbol ABI overrides keyed by MC symbol.
   DenseMap<const MCSymbol *, uint16_t> GoObjSymbolABIs;
 
+  /// Go object linker names for MC symbols whose LLVM names were made unique.
+  DenseMap<const MCSymbol *, std::string> GoObjSymbolNames;
+
+  /// Compiler-validated cgo directives serialized in the Go object header.
+  std::string GoObjCgoPragmas;
+
+  /// Go object definitions that are resolved by name instead of package index.
+  DenseSet<const MCSymbol *> GoObjNonPackageSymbols;
+
   /// Go object symbol stack sizes keyed by MC symbol.
   DenseMap<const MCSymbol *, uint32_t> GoObjSymbolStackSizes;
 
@@ -663,6 +672,31 @@ public:
     if (It == GoObjSymbolABIs.end())
       return std::nullopt;
     return It->second;
+  }
+
+  void setGoObjSymbolName(const MCSymbol *Sym, StringRef Name) {
+    GoObjSymbolNames[Sym] = Name.str();
+  }
+
+  StringRef getGoObjSymbolName(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolNames.find(Sym);
+    if (It == GoObjSymbolNames.end())
+      return {};
+    return It->second;
+  }
+
+  void setGoObjCgoPragmas(StringRef Pragmas) {
+    GoObjCgoPragmas = Pragmas.str();
+  }
+
+  StringRef getGoObjCgoPragmas() const { return GoObjCgoPragmas; }
+
+  void setGoObjSymbolNonPackage(const MCSymbol *Sym) {
+    GoObjNonPackageSymbols.insert(Sym);
+  }
+
+  bool isGoObjSymbolNonPackage(const MCSymbol *Sym) const {
+    return GoObjNonPackageSymbols.contains(Sym);
   }
 
   void setGoObjSymbolStackSize(const MCSymbol *Sym, uint32_t StackSize) {
