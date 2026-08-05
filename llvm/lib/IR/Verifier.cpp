@@ -6932,9 +6932,6 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
           "llvm.go.defer.edge callbr must have exactly one indirect "
           "destination",
           &Call);
-    if (CBR->getNumIndirectDests() == 1)
-      Check(CBR->getDefaultDest() != CBR->getIndirectDest(0),
-            "llvm.go.defer.edge callbr destinations must be distinct", &Call);
     break;
   }
   case Intrinsic::structured_gep: {

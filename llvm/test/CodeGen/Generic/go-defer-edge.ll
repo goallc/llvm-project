@@ -47,3 +47,37 @@ recover:
   call void @runtime.deferreturn()
   ret void
 }
+
+define void @go_defer_edge_shared_dest() {
+; OPT-LABEL: define void @go_defer_edge_shared_dest()
+; OPT: callbr void @llvm.go.defer.edge()
+; OPT-NEXT: to label %dest [label %dest]
+;
+; AARCH64-LABEL: go_defer_edge_shared_dest:
+; AARCH64-NOT: llvm.go.defer.edge
+; AARCH64: runtime.deferreturn
+; AARCH64: ret
+;
+; X86-LABEL: go_defer_edge_shared_dest:
+; X86-NOT: llvm.go.defer.edge
+; X86: runtime.deferreturn
+; X86: retq
+;
+; SDAG-LABEL: name: go_defer_edge_shared_dest
+; SDAG-NOT: llvm.go.defer.edge
+; SDAG: bb.{{[0-9]+}}.entry:
+; SDAG: successors: %bb.{{[0-9]+}}
+; SDAG: bb.{{[0-9]+}}.dest (inlineasm-br-indirect-target)
+;
+; GISEL-LABEL: name: go_defer_edge_shared_dest
+; GISEL-NOT: G_INTRINSIC intrinsic(@llvm.go.defer.edge)
+; GISEL: bb.{{[0-9]+}}.entry:
+; GISEL: successors: %bb.{{[0-9]+}}
+; GISEL: bb.{{[0-9]+}}.dest (inlineasm-br-indirect-target)
+entry:
+  callbr void @llvm.go.defer.edge() to label %dest [label %dest]
+
+dest:
+  call void @runtime.deferreturn()
+  ret void
+}
