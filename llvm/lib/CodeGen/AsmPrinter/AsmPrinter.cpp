@@ -1046,6 +1046,33 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
     AP.OutContext.setGoObjImports(std::move(ParsedImports));
   }
 
+  for (const GlobalObject &GO : M.global_objects()) {
+    const MDNode *MD = GO.getMetadata("goobj.symbol.name");
+    if (!MD)
+      continue;
+    if (MD->getNumOperands() != 1)
+      report_fatal_error("expected !goobj.symbol.name to have one operand");
+    StringRef Name =
+        getGoObjMetadataString(MD->getOperand(0), "goobj.symbol.name");
+    if (Name.empty())
+      report_fatal_error("invalid !goobj.symbol.name attachment");
+    AP.OutContext.setGoObjSymbolName(AP.getSymbol(&GO), Name);
+  }
+
+  for (const GlobalObject &GO : M.global_objects()) {
+    const MDNode *MD = GO.getMetadata("goobj.symbol.nonpackage");
+    if (!MD)
+      continue;
+    const auto *Marker = MD->getNumOperands() == 1
+                             ? mdconst::dyn_extract<ConstantInt>(
+                                   MD->getOperand(0))
+                             : nullptr;
+    if (!Marker || !Marker->getType()->isIntegerTy(1) ||
+        !Marker->isOne() || GO.isDeclaration())
+      report_fatal_error("invalid !goobj.symbol.nonpackage attachment");
+    AP.OutContext.setGoObjSymbolNonPackage(AP.getSymbol(&GO));
+  }
+
   // Only the optimized relocation stream decides which declarations become
   // GoObj references. Attachments retain the package-local indices that LLVM
   // symbol names and MC relocations cannot reconstruct.

@@ -1202,7 +1202,8 @@ StringRef getGoArch(const Triple &TT) {
 }
 
 void writeGoObjectTextHeader(raw_ostream &OS, const Triple &TT,
-                             const MCGoObjObjectWriterConfig &Config) {
+                             const MCGoObjObjectWriterConfig &Config,
+                             StringRef CgoPragmas) {
   StringRef GOOS = Config.GOOS.empty() ? getGoOS(TT) : Config.GOOS;
   StringRef GOARCH = Config.GOARCH.empty() ? getGoArch(TT) : Config.GOARCH;
   OS << "go object " << GOOS << ' ' << GOARCH << ' ' << Config.Version;
@@ -1249,6 +1250,14 @@ void writeGoObjectTextHeader(raw_ostream &OS, const Triple &TT,
     OS << "build id \"" << Config.BuildID << "\"\n";
   if (Config.IsMain)
     OS << "main\n";
+
+  if (!CgoPragmas.empty()) {
+    if (Config.SourceKind == GoObj::SourceKind::Compiler)
+      OS << '\n';
+    OS << "\n$$\n\n$$\n\n";
+    OS << "\n$$  // cgo\n" << CgoPragmas << '\n';
+    OS << "\n$$\n\n";
+  }
 
   if (Config.SourceKind == GoObj::SourceKind::Compiler)
     OS << '\n';
@@ -1308,6 +1317,11 @@ void GoObjObjectWriter::recordRelocation(const MCFragment &F,
 uint64_t GoObjObjectWriter::writeObject() {
   const uint64_t StartOffset = OS.tell();
 
+  auto GetSymbolName = [&](const MCSymbol *Sym) -> StringRef {
+    StringRef Name = Asm->getContext().getGoObjSymbolName(Sym);
+    return Name.empty() ? Sym->getName() : Name;
+  };
+
   std::vector<GoObjSymbol> Symbols;
   DenseSet<const MCSymbol *> SeenPrivateRelocationTargets;
   SmallVector<const MCSymbol *, 8> PrivateRelocationTargets;
@@ -1322,9 +1336,12 @@ uint64_t GoObjObjectWriter::writeObject() {
     if (!Symbol.isCommon())
       continue;
     GoObjSymbol GoSym;
-    GoSym.Name = Symbol.getName().str();
+    GoSym.Name = GetSymbolName(&Symbol).str();
     GoSym.Symbol = &Symbol;
-    GoSym.DefinedBlock = Config.DefaultDefinedSymbolBlock;
+    GoSym.DefinedBlock =
+        Asm->getContext().isGoObjSymbolNonPackage(&Symbol)
+            ? GoObj::DefinedSymbolBlock::Nonpkgdef
+            : Config.DefaultDefinedSymbolBlock;
     GoSym.ABI = GoObj::SymABIstatic;
     GoSym.Type = GoObj::SBSS;
     GoSym.Size = Symbol.getCommonSize();
@@ -1395,9 +1412,12 @@ uint64_t GoObjObjectWriter::writeObject() {
         }
         Align = Asm->getContext().getGoObjSymbolAlignment(MCSym).value_or(0);
       }
-      addDefinedSymbol(Symbols, MCSym, &Section, Begin, End,
-                       Config.DefaultDefinedSymbolBlock, Name, Type, Flag,
-                       Flag2, ABI, Size, Align, Data);
+      GoObj::DefinedSymbolBlock DefinedBlock =
+          MCSym && Asm->getContext().isGoObjSymbolNonPackage(MCSym)
+              ? GoObj::DefinedSymbolBlock::Nonpkgdef
+              : Config.DefaultDefinedSymbolBlock;
+      addDefinedSymbol(Symbols, MCSym, &Section, Begin, End, DefinedBlock, Name,
+                       Type, Flag, Flag2, ABI, Size, Align, Data);
       if (MCSym) {
         StringRef Hash = Asm->getContext().getGoObjSymbolContentHash(MCSym);
         if (Hash.size() == GoObj::Hash64Size) {
@@ -1437,7 +1457,7 @@ uint64_t GoObjObjectWriter::writeObject() {
           End = Begin + *ExactSize;
         }
         AddSectionSymbol(SectionSymbols[I].Symbol,
-                         SectionSymbols[I].Symbol->getName(), Begin, End);
+                         GetSymbolName(SectionSymbols[I].Symbol), Begin, End);
       }
     }
 
@@ -1762,7 +1782,7 @@ uint64_t GoObjObjectWriter::writeObject() {
   std::vector<GoObjSymbol> NonPkgRefs;
   StringMap<uint32_t> NonPkgRefIndexes;
   auto GetNonPkgRefSymIdx = [&](const MCSymbol *Sym) {
-    StringRef Name = Sym->getName();
+    StringRef Name = GetSymbolName(Sym);
     if (Name.empty())
       report_fatal_error("GoObj relocation target has an empty name");
 
@@ -1861,7 +1881,7 @@ uint64_t GoObjObjectWriter::writeObject() {
         case MCContext::GoObjSymbolRefKind::Imported: {
           GoObjSymRef Ref{GetPackageIndex(Metadata->PackagePrefix),
                           Metadata->SymIdx};
-          RecordIndexedRef(Ref, TrimInlineHash(Reloc.Symbol->getName()),
+          RecordIndexedRef(Ref, TrimInlineHash(GetSymbolName(Reloc.Symbol)),
                            Metadata->Flags2);
           return Ref;
         }
@@ -2202,7 +2222,8 @@ uint64_t GoObjObjectWriter::writeObject() {
     HeaderW.write<uint32_t>(Offsets[I]);
 
   assert(Header.size() == GoObj::HeaderSize && "unexpected GoObj header size");
-  writeGoObjectTextHeader(OS, Asm->getContext().getTargetTriple(), Config);
+  writeGoObjectTextHeader(OS, Asm->getContext().getTargetTriple(), Config,
+                          Asm->getContext().getGoObjCgoPragmas());
   OS.write(Header.data(), Header.size());
   OS.write(Body.data(), Body.size());
 
