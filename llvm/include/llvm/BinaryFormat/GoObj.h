@@ -27,28 +27,27 @@ inline constexpr uint64_t StackGrowthStatepointID = 0x476f537461636b47ULL;
 // statepoint deopt locations:
 //
 //   ordinary-deopt*, BEGIN, protocol-length, record-count,
-//     (KIND-TAG, record-length, direct-base, byte-offset, byte-size, alignment,
+//     (RECORD-TAG, record-length, direct-base, byte-offset, byte-size,
+//     alignment,
 //      pointer-size, bit-count, word-bits, word-count, bitmap-word*)*,
 //   END, protocol-length
 //
 // Protocol length counts BEGIN through END and excludes its trailing duplicate;
-// record length counts KIND-TAG through the final bitmap word. LOCALS records
-// appear only at callsites where the alloca lifetime is active. STACK records
-// describe the same function-wide native Go stack objects at every ordinary
-// statepoint. A matching direct alloca in the statepoint gc-live operands says
-// that either kind's contents contribute to that callsite's LocalsPointerMaps;
-// the direct address itself remains a rematerialized frame index, not a bitmap
-// slot. The first contract has no version, requires a whole alloca at byte
-// offset zero, and uses 64-bit bitmap words. Bit N, stored low-bit first,
-// describes the pointer-sized slot at direct-base + byte-offset + N *
-// pointer-size. Padding bits must be zero.
+// record length counts RECORD-TAG through the final bitmap word. A matching
+// direct alloca in the statepoint gc-live operands says that the record's
+// contents contribute to that callsite's LocalsPointerMaps. An unmatched
+// record identifies a function-level native Go StackObject; the producer must
+// repeat that same layout at every ordinary statepoint. The direct address
+// itself remains a rematerialized frame index, not a bitmap slot. The first
+// contract has no version, requires a whole alloca at byte offset zero, and
+// uses 64-bit bitmap words. Bit N, stored low-bit first, describes the
+// pointer-sized slot at direct-base + byte-offset + N * pointer-size. Padding
+// bits must be zero.
 // These tags are intentionally small enough to remain inline StackMaps
 // constants; bitmap payload words may use the StackMaps constant pool.
 inline constexpr int64_t AllocaPtrMapBeginMagic = 0x47414c41;      // "GALA"
 inline constexpr int64_t AllocaPtrMapEndMagic = 0x414c4c43;        // "ALLC"
-inline constexpr int64_t AllocaPtrMapLocalsRecordTag = 0x4c4f434c; // "LOCL"
-inline constexpr int64_t AllocaPtrMapStackObjectRecordTag =
-    0x53544b4f; // "STKO"
+inline constexpr int64_t AllocaPtrMapRecordTag = 0x414c4f43;       // "ALOC"
 inline constexpr uint32_t AllocaPtrMapBitmapWordBits = 64;
 
 // Special values in PCDATA_UnsafePoint (PCDATA stream 0).

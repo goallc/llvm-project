@@ -346,8 +346,9 @@ GoObjGCFrameLayout getGoObjGCFrameLayout(const Triple &TT, uint32_t StackSize,
       // relative to the pre-call SP, so bit 0 has no non-negative location.
       // The saved frame pointer at the top of the frame is excluded from the
       // scannable locals area.
-      return {StackSize, StackSize - PointerSize, 0,
-              StackSize - PointerSize, 1, PointerSize};
+      return {StackSize, StackSize - PointerSize,
+              0,         StackSize - PointerSize,
+              1,         PointerSize};
     }
 
     // Frameless functions do not reserve the saved-frame-pointer word. Their
@@ -367,8 +368,12 @@ GoObjGCFrameLayout getGoObjGCFrameLayout(const Triple &TT, uint32_t StackSize,
   // next callee. _func.locals is frame.varp-SP, so it excludes LR from the
   // physical frame size. Locals pointer maps exclude both reserved words and
   // therefore describe [SP+PointerSize, frame.varp).
-  return {StackSize - PointerSize, StackSize - PointerSize, PointerSize,
-          StackSize - 2 * PointerSize, 0, PointerSize};
+  return {StackSize - PointerSize,
+          StackSize - PointerSize,
+          PointerSize,
+          StackSize - 2 * PointerSize,
+          0,
+          PointerSize};
 }
 
 struct GoObjStackMapPair {
@@ -381,12 +386,6 @@ struct GoObjStackMapPair {
 };
 
 struct GoObjAllocaPtrMapRecord {
-  enum class Kind {
-    LocalsOnly,
-    StackObject,
-  };
-
-  Kind RecordKind;
   MCContext::GoObjStackMapLocation Base;
   uint64_t ByteOffset;
   uint64_t ByteSize;
@@ -395,6 +394,21 @@ struct GoObjAllocaPtrMapRecord {
   uint64_t BitCount;
   SmallVector<uint64_t, 4> BitmapWords;
 };
+
+bool sameAllocaPtrMapBase(const GoObjAllocaPtrMapRecord &LHS,
+                          const GoObjAllocaPtrMapRecord &RHS) {
+  return LHS.Base.Type == RHS.Base.Type && LHS.Base.Size == RHS.Base.Size &&
+         LHS.Base.DwarfRegNum == RHS.Base.DwarfRegNum &&
+         LHS.Base.Offset == RHS.Base.Offset;
+}
+
+bool sameAllocaPtrMapLayout(const GoObjAllocaPtrMapRecord &LHS,
+                            const GoObjAllocaPtrMapRecord &RHS) {
+  return sameAllocaPtrMapBase(LHS, RHS) && LHS.ByteOffset == RHS.ByteOffset &&
+         LHS.ByteSize == RHS.ByteSize && LHS.Alignment == RHS.Alignment &&
+         LHS.PointerSize == RHS.PointerSize && LHS.BitCount == RHS.BitCount &&
+         LHS.BitmapWords == RHS.BitmapWords;
+}
 
 int64_t
 getAllocaPtrMapConstant(const MCContext::GoObjStackMapLocation &Location,
@@ -458,14 +472,8 @@ parseAllocaPtrMapRecords(const MCContext::GoObjStackMapEntry &Entry) {
   for (uint64_t RecordIndex = 0; RecordIndex != RecordCount; ++RecordIndex) {
     if (Cursor > RecordsEnd || RecordsEnd - Cursor < 10)
       report_fatal_error("GoObj alloca ptrmap record header is malformed");
-    GoObjAllocaPtrMapRecord::Kind RecordKind;
-    if (IsConstant(Deopts[Cursor], GoObj::AllocaPtrMapLocalsRecordTag))
-      RecordKind = GoObjAllocaPtrMapRecord::Kind::LocalsOnly;
-    else if (IsConstant(Deopts[Cursor],
-                        GoObj::AllocaPtrMapStackObjectRecordTag))
-      RecordKind = GoObjAllocaPtrMapRecord::Kind::StackObject;
-    else
-      report_fatal_error("GoObj alloca ptrmap record kind is invalid");
+    if (!IsConstant(Deopts[Cursor], GoObj::AllocaPtrMapRecordTag))
+      report_fatal_error("GoObj alloca ptrmap record tag is invalid");
     uint64_t RecordLength =
         getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 1], "record length");
     uint64_t WordCount = getNonnegativeAllocaPtrMapConstant(
@@ -484,7 +492,6 @@ parseAllocaPtrMapRecords(const MCContext::GoObjStackMapEntry &Entry) {
       report_fatal_error("GoObj alloca ptrmap bitmap word width is invalid");
 
     GoObjAllocaPtrMapRecord Record{
-        RecordKind,
         Base,
         getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 3], "byte offset"),
         getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 4], "byte size"),
@@ -548,26 +555,24 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
     report_fatal_error(
         "GoObj statepoint pointer size does not match its target");
   const Triple &TT = Asm.getContext().getTargetTriple();
-  bool HasFramePointer =
-      Asm.getContext().getGoObjSymbolHasFramePointer(Function.Symbol)
-          .value_or(false);
+  bool HasFramePointer = Asm.getContext()
+                             .getGoObjSymbolHasFramePointer(Function.Symbol)
+                             .value_or(false);
   GoObjGCFrameLayout FrameLayout =
       getGoObjGCFrameLayout(TT, StackSize, PointerSize, HasFramePointer);
-  uint16_t StackPointerDwarfRegNum =
-      getGoObjStackPointerDwarfReg(TT);
-  auto NormalizeFrameLocation =
-      [&](MCContext::GoObjStackMapLocation Location) {
-        // X86 register allocation may keep a statepoint spill addressed from
-        // RBP. In a Go frame RBP is frame.varp, at SP+StackSize-PointerSize.
-        // Normalize it to the SP-relative coordinate system used by Go maps.
-        constexpr uint16_t X86FramePointerDwarfRegNum = 6;
-        if (TT.getArch() == Triple::x86_64 && HasFramePointer &&
-            Location.DwarfRegNum == X86FramePointerDwarfRegNum) {
-          Location.DwarfRegNum = StackPointerDwarfRegNum;
-          Location.Offset += FrameLayout.StackObjectVarpOffset;
-        }
-        return Location;
-      };
+  uint16_t StackPointerDwarfRegNum = getGoObjStackPointerDwarfReg(TT);
+  auto NormalizeFrameLocation = [&](MCContext::GoObjStackMapLocation Location) {
+    // X86 register allocation may keep a statepoint spill addressed from
+    // RBP. In a Go frame RBP is frame.varp, at SP+StackSize-PointerSize.
+    // Normalize it to the SP-relative coordinate system used by Go maps.
+    constexpr uint16_t X86FramePointerDwarfRegNum = 6;
+    if (TT.getArch() == Triple::x86_64 && HasFramePointer &&
+        Location.DwarfRegNum == X86FramePointerDwarfRegNum) {
+      Location.DwarfRegNum = StackPointerDwarfRegNum;
+      Location.Offset += FrameLayout.StackObjectVarpOffset;
+    }
+    return Location;
+  };
   uint32_t NBits = checkedUint32(
       FrameLayout.GCLocalsBitOffset +
           divideCeil(static_cast<uint64_t>(FrameLayout.GCLocalsSize),
@@ -580,8 +585,16 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   size_t ArgsBytesPerBitmap = divideCeil(ArgsNBits, 8u);
   uint64_t OrdinaryArgsStart =
       static_cast<uint64_t>(StackSize) + FrameLayout.EntryArgsStart;
-  SmallVector<GoObjStatepointStackMaps::StackObject, 4> FunctionStackObjects;
-  bool HaveFunctionStackObjects = false;
+  struct FunctionAllocaRecord {
+    GoObjAllocaPtrMapRecord Layout;
+    uint64_t SeenOrdinaryEntries = 0;
+    bool SawUnmatchedGCLive = false;
+  };
+  SmallVector<FunctionAllocaRecord, 4> FunctionAllocaRecords;
+  uint64_t OrdinaryEntryCount =
+      llvm::count_if(ResolvedEntries, [](const ResolvedEntry &Resolved) {
+        return Resolved.Entry->ID != GoObj::StackGrowthStatepointID;
+      });
 
   auto BuildPair = [&](const MCContext::GoObjStackMapEntry &Entry) {
     bool IsStackGrowth = Entry.ID == GoObj::StackGrowthStatepointID;
@@ -589,7 +602,6 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
                            SmallVector<uint8_t, 8>(LocalsBytesPerBitmap, 0)};
     SmallVector<std::pair<int64_t, int64_t>, 4> AllocaRanges;
     DenseSet<uint32_t> AllocaPointerBits;
-    SmallVector<GoObjStatepointStackMaps::StackObject, 4> EntryStackObjects;
     if (Entry.NumDeoptLocations > Entry.Locations.size())
       report_fatal_error("GoObj statepoint deopt location count is invalid");
     ArrayRef<MCContext::GoObjStackMapLocation> GCLiveLocations =
@@ -644,17 +656,25 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
                    Normalized.DwarfRegNum == RecordBase.DwarfRegNum &&
                    Normalized.Offset == RecordBase.Offset;
           });
-      if (Record.RecordKind == GoObjAllocaPtrMapRecord::Kind::LocalsOnly &&
-          !IsActive)
-        report_fatal_error(
-            "GoObj locals alloca ptrmap has no matching gc-live alloca");
+
+      GoObjAllocaPtrMapRecord NormalizedRecord = Record;
+      NormalizedRecord.Base = RecordBase;
+      auto FunctionRecord = llvm::find_if(
+          FunctionAllocaRecords, [&](const FunctionAllocaRecord &Existing) {
+            return sameAllocaPtrMapLayout(Existing.Layout, NormalizedRecord);
+          });
+      if (FunctionRecord == FunctionAllocaRecords.end()) {
+        FunctionAllocaRecords.push_back({NormalizedRecord, 1, !IsActive});
+      } else {
+        ++FunctionRecord->SeenOrdinaryEntries;
+        FunctionRecord->SawUnmatchedGCLive |= !IsActive;
+      }
 
       uint64_t PaddingBits = Record.BitmapWords.size() * 64 - Record.BitCount;
       if (PaddingBits && (Record.BitmapWords.back() >> (64 - PaddingBits)) != 0)
         report_fatal_error(
             "GoObj alloca ptrmap bitmap padding bits are nonzero");
       bool HasPointer = false;
-      uint64_t HighestPointerBit = 0;
       for (uint64_t Bit = 0; Bit != Record.BitCount; ++Bit) {
         int64_t SlotOffset =
             RangeStart + static_cast<int64_t>(Bit * PointerSize);
@@ -668,13 +688,9 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
         if ((Record.BitmapWords[Bit / 64] & (uint64_t(1) << (Bit % 64))) == 0)
           continue;
         HasPointer = true;
-        HighestPointerBit = Bit;
-        // A direct gc-live alloca address is only an activity/relocation
-        // signal. The deopt record owns its interpretation: LocalsOnly
-        // expands the recorded layout into the local pointer map, while a
-        // StackObject record emits only function-wide stack-object metadata.
-        if (IsActive &&
-            Record.RecordKind == GoObjAllocaPtrMapRecord::Kind::LocalsOnly) {
+        // The layout record is interpretation-free. A matching direct
+        // gc-live base means this pointer word is live at this callsite.
+        if (IsActive) {
           if (!AllocaPointerBits.insert(Slot.Bit).second)
             report_fatal_error(
                 "GoObj alloca ptrmap contains a duplicate pointer slot");
@@ -683,52 +699,10 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
       }
       if (!HasPointer)
         report_fatal_error("GoObj alloca ptrmap contains no pointer slots");
-
-      if (Record.RecordKind == GoObjAllocaPtrMapRecord::Kind::LocalsOnly)
-        continue;
-
-      int64_t FrameOffset =
-          RangeStart - static_cast<int64_t>(FrameLayout.StackObjectVarpOffset);
-      if (FrameOffset >= 0 ||
-          FrameOffset < std::numeric_limits<int32_t>::min() ||
-          Record.ByteSize >
-              static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
-        report_fatal_error(
-            "GoObj stack object cannot be represented relative to varp");
-      uint64_t PointerBytes = (HighestPointerBit + 1) * PointerSize;
-      if (PointerBytes > Record.ByteSize ||
-          PointerBytes >
-              static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
-        report_fatal_error("GoObj stack object pointer bytes are invalid");
-      size_t BitmapBytes = divideCeil(PointerBytes / PointerSize, 8u);
-      size_t PaddedBitmapBytes = alignTo(BitmapBytes, PointerSize);
-      SmallVector<uint8_t, 8> Bitmap(PaddedBitmapBytes, 0);
-      for (uint64_t Bit = 0; Bit <= HighestPointerBit; ++Bit)
-        if (Record.BitmapWords[Bit / 64] & (uint64_t(1) << (Bit % 64)))
-          Bitmap[Bit / 8] |= uint8_t(1u << (Bit % 8));
-      EntryStackObjects.push_back(
-          {static_cast<int32_t>(FrameOffset),
-           checkedUint32(Record.ByteSize, "GoObj stack object size"),
-           checkedUint32(PointerBytes, "GoObj stack object pointer bytes"),
-           std::move(Bitmap)});
-    }
-
-    llvm::sort(EntryStackObjects, [](const auto &LHS, const auto &RHS) {
-      return LHS.FrameOffset < RHS.FrameOffset;
-    });
-    if (!IsStackGrowth) {
-      if (!HaveFunctionStackObjects) {
-        FunctionStackObjects = EntryStackObjects;
-        HaveFunctionStackObjects = true;
-      } else if (FunctionStackObjects != EntryStackObjects) {
-        report_fatal_error(
-            "GoObj stack objects change between function statepoints");
-      }
     }
 
     for (const MCContext::GoObjStackMapLocation &RawLoc : GCLiveLocations) {
-      MCContext::GoObjStackMapLocation Loc =
-          NormalizeFrameLocation(RawLoc);
+      MCContext::GoObjStackMapLocation Loc = NormalizeFrameLocation(RawLoc);
       switch (Loc.Type) {
       case MCContext::GoObjStackMapLocation::Direct:
       case MCContext::GoObjStackMapLocation::Indirect:
@@ -743,8 +717,8 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
       if (Loc.Size != PointerSize || Loc.DwarfRegNum != StackPointerDwarfRegNum)
         report_fatal_error(
             Twine("GoObj statepoint in ") + Function.Name +
-            " contains an invalid pointer stack slot: size=" +
-            Twine(Loc.Size) + ", dwarf-reg=" + Twine(Loc.DwarfRegNum) +
+            " contains an invalid pointer stack slot: size=" + Twine(Loc.Size) +
+            ", dwarf-reg=" + Twine(Loc.DwarfRegNum) +
             ", offset=" + Twine(Loc.Offset));
 
       if (IsStackGrowth) {
@@ -849,6 +823,48 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
     PCDataEntries.push_back(
         {Resolved.CallsitePC, static_cast<int32_t>(MapIndex)});
   }
+
+  SmallVector<GoObjStatepointStackMaps::StackObject, 4> FunctionStackObjects;
+  for (const FunctionAllocaRecord &FunctionRecord : FunctionAllocaRecords) {
+    if (!FunctionRecord.SawUnmatchedGCLive)
+      continue;
+    if (FunctionRecord.SeenOrdinaryEntries != OrdinaryEntryCount)
+      report_fatal_error(
+          "GoObj stack object layout is missing from a function statepoint");
+
+    const GoObjAllocaPtrMapRecord &Record = FunctionRecord.Layout;
+    int64_t FrameOffset =
+        Record.Base.Offset -
+        static_cast<int64_t>(FrameLayout.StackObjectVarpOffset);
+    if (FrameOffset >= 0 || FrameOffset < std::numeric_limits<int32_t>::min() ||
+        Record.ByteSize >
+            static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+      report_fatal_error(
+          "GoObj stack object cannot be represented relative to varp");
+    uint64_t HighestPointerBit = 0;
+    for (uint64_t Bit = 0; Bit != Record.BitCount; ++Bit)
+      if (Record.BitmapWords[Bit / 64] & (uint64_t(1) << (Bit % 64)))
+        HighestPointerBit = Bit;
+    uint64_t PointerBytes = (HighestPointerBit + 1) * PointerSize;
+    if (PointerBytes > Record.ByteSize ||
+        PointerBytes >
+            static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+      report_fatal_error("GoObj stack object pointer bytes are invalid");
+    size_t BitmapBytes = divideCeil(PointerBytes / PointerSize, 8u);
+    size_t PaddedBitmapBytes = alignTo(BitmapBytes, PointerSize);
+    SmallVector<uint8_t, 8> Bitmap(PaddedBitmapBytes, 0);
+    for (uint64_t Bit = 0; Bit <= HighestPointerBit; ++Bit)
+      if (Record.BitmapWords[Bit / 64] & (uint64_t(1) << (Bit % 64)))
+        Bitmap[Bit / 8] |= uint8_t(1u << (Bit % 8));
+    FunctionStackObjects.push_back(
+        {static_cast<int32_t>(FrameOffset),
+         checkedUint32(Record.ByteSize, "GoObj stack object size"),
+         checkedUint32(PointerBytes, "GoObj stack object pointer bytes"),
+         std::move(Bitmap)});
+  }
+  llvm::sort(FunctionStackObjects, [](const auto &LHS, const auto &RHS) {
+    return LHS.FrameOffset < RHS.FrameOffset;
+  });
 
   SmallVector<SmallVector<uint8_t, 8>, 8> ArgsBitmaps;
   SmallVector<SmallVector<uint8_t, 8>, 8> LocalsBitmaps;
