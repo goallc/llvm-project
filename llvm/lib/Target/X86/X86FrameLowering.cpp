@@ -220,6 +220,18 @@ static bool shouldEmitGoStackCheck(const MachineFunction &MF) {
          goabi::isGoCallingConv(F.getCallingConv()) && !F.isVarArg();
 }
 
+static void checkGoStackGrowthStatepointContract(const MachineFunction &MF) {
+  if (!shouldEmitGoStackCheck(MF) ||
+      MF.getFunction().hasFnAttribute(goabi::StackGrowthStatepointAttr))
+    return;
+  for (const MachineBasicBlock &MBB : MF)
+    for (const MachineInstr &MI : MBB)
+      if (MI.getOpcode() == TargetOpcode::STATEPOINT)
+        report_fatal_error(
+            "GoObj statepoints require the go-stack-growth-statepoint "
+            "function attribute");
+}
+
 static bool hasGoClosureContext(const Function &F) {
   for (const Argument &Arg : F.args())
     if (Arg.hasNestAttr())
@@ -346,13 +358,7 @@ static void emitGoStackCheck(MachineFunction &MF,
 
   bool UseStackGrowthStatepoint =
       MF.getFunction().hasFnAttribute(goabi::StackGrowthStatepointAttr);
-  if (!UseStackGrowthStatepoint)
-    for (const MachineBasicBlock &MBB : MF)
-      for (const MachineInstr &MI : MBB)
-        if (MI.getOpcode() == TargetOpcode::STATEPOINT)
-          report_fatal_error(
-              "GoObj statepoints require the go-stack-growth-statepoint "
-              "function attribute");
+  checkGoStackGrowthStatepointContract(MF);
 
   unsigned ScratchReg = X86::R12;
   if (StackSize <= GoStackSmall) {
@@ -3409,6 +3415,11 @@ bool X86FrameLowering::assignCalleeSavedSpillSlots(
     const TargetRegisterClass *RC = getCalleeSavedSpillRC(Reg, STI, *TRI);
     unsigned Size = TRI->getSpillSize(*RC);
     Align Alignment = TRI->getSpillAlign(*RC);
+    // The Go amd64 ABI guarantees only pointer-size stack alignment. Keep a
+    // fixed vector CSR slot at that guaranteed alignment so X86InstrInfo
+    // selects MOVUPS instead of asserting while trying to promise MOVAPS.
+    if (MF.getTarget().getTargetTriple().isOSBinFormatGoObj())
+      Alignment = std::min(Alignment, getStackAlign());
     // ensure alignment
     assert(SpillSlotOffset < 0 && "SpillSlotOffset should always < 0 on X86");
     SpillSlotOffset = -alignTo(-SpillSlotOffset, Alignment);
@@ -3627,6 +3638,11 @@ bool X86FrameLowering::restoreCalleeSavedRegisters(
 void X86FrameLowering::determineCalleeSaves(MachineFunction &MF,
                                             BitVector &SavedRegs,
                                             RegScavenger *RS) const {
+  // Reject an incomplete Go statepoint contract before callee-save spill
+  // placement. On X86, statepoints can otherwise require an aligned vector
+  // spill and trip MachineFrameInfo's non-realignment assertion before the
+  // morestack prologue gets a chance to report the actionable error.
+  checkGoStackGrowthStatepointContract(MF);
   TargetFrameLowering::determineCalleeSaves(MF, SavedRegs, RS);
 
   // Spill the BasePtr if it's used.
