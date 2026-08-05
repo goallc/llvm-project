@@ -1011,6 +1011,17 @@ static StringRef getGoObjMetadataString(const MDOperand &Operand,
 }
 
 static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
+  if (const NamedMDNode *Cgo = M.getNamedMetadata("goobj.cgo")) {
+    if (Cgo->getNumOperands() != 1 ||
+        Cgo->getOperand(0)->getNumOperands() != 1)
+      report_fatal_error("invalid !goobj.cgo metadata");
+    StringRef Pragmas =
+        getGoObjMetadataString(Cgo->getOperand(0)->getOperand(0), "goobj.cgo");
+    if (Pragmas.empty())
+      report_fatal_error("empty !goobj.cgo metadata");
+    AP.OutContext.setGoObjCgoPragmas(Pragmas);
+  }
+
   if (const NamedMDNode *Imports = M.getNamedMetadata("goobj.imports")) {
     DenseSet<StringRef> Paths;
     DenseSet<StringRef> Prefixes;
@@ -1044,6 +1055,31 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
       ParsedImports.push_back(std::move(Import));
     }
     AP.OutContext.setGoObjImports(std::move(ParsedImports));
+  }
+
+  for (const GlobalObject &GO : M.global_objects()) {
+    const MDNode *MD = GO.getMetadata("goobj.symbol.name");
+    if (!MD)
+      continue;
+    if (MD->getNumOperands() != 1)
+      report_fatal_error("expected !goobj.symbol.name to have one operand");
+    StringRef Name =
+        getGoObjMetadataString(MD->getOperand(0), "goobj.symbol.name");
+    AP.OutContext.setGoObjSymbolName(AP.getSymbol(&GO), Name);
+  }
+
+  for (const GlobalObject &GO : M.global_objects()) {
+    const MDNode *MD = GO.getMetadata("goobj.symbol.nonpackage");
+    if (!MD)
+      continue;
+    const auto *Marker = MD->getNumOperands() == 1
+                             ? mdconst::dyn_extract<ConstantInt>(
+                                   MD->getOperand(0))
+                             : nullptr;
+    if (!Marker || !Marker->getType()->isIntegerTy(1) ||
+        !Marker->isOne() || GO.isDeclaration())
+      report_fatal_error("invalid !goobj.symbol.nonpackage attachment");
+    AP.OutContext.setGoObjSymbolNonPackage(AP.getSymbol(&GO));
   }
 
   // Only the optimized relocation stream decides which declarations become
