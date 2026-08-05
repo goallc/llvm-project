@@ -1318,10 +1318,8 @@ uint64_t GoObjObjectWriter::writeObject() {
   const uint64_t StartOffset = OS.tell();
 
   auto GetSymbolName = [&](const MCSymbol *Sym) -> StringRef {
-    const MCContext &Context = Asm->getContext();
-    return Context.hasGoObjSymbolName(Sym)
-               ? Context.getGoObjSymbolName(Sym)
-               : Sym->getName();
+    StringRef Name = Asm->getContext().getGoObjSymbolName(Sym);
+    return Name.empty() ? Sym->getName() : Name;
   };
 
   std::vector<GoObjSymbol> Symbols;
