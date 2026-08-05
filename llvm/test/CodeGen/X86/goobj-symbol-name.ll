@@ -1,6 +1,8 @@
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -goobj-package-path=main -filetype=obj < %s -o %t.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | FileCheck %s
 
+module asm ".goobj.cgo \22[[\\\22cgo_import_static\\\22,\\\22external_c\\\22]]\22"
+
 define goabi0 void @"same.goallc.abi0"() !goobj.symbol.name !0 {
 entry:
   ret void
@@ -23,7 +25,5 @@ entry:
 ; CHECK: target=same
 ; CHECK: target=external_c
 
-!goobj.cgo = !{!2}
 !0 = !{!"same"}
 !1 = !{i1 true}
-!2 = !{!"[[\22cgo_import_static\22,\22external_c\22]]"}

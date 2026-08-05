@@ -1011,17 +1011,6 @@ static StringRef getGoObjMetadataString(const MDOperand &Operand,
 }
 
 static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
-  if (const NamedMDNode *Cgo = M.getNamedMetadata("goobj.cgo")) {
-    if (Cgo->getNumOperands() != 1 ||
-        Cgo->getOperand(0)->getNumOperands() != 1)
-      report_fatal_error("invalid !goobj.cgo metadata");
-    StringRef Pragmas =
-        getGoObjMetadataString(Cgo->getOperand(0)->getOperand(0), "goobj.cgo");
-    if (Pragmas.empty())
-      report_fatal_error("empty !goobj.cgo metadata");
-    AP.OutContext.setGoObjCgoPragmas(Pragmas);
-  }
-
   if (const NamedMDNode *Imports = M.getNamedMetadata("goobj.imports")) {
     DenseSet<StringRef> Paths;
     DenseSet<StringRef> Prefixes;
