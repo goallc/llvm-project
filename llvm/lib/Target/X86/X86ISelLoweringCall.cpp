@@ -87,6 +87,32 @@ static goabi::ABIConfig getX86GoABIConfig(const X86Subtarget &Subtarget,
 
 static MVT getX86GoCopyVT(MVT VT) { return VT == MVT::i1 ? MVT::i8 : VT; }
 
+// Go ABI stack slots retain the width of the source piece even when legalizing
+// the SelectionDAG value widens it. Keep memory traffic at the ABI width and
+// extend or truncate only at the register boundary.
+static SDValue loadX86GoStackPiece(SelectionDAG &DAG, SDValue Chain,
+                                   const SDLoc &DL, EVT ValueVT, EVT MemVT,
+                                   SDValue Addr,
+                                   MachinePointerInfo PointerInfo) {
+  if (ValueVT == MemVT)
+    return DAG.getLoad(ValueVT, DL, Chain, Addr, PointerInfo);
+  assert(ValueVT.isInteger() && MemVT.isInteger() &&
+         "unexpected widened Go ABI stack piece");
+  return DAG.getExtLoad(ISD::EXTLOAD, DL, ValueVT, Chain, Addr, PointerInfo,
+                        MemVT);
+}
+
+static SDValue storeX86GoStackPiece(SelectionDAG &DAG, SDValue Chain,
+                                    const SDLoc &DL, SDValue Value, EVT MemVT,
+                                    SDValue Addr,
+                                    MachinePointerInfo PointerInfo) {
+  if (Value.getValueType() == MemVT)
+    return DAG.getStore(Chain, DL, Value, Addr, PointerInfo);
+  assert(Value.getValueType().isInteger() && MemVT.isInteger() &&
+         "unexpected widened Go ABI stack piece");
+  return DAG.getTruncStore(Chain, DL, Value, Addr, PointerInfo, MemVT);
+}
+
 static bool isX86GoFloatPiece(Type *Ty) { return goabi::isFloatingPiece(Ty); }
 
 static MCPhysReg getX86GoIntPhysReg(MVT VT, unsigned Index) {
@@ -274,8 +300,10 @@ static SDValue lowerX86GoFormalArguments(
         else
           ++IntPiece;
 
+        // The physical register copy may widen i1 to i8, but its Go ABI home
+        // retains the original piece's size and offset.
         unsigned Size = static_cast<unsigned>(
-            std::max<uint64_t>(1, CopyVT.getStoreSize().getKnownMinValue()));
+            std::max<uint64_t>(1, In.ArgVT.getStoreSize().getKnownMinValue()));
         uint64_t ArgSpillOffset = ArgSpillOffsets[LayoutMap[Group.Index]];
         int FI = MFI.CreateFixedSpillStackObject(
             Size, EntryStackBias + ArgSpillOffset + In.PartOffset,
@@ -291,16 +319,16 @@ static SDValue lowerX86GoFormalArguments(
       }
 
       unsigned Size = static_cast<unsigned>(
-          std::max<uint64_t>(1, In.VT.getStoreSize().getKnownMinValue()));
+          std::max<uint64_t>(1, In.ArgVT.getStoreSize().getKnownMinValue()));
       int FI = MFI.CreateFixedObject(
           Size, ArgLayout.StackOffset + In.PartOffset,
           /*IsImmutable=*/true);
       RecordPointerSlots(FI, ArgLayout.StackOffset + In.PartOffset, Size,
                          /*FixedObjectBias=*/0);
       SDValue Addr = DAG.getFrameIndex(FI, PtrVT);
-      InVals.push_back(
-          DAG.getLoad(In.VT, DL, Chain, Addr,
-                      MachinePointerInfo::getFixedStack(MF, FI)));
+      InVals.push_back(loadX86GoStackPiece(
+          DAG, Chain, DL, In.VT, In.ArgVT, Addr,
+          MachinePointerInfo::getFixedStack(MF, FI)));
     }
   }
 
@@ -355,13 +383,14 @@ static SDValue lowerX86GoReturn(const X86TargetLowering &TLI, SDValue Chain,
       }
 
       unsigned Size = static_cast<unsigned>(
-          std::max<uint64_t>(1, Out.VT.getStoreSize().getKnownMinValue()));
+          std::max<uint64_t>(1, Out.ArgVT.getStoreSize().getKnownMinValue()));
       int FI = MFI.CreateFixedObject(
           Size, ResultLayout.StackOffset + Out.PartOffset,
           /*IsImmutable=*/false);
       SDValue Addr = DAG.getFrameIndex(FI, TLI.getPointerTy(DAG.getDataLayout()));
-      MemOps.push_back(DAG.getStore(
-          Chain, DL, Val, Addr, MachinePointerInfo::getFixedStack(MF, FI)));
+      MemOps.push_back(storeX86GoStackPiece(
+          DAG, Chain, DL, Val, Out.ArgVT, Addr,
+          MachinePointerInfo::getFixedStack(MF, FI)));
     }
   }
 
@@ -464,9 +493,10 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
           DAG.getNode(ISD::ADD, DL, PtrVT, StackPtr,
                       DAG.getIntPtrConstant(ArgLayout.StackOffset + Out.PartOffset,
                                             DL));
-      MemOpChains.push_back(DAG.getStore(
-          Chain, DL, Arg, Addr,
-          MachinePointerInfo::getStack(MF, ArgLayout.StackOffset + Out.PartOffset)));
+      MemOpChains.push_back(storeX86GoStackPiece(
+          DAG, Chain, DL, Arg, Out.ArgVT, Addr,
+          MachinePointerInfo::getStack(MF,
+                                       ArgLayout.StackOffset + Out.PartOffset)));
     }
   }
 
@@ -509,36 +539,60 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
   SmallVector<SDValue, 8> ResultVals(Ins.size());
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
     const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
+    if (!ResultLayout.InRegs)
+      continue;
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
     for (unsigned I = Group.Start; I != Group.End; ++I) {
       const ISD::InputArg &In = Ins[I];
-      if (ResultLayout.InRegs) {
-        MVT CopyVT = getX86GoCopyVT(In.VT);
-        MCPhysReg PReg = getX86GoPhysReg(
-            In.VT, In.OrigTy, ResultLayout.IntRegStart + IntPiece,
-            ResultLayout.FPRegStart + FPPiece);
-        SDValue Val = DAG.getCopyFromReg(Chain, DL, PReg, CopyVT, InGlue);
-        Chain = Val.getValue(1);
-        InGlue = Val.getValue(2);
-        if (isX86GoFloatPiece(In.OrigTy))
-          ++FPPiece;
-        else
-          ++IntPiece;
-        if (In.VT != CopyVT)
-          ResultVals[I] = DAG.getNode(ISD::TRUNCATE, DL, In.VT, Val);
-        else
-          ResultVals[I] = Val;
-        continue;
-      }
+      MVT CopyVT = getX86GoCopyVT(In.VT);
+      MCPhysReg PReg = getX86GoPhysReg(
+          In.VT, In.OrigTy, ResultLayout.IntRegStart + IntPiece,
+          ResultLayout.FPRegStart + FPPiece);
+      SDValue Val = DAG.getCopyFromReg(Chain, DL, PReg, CopyVT, InGlue);
+      Chain = Val.getValue(1);
+      InGlue = Val.getValue(2);
+      if (isX86GoFloatPiece(In.OrigTy))
+        ++FPPiece;
+      else
+        ++IntPiece;
+      if (In.VT != CopyVT)
+        ResultVals[I] = DAG.getNode(ISD::TRUNCATE, DL, In.VT, Val);
+      else
+        ResultVals[I] = Val;
+    }
+  }
 
+  // Read every register result before introducing stack loads into the chain.
+  // A result that does not fit in the remaining register budget is placed on
+  // the stack without consuming that budget, so a later result can still be
+  // register-assigned. Interleaving stack loads with glued physical-register
+  // copies can create a cyclic scheduler dependency at statepoints.
+  SDValue ResultStackPtr;
+  if (llvm::any_of(groupGoArgs(ArrayRef(Ins)), [&](const auto &Group) {
+        return !Layout.Results[Group.Index].InRegs;
+      })) {
+    // A callee may grow the Go stack. The pre-call SP used for outgoing
+    // arguments can then point into the retired stack segment, so read the
+    // current stack register after the call before loading stack results.
+    ResultStackPtr =
+        DAG.getCopyFromReg(Chain, DL, RegInfo->getStackRegister(), PtrVT);
+    Chain = ResultStackPtr.getValue(1);
+  }
+  for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
+    const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
+    if (ResultLayout.InRegs)
+      continue;
+    for (unsigned I = Group.Start; I != Group.End; ++I) {
+      const ISD::InputArg &In = Ins[I];
       SDValue Addr =
-          DAG.getNode(ISD::ADD, DL, PtrVT, StackPtr,
+          DAG.getNode(ISD::ADD, DL, PtrVT, ResultStackPtr,
                       DAG.getIntPtrConstant(ResultLayout.StackOffset + In.PartOffset,
                                             DL));
-      SDValue Load = DAG.getLoad(
-          In.VT, DL, Chain, Addr,
-          MachinePointerInfo::getStack(MF, ResultLayout.StackOffset + In.PartOffset));
+      SDValue Load = loadX86GoStackPiece(
+          DAG, Chain, DL, In.VT, In.ArgVT, Addr,
+          MachinePointerInfo::getStack(
+              MF, ResultLayout.StackOffset + In.PartOffset));
       Chain = Load.getValue(1);
       ResultVals[I] = Load;
     }
