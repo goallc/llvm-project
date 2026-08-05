@@ -113,6 +113,21 @@ class GoObjAsmParser : public MCAsmParserExtension {
     return false;
   }
 
+  bool parseDirectiveCgo(StringRef, SMLoc) {
+    std::string Pragmas;
+    if (getParser().parseEscapedString(Pragmas))
+      return true;
+    if (Pragmas.empty())
+      return TokError("expected non-empty cgo pragmas");
+    if (parseEOL())
+      return true;
+    if (!getContext().getGoObjCgoPragmas().empty())
+      return TokError("duplicate .goobj.cgo directive");
+
+    getContext().setGoObjCgoPragmas(Pragmas);
+    return false;
+  }
+
 public:
   GoObjAsmParser() = default;
 
@@ -125,6 +140,7 @@ public:
     addDirectiveHandler<&GoObjAsmParser::parseSectionDirectiveRoData>(
         ".rodata");
     addDirectiveHandler<&GoObjAsmParser::parseDirectiveSection>(".section");
+    addDirectiveHandler<&GoObjAsmParser::parseDirectiveCgo>(".goobj.cgo");
   }
 };
 
