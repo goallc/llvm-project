@@ -382,6 +382,12 @@ defm : scalar_fma_patterns<X86any_Fmsub, "VFMSUB", "SD", X86Movsd, v2f64, f64, F
 defm : scalar_fma_patterns<X86any_Fnmadd, "VFNMADD", "SD", X86Movsd, v2f64, f64, FR64, loadf64>;
 defm : scalar_fma_patterns<X86any_Fnmsub, "VFNMSUB", "SD", X86Movsd, v2f64, f64, FR64, loadf64>;
 
+// Go emits this intrinsic only on a control-flow edge protected by its
+// runtime FMA feature check. Select the guarded instruction without enabling
+// FMA for other operations in the function.
+def : Pat<(int_x86_go_fma_f64 FR64:$a, FR64:$b, FR64:$c),
+          (VFMADD213SDr FR64:$a, FR64:$b, FR64:$c)>;
+
 //===----------------------------------------------------------------------===//
 // FMA4 - AMD 4 operand Fused Multiply-Add instructions
 //===----------------------------------------------------------------------===//
