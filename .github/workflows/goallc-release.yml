@@ -19,10 +19,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  linux-amd64:
+  linux:
     if: github.repository == 'goallc/llvm-project'
-    runs-on: ubuntu-22.04
+    name: linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
     env:
       RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release-tag }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -58,15 +67,15 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: goallc-llvm23-linux-amd64-${{ github.sha }}
+          key: goallc-llvm23-linux-${{ matrix.arch }}-${{ github.sha }}
           restore-keys: |
-            goallc-llvm23-linux-amd64-
+            goallc-llvm23-linux-${{ matrix.arch }}-
 
       - name: Build installed LLVM payload
         shell: bash
         run: |
           set -euo pipefail
-          asset_base="$RELEASE_TAG-linux-amd64"
+          asset_base="$RELEASE_TAG-linux-${{ matrix.arch }}"
           GOALLC_LLVM_BUILD="$RUNNER_TEMP/goallc-llvm-build" \
           GOALLC_LLVM_INSTALL="$RUNNER_TEMP/$asset_base" \
           GOALLC_BUILD_TYPE=Release \
@@ -79,7 +88,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          asset_base="$RELEASE_TAG-linux-amd64"
+          asset_base="$RELEASE_TAG-linux-${{ matrix.arch }}"
           mkdir -p "$RUNNER_TEMP/relocated"
           mv "$RUNNER_TEMP/$asset_base" "$RUNNER_TEMP/relocated/$asset_base"
           payload="$RUNNER_TEMP/relocated/$asset_base"
@@ -105,8 +114,8 @@ jobs:
             test -e "$payload/$path"
           done
           find "$payload/lib" -maxdepth 1 -name 'libLLVM.so*' -print -quit | grep .
-          LD_LIBRARY_PATH= "$payload/bin/llc" --version
-          LD_LIBRARY_PATH= "$payload/bin/opt" --version
+          env -u LD_LIBRARY_PATH "$payload/bin/llc" --version
+          env -u LD_LIBRARY_PATH "$payload/bin/opt" --version
           ldd "$payload/bin/llc"
 
       - name: Package payload
@@ -114,7 +123,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          asset_base="$RELEASE_TAG-linux-amd64"
+          asset_base="$RELEASE_TAG-linux-${{ matrix.arch }}"
           archive="$asset_base.tar.zst"
           tar --zstd -cf "$archive" -C "$RUNNER_TEMP/relocated" "$asset_base"
           sha256sum "$archive" >"$archive.sha256"
@@ -130,10 +139,14 @@ jobs:
         run: |
           set -euo pipefail
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" \
+            if ! gh release create "$RELEASE_TAG" \
               --verify-tag \
               --title "GoALLC LLVM 23.1.0 v${RELEASE_TAG##*-v}" \
-              --notes "Installed, relocatable GoALLC LLVM 23.1.0 payload from commit $GITHUB_SHA. This release contains the Linux amd64 payload consumed by GoALLC CI."
+              --notes "Installed, relocatable GoALLC LLVM 23.1.0 payloads from commit $GITHUB_SHA. This release contains Linux amd64 and arm64 payloads consumed by GoALLC CI."; then
+              # Matrix jobs may race to create the release. Accept failure only
+              # when the sibling job successfully created the same release.
+              gh release view "$RELEASE_TAG" >/dev/null
+            fi
           fi
           gh release upload "$RELEASE_TAG" \
             "$ARCHIVE" \
