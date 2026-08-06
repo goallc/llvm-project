@@ -14,6 +14,7 @@
 #include "X86InstrInfo.h"
 #include "X86RegisterInfo.h"
 #include "X86Subtarget.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/CodeGen/TargetLowering.h"
@@ -180,6 +181,7 @@ static SDValue emitConstantSizeRepstos(SelectionDAG &DAG,
                                        SDValue Dst, SDValue Val, uint64_t Size,
                                        EVT SizeVT, Align Alignment,
                                        bool isVolatile, bool AlwaysInline,
+                                       bool ForceRepstos,
                                        MachinePointerInfo DstPtrInfo) {
   /// In case we optimize for size, we use repstosb even if it's less efficient
   /// so we can save the loads/stores of the leftover.
@@ -202,13 +204,13 @@ static SDValue emitConstantSizeRepstos(SelectionDAG &DAG,
     return emitRepstosB(Subtarget, DAG, dl, Chain, Dst, Val, Size);
   }
 
-  if (Size > Subtarget.getMaxInlineSizeThreshold())
+  if (!ForceRepstos && Size > Subtarget.getMaxInlineSizeThreshold())
     return SDValue();
 
   // If not DWORD aligned or size is more than the threshold, call the library.
   // The libc version is likely to be faster for these cases. It can use the
   // address value and run time information about the CPU.
-  if (Alignment < Align(4))
+  if (!ForceRepstos && Alignment < Align(4))
     return SDValue();
 
   MVT BlockType = MVT::i8;
@@ -266,6 +268,8 @@ SDValue X86SelectionDAGInfo::EmitTargetCodeForMemset(
     MachinePointerInfo DstPtrInfo) const {
   const X86Subtarget &Subtarget =
       DAG.getMachineFunction().getSubtarget<X86Subtarget>();
+  const bool IsGo = goabi::isGoCallingConv(
+      DAG.getMachineFunction().getFunction().getCallingConv());
 
   // If to a segment-relative address space, use the default lowering.
   if (DstPtrInfo.getAddrSpace() >= 256)
@@ -283,12 +287,21 @@ SDValue X86SelectionDAGInfo::EmitTargetCodeForMemset(
     return SDValue();
 
   ConstantSDNode *ConstantSize = dyn_cast<ConstantSDNode>(Size);
-  if (!ConstantSize)
+  if (!ConstantSize && !IsGo)
     return SDValue();
+
+  // Go binaries do not provide the C ABI memset symbol. Optimization can
+  // introduce an ordinary llvm.memset even when the frontend emitted only
+  // inline memory operations. The Go SSA write-barrier pass has already
+  // handled pointer-containing heap destinations, so code generation only
+  // needs to perform the raw byte writes without introducing a C ABI call.
+  if (!ConstantSize)
+    return emitRepstos(Subtarget, DAG, dl, Chain, Dst, Val, Size, MVT::i8);
 
   return emitConstantSizeRepstos(
       DAG, Subtarget, dl, Chain, Dst, Val, ConstantSize->getZExtValue(),
-      Size.getValueType(), Alignment, isVolatile, AlwaysInline, DstPtrInfo);
+      Size.getValueType(), Alignment, isVolatile, AlwaysInline, IsGo,
+      DstPtrInfo);
 }
 
 /// Emit a single REP MOVS{B,W,D,Q} instruction.
