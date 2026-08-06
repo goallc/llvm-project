@@ -24,6 +24,7 @@ installs the matching plugin through `cmd/dist`.
 
 Tags matching `goallc-llvm23.1.0-vN` trigger
 `.github/workflows/goallc-release.yml`. The workflow builds a relocatable
-Linux amd64 payload and publishes both the `.tar.zst` archive and its SHA-256
-file on the tag's GitHub Release. Consumers must pin both the tag and the
+Linux payload natively on both amd64 and arm64, and publishes each `.tar.zst`
+archive together with its SHA-256 file on the tag's GitHub Release. Consumers
+must select the asset matching the host architecture and pin both the tag and
 archive digest.
