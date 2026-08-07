@@ -27,9 +27,10 @@ entry:
 ; CHECK: symdef 0: loadg abi=0 type=1 size=8
 ; CHECK-NEXT: symdef 1: caller abi=0 type=1 size=6
 ; CHECK-NEXT: symdef 2: g abi=0 type=7 size=8 align=8
-; CHECK-NEXT: symdef 3:  abi=65535 type=3 size=28
-; CHECK-NEXT: symdef 4:  abi=65535 type=3 size=28
+; CHECK-NEXT: symdef 3:  abi=0 type=3 size=28
+; CHECK-NEXT: symdef 4:  abi=0 type=3 size=28
 ; CHECK: hasheddef-count: 7
+; CHECK-NEXT: hasheddef 0:  abi=0 type=3
 ; CHECK: nonpkgdef-count: 0
 ; CHECK: nonpkgref-count: 1
 ; CHECK-NEXT: nonpkgref 0: ext abi=0 type=0 size=0

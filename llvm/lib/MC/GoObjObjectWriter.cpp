@@ -944,7 +944,12 @@ uint32_t addAuxCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
                              ArrayRef<char> Data) {
   GoObjSymbol Sym;
   Sym.DefinedBlock = Block;
-  Sym.ABI = GoObj::SymABIstatic;
+  // Match cmd/internal/obj's anonymous auxiliary symbols. These records are
+  // addressed by their GoObj indexes, not by name, and therefore use ABI0.
+  // Marking an unnamed symbol static makes the Go linker treat it as a
+  // file-local symbol; external linking then cannot omit it from the ELF
+  // symbol table and rejects its empty name.
+  Sym.ABI = GoObj::SymABI0;
   Sym.Type = GoObj::SRODATA;
   Sym.Align = 1;
   Sym.Size = Data.size();
@@ -1046,7 +1051,7 @@ uint32_t getOrAddHashedAuxCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
 
   GoObjSymbol Sym;
   Sym.DefinedBlock = GoObj::DefinedSymbolBlock::Hasheddef;
-  Sym.ABI = GoObj::SymABIstatic;
+  Sym.ABI = GoObj::SymABI0;
   Sym.Type = GoObj::SRODATA;
   Sym.Align = 1;
   Sym.Size = Data.size();
@@ -1103,7 +1108,7 @@ uint32_t addStackObjectCarrierSymbol(
 
   GoObjSymbol Sym;
   Sym.DefinedBlock = GoObj::DefinedSymbolBlock::Hasheddef;
-  Sym.ABI = GoObj::SymABIstatic;
+  Sym.ABI = GoObj::SymABI0;
   Sym.Type = GoObj::SRODATA;
   Sym.Align = 4;
   raw_svector_ostream OS(Sym.Data);
