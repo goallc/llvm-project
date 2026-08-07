@@ -314,6 +314,7 @@ struct GoObjStatepointStackMaps {
   SmallString<0> Args;
   SmallString<0> Locals;
   SmallString<0> PCData;
+  SmallString<0> OpenDefer;
   SmallVector<uint32_t, 4> IndirectCallOffsets;
   SmallVector<StackObject, 4> StackObjects;
 };
@@ -395,6 +396,25 @@ struct GoObjAllocaPtrMapRecord {
   SmallVector<uint64_t, 4> BitmapWords;
 };
 
+struct GoObjOpenDeferRecord {
+  MCContext::GoObjStackMapLocation Bits;
+  MCContext::GoObjStackMapLocation Slots;
+  uint64_t SlotCount;
+};
+
+bool sameStackMapLocation(const MCContext::GoObjStackMapLocation &LHS,
+                          const MCContext::GoObjStackMapLocation &RHS) {
+  return LHS.Type == RHS.Type && LHS.Size == RHS.Size &&
+         LHS.DwarfRegNum == RHS.DwarfRegNum && LHS.Offset == RHS.Offset;
+}
+
+bool sameOpenDeferRecord(const GoObjOpenDeferRecord &LHS,
+                         const GoObjOpenDeferRecord &RHS) {
+  return sameStackMapLocation(LHS.Bits, RHS.Bits) &&
+         sameStackMapLocation(LHS.Slots, RHS.Slots) &&
+         LHS.SlotCount == RHS.SlotCount;
+}
+
 bool sameAllocaPtrMapBase(const GoObjAllocaPtrMapRecord &LHS,
                           const GoObjAllocaPtrMapRecord &RHS) {
   return LHS.Base.Type == RHS.Base.Type && LHS.Base.Size == RHS.Base.Size &&
@@ -425,6 +445,60 @@ uint64_t getNonnegativeAllocaPtrMapConstant(
   if (Value < 0)
     report_fatal_error("GoObj alloca ptrmap " + Description + " is negative");
   return static_cast<uint64_t>(Value);
+}
+
+std::optional<GoObjOpenDeferRecord>
+parseOpenDeferRecord(const MCContext::GoObjStackMapEntry &Entry) {
+  if (Entry.NumDeoptLocations > Entry.Locations.size())
+    report_fatal_error("GoObj statepoint deopt location count is invalid");
+  ArrayRef<MCContext::GoObjStackMapLocation> Deopts =
+      ArrayRef(Entry.Locations).take_front(Entry.NumDeoptLocations);
+  auto IsConstant = [](const auto &Location, int64_t Value) {
+    return Location.Type == MCContext::GoObjStackMapLocation::Constant &&
+           Location.Offset == Value;
+  };
+
+  std::optional<size_t> Begin;
+  bool SawEnd = false;
+  for (auto [Index, Location] : llvm::enumerate(Deopts)) {
+    if (IsConstant(Location, GoObj::OpenDeferBeginMagic)) {
+      if (Begin)
+        report_fatal_error(
+            "GoObj statepoint contains multiple open-defer records");
+      Begin = Index;
+    }
+    SawEnd |= IsConstant(Location, GoObj::OpenDeferEndMagic);
+  }
+  if (!Begin) {
+    if (SawEnd)
+      report_fatal_error("GoObj open-defer protocol is truncated");
+    return std::nullopt;
+  }
+  if (*Begin + 2 >= Deopts.size())
+    report_fatal_error("GoObj open-defer protocol is truncated");
+  uint64_t ProtocolLength = getNonnegativeAllocaPtrMapConstant(
+      Deopts[*Begin + 1], "open-defer leading protocol length");
+  uint64_t SlotCount = getNonnegativeAllocaPtrMapConstant(
+      Deopts[*Begin + 2], "open-defer slot count");
+  if (ProtocolLength != 6 || ProtocolLength > Deopts.size() - *Begin - 1)
+    report_fatal_error("GoObj open-defer protocol length is invalid");
+  size_t End = *Begin + static_cast<size_t>(ProtocolLength) - 1;
+  if (!IsConstant(Deopts[End], GoObj::OpenDeferEndMagic) ||
+      getNonnegativeAllocaPtrMapConstant(
+          Deopts[End + 1], "open-defer trailing protocol length") !=
+          ProtocolLength)
+    report_fatal_error("GoObj open-defer protocol envelope is malformed");
+  if (SlotCount == 0)
+    report_fatal_error("GoObj open-defer protocol has no closure slots");
+
+  const auto &Bits = Deopts[*Begin + 3];
+  if (Bits.Type != MCContext::GoObjStackMapLocation::Direct)
+    report_fatal_error("GoObj open-defer bits is not a direct frame location");
+  const auto &Slots = Deopts[*Begin + 4];
+  if (Slots.Type != MCContext::GoObjStackMapLocation::Direct)
+    report_fatal_error(
+        "GoObj open-defer closure slots are not a direct frame location");
+  return GoObjOpenDeferRecord{Bits, Slots, SlotCount};
 }
 
 SmallVector<GoObjAllocaPtrMapRecord, 4>
@@ -595,6 +669,68 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
       llvm::count_if(ResolvedEntries, [](const ResolvedEntry &Resolved) {
         return Resolved.Entry->ID != GoObj::StackGrowthStatepointID;
       });
+  std::optional<GoObjOpenDeferRecord> FunctionOpenDefer;
+  uint64_t OpenDeferEntryCount = 0;
+  for (const ResolvedEntry &Resolved : ResolvedEntries) {
+    std::optional<GoObjOpenDeferRecord> Record =
+        parseOpenDeferRecord(*Resolved.Entry);
+    if (Resolved.Entry->ID == GoObj::StackGrowthStatepointID) {
+      if (Record)
+        report_fatal_error(
+            "GoObj stack-growth statepoint contains open-defer state");
+      continue;
+    }
+    if (!Record)
+      continue;
+    ++OpenDeferEntryCount;
+    Record->Bits = NormalizeFrameLocation(Record->Bits);
+    Record->Slots = NormalizeFrameLocation(Record->Slots);
+    auto IsDirectSPAddress = [&](const auto &Location) {
+      return Location.Type == MCContext::GoObjStackMapLocation::Direct &&
+             Location.Size == PointerSize &&
+             Location.DwarfRegNum == StackPointerDwarfRegNum &&
+             Location.Offset >= 0;
+    };
+    if (!IsDirectSPAddress(Record->Bits) || !IsDirectSPAddress(Record->Slots))
+      report_fatal_error(
+          "GoObj open-defer state is not a pointer-sized SP location");
+    if (!FunctionOpenDefer)
+      FunctionOpenDefer = std::move(*Record);
+    else if (!sameOpenDeferRecord(*FunctionOpenDefer, *Record))
+      report_fatal_error(
+          "GoObj open-defer frame locations change between statepoints");
+  }
+  if (FunctionOpenDefer && OpenDeferEntryCount != OrdinaryEntryCount)
+    report_fatal_error(
+        "GoObj open-defer frame state is missing from an ordinary statepoint");
+
+  SmallString<0> OpenDeferData;
+  if (FunctionOpenDefer) {
+    int64_t VarpOffset =
+        static_cast<int64_t>(FrameLayout.StackObjectVarpOffset);
+    auto OffsetBelowVarp = [&](int64_t Offset, StringRef Description) {
+      if (Offset >= VarpOffset)
+        report_fatal_error(Twine("GoObj open-defer ") + Description +
+                           " is not below varp");
+      return static_cast<uint64_t>(VarpOffset - Offset);
+    };
+    int64_t FirstSlotOffset = FunctionOpenDefer->Slots.Offset;
+    if (FunctionOpenDefer->SlotCount == 0 ||
+        FunctionOpenDefer->SlotCount >
+            static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) /
+                PointerSize)
+      report_fatal_error(
+          "GoObj open-defer closure slots do not fit below varp");
+    int64_t SlotBytes =
+        static_cast<int64_t>(FunctionOpenDefer->SlotCount * PointerSize);
+    if (FirstSlotOffset > VarpOffset - SlotBytes)
+      report_fatal_error(
+          "GoObj open-defer closure slots do not fit below varp");
+    appendUvarint(OpenDeferData,
+                  OffsetBelowVarp(FunctionOpenDefer->Bits.Offset, "bits"));
+    appendUvarint(OpenDeferData,
+                  OffsetBelowVarp(FirstSlotOffset, "first slot"));
+  }
 
   auto BuildPair = [&](const MCContext::GoObjStackMapEntry &Entry) {
     bool IsStackGrowth = Entry.ID == GoObj::StackGrowthStatepointID;
@@ -892,6 +1028,7 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   Result.Locals = makeStackMap(NBits, LocalsBitmaps);
   Result.PCData =
       makePCTab(-1, NormalizedPCDataEntries, Function.Size, PCQuantum);
+  Result.OpenDefer = std::move(OpenDeferData);
   Result.IndirectCallOffsets = std::move(IndirectCallOffsets);
   Result.StackObjects = std::move(FunctionStackObjects);
   return Result;
@@ -1343,10 +1480,9 @@ uint64_t GoObjObjectWriter::writeObject() {
     GoObjSymbol GoSym;
     GoSym.Name = GetSymbolName(&Symbol).str();
     GoSym.Symbol = &Symbol;
-    GoSym.DefinedBlock =
-        Asm->getContext().isGoObjSymbolNonPackage(&Symbol)
-            ? GoObj::DefinedSymbolBlock::Nonpkgdef
-            : Config.DefaultDefinedSymbolBlock;
+    GoSym.DefinedBlock = Asm->getContext().isGoObjSymbolNonPackage(&Symbol)
+                             ? GoObj::DefinedSymbolBlock::Nonpkgdef
+                             : Config.DefaultDefinedSymbolBlock;
     GoSym.ABI = GoObj::SymABIstatic;
     GoSym.Type = GoObj::SBSS;
     GoSym.Size = Symbol.getCommonSize();
@@ -1662,6 +1798,7 @@ uint64_t GoObjObjectWriter::writeObject() {
       SmallString<0> LocalsMap = makeEmptyStackMap();
       SmallString<0> StackMapIndex = makeConstantPCTab(0, CodeSize, PCQuantum);
       std::optional<uint32_t> StackObjectsSym;
+      std::optional<uint32_t> OpenDeferSym;
       if (const auto *Entries = Asm->getContext().getGoObjSymbolStackMapEntries(
               Symbols[I].Symbol)) {
         if (!Entries->empty()) {
@@ -1679,6 +1816,9 @@ uint64_t GoObjObjectWriter::writeObject() {
                 Symbols, GCBitmapCarrierIndexes,
                 Asm->getContext().getAsmInfo().getCodePointerSize(),
                 Maps.StackObjects);
+          if (!Maps.OpenDefer.empty())
+            OpenDeferSym = getOrAddHashedAuxCarrierSymbol(
+                Symbols, AuxCarrierIndexes, 'F', Maps.OpenDefer);
         }
       }
       uint32_t ArgsMapSym = getOrAddHashedAuxCarrierSymbol(
@@ -1697,6 +1837,15 @@ uint64_t GoObjObjectWriter::writeObject() {
       if (StackObjectsSym)
         Symbols[I].Auxiliaries.push_back(
             {GoObj::AuxFuncdata, *StackObjectsSym});
+      if (OpenDeferSym) {
+        if (!StackObjectsSym)
+          Symbols[I].Auxiliaries.emplace_back(GoObj::AuxFuncdata,
+                                              GoObjSymRef{});
+        // FUNCDATA_InlTree is unused by the current runtime, but funcdata is
+        // positional and open-coded defer information is slot 4.
+        Symbols[I].Auxiliaries.emplace_back(GoObj::AuxFuncdata, GoObjSymRef{});
+        Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, *OpenDeferSym});
+      }
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcsp, PcspSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcfile, PcfileSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcline, PclineSym});

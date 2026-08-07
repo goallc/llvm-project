@@ -45,10 +45,23 @@ inline constexpr uint64_t StackGrowthStatepointID = 0x476f537461636b47ULL;
 // bits must be zero.
 // These tags are intentionally small enough to remain inline StackMaps
 // constants; bitmap payload words may use the StackMaps constant pool.
-inline constexpr int64_t AllocaPtrMapBeginMagic = 0x47414c41;      // "GALA"
-inline constexpr int64_t AllocaPtrMapEndMagic = 0x414c4c43;        // "ALLC"
-inline constexpr int64_t AllocaPtrMapRecordTag = 0x414c4f43;       // "ALOC"
+inline constexpr int64_t AllocaPtrMapBeginMagic = 0x47414c41; // "GALA"
+inline constexpr int64_t AllocaPtrMapEndMagic = 0x414c4c43;   // "ALLC"
+inline constexpr int64_t AllocaPtrMapRecordTag = 0x414c4f43;  // "ALOC"
 inline constexpr uint32_t AllocaPtrMapBitmapWordBits = 64;
+
+// Open-coded defer frame locations are carried in the ordinary statepoint
+// deopt prefix. The alloca ptrmap envelope, when present, follows this record:
+//
+//   BEGIN, protocol-length, slot-count, defer-bits-base, slots-array-base,
+//   END, protocol-length
+//
+// Protocol length counts BEGIN through END and excludes its trailing duplicate.
+// Every base is a direct frame address. The slots base denotes one fixed
+// [slot-count x pointer] alloca, so its elements remain consecutive through
+// frame layout without requiring a target-specific fixed stack area.
+inline constexpr int64_t OpenDeferBeginMagic = 0x474f4446; // "GODF"
+inline constexpr int64_t OpenDeferEndMagic = 0x46444f47;   // "FDOG"
 
 // Special values in PCDATA_UnsafePoint (PCDATA stream 0).
 inline constexpr int32_t UnsafePointSafe = -1;
