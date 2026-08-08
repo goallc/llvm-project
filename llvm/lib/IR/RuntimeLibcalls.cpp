@@ -40,6 +40,11 @@ RuntimeLibcallsInfo::RuntimeLibcallsInfo(const Triple &TT,
 
   initLibcalls(TT, ExceptionModel, FloatABI, EABIVersion, ABIName);
 
+  // A GoObj target has no hosted vector runtime. Keep the empty GoObj runtime
+  // set intact rather than adding vector-library implementations below.
+  if (TT.isOSBinFormatGoObj())
+    return;
+
   // TODO: Tablegen should generate these sets
   switch (VecLib) {
   case VectorLibrary::SLEEFGNUABI:
@@ -112,6 +117,12 @@ void RuntimeLibcallsInfo::initLibcalls(const Triple &TT,
                                        ExceptionHandling ExceptionModel,
                                        FloatABI::ABIType FloatABI,
                                        EABI EABIVersion, StringRef ABIName) {
+  // GoObj links against the Go runtime rather than libc, libm, libgcc, or
+  // compiler-rt. Go runtime implementations may be added explicitly here in
+  // the future, but hosted implementations must remain unavailable.
+  if (TT.isOSBinFormatGoObj())
+    return;
+
   setTargetRuntimeLibcallSets(TT, ExceptionModel, FloatABI, EABIVersion,
                               ABIName);
 }

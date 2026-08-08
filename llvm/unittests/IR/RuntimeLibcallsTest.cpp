@@ -60,4 +60,21 @@ TEST(RuntimeLibcallsTest, LibcallImplByName) {
   }
 }
 
+TEST(RuntimeLibcallsTest, GoObjHasNoHostedRuntimeLibcalls) {
+  for (StringRef TripleName : {"x86_64-unknown-linux-goobj",
+                               "aarch64-unknown-linux-goobj"}) {
+    RTLIB::RuntimeLibcallsInfo Info{Triple(TripleName)};
+    EXPECT_EQ(Info.getNumAvailableLibcallImpls(), 0u) << TripleName;
+
+    RTLIB::RuntimeLibcallsInfo VectorInfo{
+        Triple(TripleName), ExceptionHandling::None, FloatABI::Default,
+        EABI::Default, "", VectorLibrary::SLEEFGNUABI};
+    EXPECT_EQ(VectorInfo.getNumAvailableLibcallImpls(), 0u) << TripleName;
+  }
+
+  EXPECT_GT(RTLIB::RuntimeLibcallsInfo(Triple("x86_64-unknown-linux-gnu"))
+                .getNumAvailableLibcallImpls(),
+            0u);
+}
+
 } // namespace
