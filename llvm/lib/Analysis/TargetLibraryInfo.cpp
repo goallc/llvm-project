@@ -129,6 +129,14 @@ static void initializeBase(TargetLibraryInfoImpl &TLI, const Triple &T) {
 static void initializeLibCalls(TargetLibraryInfoImpl &TLI, const Triple &T,
                                const llvm::StringTable &StandardNames,
                                VectorLibrary VecLib) {
+  // Go object files are linked against the Go runtime, not a hosted C runtime.
+  // Keep libc, libm, and compiler runtime functions unavailable so IR passes do
+  // not introduce calls which the Go linker cannot resolve.
+  if (T.isOSBinFormatGoObj()) {
+    TLI.disableAllFunctions();
+    return;
+  }
+
   // Set IO unlocked variants as unavailable
   // Set them as available per system below
   TLI.setUnavailable(LibFunc_getc_unlocked);
