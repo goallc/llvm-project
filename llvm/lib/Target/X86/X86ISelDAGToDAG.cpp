@@ -5396,6 +5396,43 @@ void X86DAGToDAGISel::Select(SDNode *Node) {
     }
     break;
   }
+  case ISD::INTRINSIC_WO_CHAIN: {
+    unsigned IntNo = Node->getConstantOperandVal(0);
+    if (IntNo != Intrinsic::x86_go_udivrem_i128_i64)
+      break;
+
+    assert(Subtarget->is64Bit() && "128-by-64 division requires 64-bit mode");
+    assert(Node->getNumValues() == 2 && Node->getNumOperands() == 4 &&
+           "unexpected llvm.x86.go.udivrem.i128.i64 node");
+
+    // DIV64r divides the unsigned value in RDX:RAX by its explicit operand,
+    // producing the quotient in RAX and remainder in RDX. The frontend keeps
+    // the divisor != 0 and high < divisor checks in control flow so this exact
+    // operation is neither widened to an i128 division nor turned into a
+    // compiler-rt call.
+    SDValue High = Node->getOperand(1);
+    SDValue Low = Node->getOperand(2);
+    SDValue Divisor = Node->getOperand(3);
+
+    SDValue Chain = CurDAG->getCopyToReg(CurDAG->getEntryNode(), dl, X86::RAX,
+                                         Low, SDValue());
+    SDValue InGlue = Chain.getValue(1);
+    Chain = CurDAG->getCopyToReg(Chain, dl, X86::RDX, High, InGlue);
+    InGlue = Chain.getValue(1);
+    InGlue = SDValue(
+        CurDAG->getMachineNode(X86::DIV64r, dl, MVT::Glue, Divisor, InGlue),
+        0);
+
+    SDValue Quotient = CurDAG->getCopyFromReg(
+        CurDAG->getEntryNode(), dl, X86::RAX, MVT::i64, InGlue);
+    SDValue Remainder = CurDAG->getCopyFromReg(
+        CurDAG->getEntryNode(), dl, X86::RDX, MVT::i64,
+        Quotient.getValue(2));
+    ReplaceUses(SDValue(Node, 0), Quotient);
+    ReplaceUses(SDValue(Node, 1), Remainder);
+    CurDAG->RemoveDeadNode(Node);
+    return;
+  }
   case ISD::INTRINSIC_VOID: {
     unsigned IntNo = Node->getConstantOperandVal(1);
     switch (IntNo) {
