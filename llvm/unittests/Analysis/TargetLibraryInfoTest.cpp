@@ -57,6 +57,17 @@ protected:
 
 } // end anonymous namespace
 
+TEST(TargetLibraryInfoStandaloneTest, GoObjHasNoHostedLibraryFunctions) {
+  for (StringRef TripleName : {"x86_64-unknown-linux-goobj",
+                               "aarch64-unknown-linux-goobj"}) {
+    TargetLibraryInfoImpl TLII{Triple(TripleName)};
+    TargetLibraryInfo TLI(TLII);
+    for (unsigned FI = LibFunc::Begin_LibFunc; FI != LibFunc::End_LibFunc;
+         ++FI)
+      EXPECT_FALSE(TLI.has(static_cast<LibFunc>(FI))) << TripleName;
+  }
+}
+
 // Check that we don't accept egregiously incorrect prototypes.
 TEST_F(TargetLibraryInfoTest, InvalidProto) {
   parseAssembly("%foo = type opaque\n");
