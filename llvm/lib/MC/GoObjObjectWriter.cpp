@@ -1447,11 +1447,13 @@ void GoObjObjectWriter::recordRelocation(const MCFragment &F,
     assert(Info.TargetSize % 8 == 0 && "Target size must be byte-aligned");
     RelocSize = Info.TargetSize / 8;
   }
-  Relocations.push_back({Target.getAddSym(), Target.getSubSym(), F.getParent(),
-                         Asm->getFragmentOffset(F) + Fixup.getOffset(),
-                         TargetObjectWriter->getRelocAddend(Target, Fixup),
-                         TargetObjectWriter->getRelocType(Target, Fixup),
-                         RelocSize, Fixup.isPCRel()});
+  GoObjRelocationEntry Reloc{
+      Target.getAddSym(), Target.getSubSym(), F.getParent(),
+      Asm->getFragmentOffset(F) + Fixup.getOffset(),
+      TargetObjectWriter->getRelocAddend(Target, Fixup),
+      TargetObjectWriter->getRelocType(Target, Fixup), RelocSize,
+      Fixup.isPCRel(), unsigned(Fixup.getKind())};
+  Relocations.push_back(Reloc);
   FixedValue = 0;
 }
 
@@ -2061,7 +2063,23 @@ uint64_t GoObjObjectWriter::writeObject() {
         Twine(static_cast<unsigned>(Reloc.Symbol->isUndefined())));
   };
 
+  SmallVector<GoObjRelocationEntry> MergedRelocations;
   for (const GoObjRelocationEntry &Reloc : Relocations) {
+    bool SameSource = false;
+    if (!MergedRelocations.empty()) {
+      std::optional<uint32_t> PreviousSource = FindContainingSymbol(
+          MergedRelocations.back().Section, MergedRelocations.back().Offset);
+      std::optional<uint32_t> CurrentSource =
+          FindContainingSymbol(Reloc.Section, Reloc.Offset);
+      SameSource = PreviousSource && CurrentSource &&
+                   *PreviousSource == *CurrentSource;
+    }
+    if (!SameSource || !TargetObjectWriter->mergeRelocations(
+                           MergedRelocations.back(), Reloc))
+      MergedRelocations.push_back(Reloc);
+  }
+
+  for (const GoObjRelocationEntry &Reloc : MergedRelocations) {
     if (Reloc.Subtractor)
       report_fatal_error("GoObj relocation subtractors are not implemented");
 

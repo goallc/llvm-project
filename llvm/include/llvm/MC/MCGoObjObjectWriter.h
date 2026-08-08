@@ -23,6 +23,18 @@ class MCSection;
 class MCValue;
 class raw_pwrite_stream;
 
+struct GoObjRelocationEntry {
+  const MCSymbol *Symbol;
+  const MCSymbol *Subtractor;
+  const MCSection *Section;
+  uint64_t Offset;
+  int64_t Addend;
+  unsigned Type;
+  uint8_t Size;
+  bool IsPCRel;
+  unsigned FixupKind = 0;
+};
+
 struct MCGoObjObjectWriterConfig {
   GoObj::SourceKind SourceKind = GoObj::SourceKind::Assembly;
   GoObj::DefinedSymbolBlock DefaultDefinedSymbolBlock =
@@ -69,17 +81,14 @@ public:
   /// architectural PC biases introduced while evaluating MC fixups.
   virtual int64_t getRelocAddend(const MCValue &Target,
                                  const MCFixup &Fixup) const;
-};
 
-struct GoObjRelocationEntry {
-  const MCSymbol *Symbol;
-  const MCSymbol *Subtractor;
-  const MCSection *Section;
-  uint64_t Offset;
-  int64_t Addend;
-  unsigned Type;
-  uint8_t Size;
-  bool IsPCRel;
+  /// Merge a target instruction sequence into one Go relocation when the Go
+  /// linker models the sequence as a unit. Returns true when Current was
+  /// consumed by Previous.
+  virtual bool mergeRelocations(GoObjRelocationEntry &Previous,
+                                const GoObjRelocationEntry &Current) const {
+    return false;
+  }
 };
 
 class GoObjObjectWriter final : public MCObjectWriter {

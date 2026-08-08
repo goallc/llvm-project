@@ -28,6 +28,8 @@ public:
   uint8_t getRelocSize(const MCFixup &Fixup) const override;
   int64_t getRelocAddend(const MCValue &Target,
                          const MCFixup &Fixup) const override;
+  bool mergeRelocations(GoObjRelocationEntry &Previous,
+                        const GoObjRelocationEntry &Current) const override;
 };
 
 } // end anonymous namespace
@@ -106,6 +108,50 @@ unsigned AArch64GoObjObjectWriter::getRelocType(const MCValue &Target,
     reportError(Fixup.getLoc(), "unsupported AArch64 goobj relocation type");
     return GoObj::R_ADDR;
   }
+}
+
+bool AArch64GoObjObjectWriter::mergeRelocations(
+    GoObjRelocationEntry &Previous,
+    const GoObjRelocationEntry &Current) const {
+  // getRelocAddend subtracts one instruction from the PC-relative ADRP,
+  // while the low-12 fixup is not itself PC-relative. Thus matching source
+  // expressions differ internally by the original four-byte relocation size.
+  if (Previous.Section != Current.Section ||
+      Previous.Offset + 4 != Current.Offset ||
+      Previous.Symbol != Current.Symbol ||
+      Previous.Subtractor != Current.Subtractor ||
+      Previous.Addend + Previous.Size != Current.Addend ||
+      Previous.FixupKind != AArch64::fixup_aarch64_pcrel_adrp_imm21)
+    return false;
+
+  unsigned Type;
+  switch (Current.FixupKind) {
+  case AArch64::fixup_aarch64_add_imm12:
+    Type = GoObj::R_ADDRARM64;
+    break;
+  case AArch64::fixup_aarch64_ldst_imm12_scale1:
+    Type = GoObj::R_ARM64_PCREL_LDST8;
+    break;
+  case AArch64::fixup_aarch64_ldst_imm12_scale2:
+    Type = GoObj::R_ARM64_PCREL_LDST16;
+    break;
+  case AArch64::fixup_aarch64_ldst_imm12_scale4:
+    Type = GoObj::R_ARM64_PCREL_LDST32;
+    break;
+  case AArch64::fixup_aarch64_ldst_imm12_scale8:
+    Type = GoObj::R_ARM64_PCREL_LDST64;
+    break;
+  default:
+    return false;
+  }
+
+  Previous.Type = Type;
+  Previous.Size = 8;
+  // getGoObjRelocAddend adds the composite relocation size back for a
+  // PC-relative entry. Normalize the pair so its serialized addend remains
+  // the expression's source addend, just like the two individual fixups.
+  Previous.Addend = Current.Addend - Previous.Size;
+  return true;
 }
 
 std::unique_ptr<MCObjectTargetWriter> llvm::createAArch64GoObjObjectWriter() {
