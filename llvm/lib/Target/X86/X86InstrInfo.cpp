@@ -459,27 +459,68 @@ int X86InstrInfo::getSPAdjust(const MachineInstr &MI) const {
 }
 
 int64_t X86InstrInfo::getGoObjSPAdjust(const MachineInstr &MI) const {
-  if (MI.getFlag(MachineInstr::FrameDestroy)) {
-    switch (MI.getOpcode()) {
-    default:
-      break;
-    case X86::POP16r:
-    case X86::POP16rmr:
-    case X86::POP16rmm:
-      return -2;
-    case X86::POP32r:
-    case X86::POP32rmr:
-    case X86::POP32rmm:
-      return -4;
-    case X86::POP64r:
-    case X86::POP64rmr:
-    case X86::POP64rmm:
-    case X86::POPP64r:
-      return -8;
-    case X86::POP2:
-    case X86::POP2P:
-      return -16;
-    }
+  // The generic implementation deliberately ignores instructions that are
+  // neither frame-setup/destroy instructions nor frame instructions. X86 call
+  // lowering can, however, materialize an unreserved outgoing call frame as
+  // ordinary PUSHes plus unflagged ADD/SUB/LEA adjustments. Go's PCSP metadata
+  // must describe all of those intermediate SP depths both for traceback and
+  // for funcMaxSPDelta, which the runtime uses to size a grown stack.
+  switch (MI.getOpcode()) {
+  default:
+    break;
+  case X86::PUSH32r:
+  case X86::PUSH32rmm:
+  case X86::PUSH32rmr:
+  case X86::PUSH32i:
+    return 4;
+  case X86::PUSH64r:
+  case X86::PUSH64rmm:
+  case X86::PUSH64rmr:
+  case X86::PUSH64i32:
+    return 8;
+  case X86::POP16r:
+  case X86::POP16rmr:
+  case X86::POP16rmm:
+    return -2;
+  case X86::POP32r:
+  case X86::POP32rmr:
+  case X86::POP32rmm:
+    return -4;
+  case X86::POP64r:
+  case X86::POP64rmr:
+  case X86::POP64rmm:
+  case X86::POPP64r:
+    return -8;
+  case X86::POP2:
+  case X86::POP2P:
+    return -16;
+  case X86::ADD32ri8:
+  case X86::ADD32ri:
+  case X86::ADD64ri8:
+  case X86::ADD64ri32:
+  case X86::ADD64ri32_NF:
+    if (MI.getOperand(0).getReg() == RI.getStackRegister() &&
+        MI.getOperand(1).getReg() == RI.getStackRegister())
+      return -MI.getOperand(2).getImm();
+    break;
+  case X86::SUB32ri8:
+  case X86::SUB32ri:
+  case X86::SUB64ri8:
+  case X86::SUB64ri32:
+  case X86::SUB64ri32_NF:
+    if (MI.getOperand(0).getReg() == RI.getStackRegister() &&
+        MI.getOperand(1).getReg() == RI.getStackRegister())
+      return MI.getOperand(2).getImm();
+    break;
+  case X86::LEA32r:
+  case X86::LEA64r:
+    if (MI.getOperand(0).getReg() == RI.getStackRegister() &&
+        MI.getOperand(1 + X86::AddrBaseReg).getReg() == RI.getStackRegister() &&
+        MI.getOperand(1 + X86::AddrScaleAmt).getImm() == 1 &&
+        MI.getOperand(1 + X86::AddrIndexReg).getReg() == X86::NoRegister &&
+        MI.getOperand(1 + X86::AddrDisp).isImm())
+      return -MI.getOperand(1 + X86::AddrDisp).getImm();
+    break;
   }
 
   return TargetInstrInfo::getGoObjSPAdjust(MI);
