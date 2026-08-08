@@ -9,7 +9,10 @@
 #ifndef LLVM_LIB_MC_GOOBJSTACKMAPUTILS_H
 #define LLVM_LIB_MC_GOOBJSTACKMAPUTILS_H
 
+#include "llvm/ADT/SmallVector.h"
 #include <cstdint>
+#include <limits>
+#include <optional>
 
 namespace llvm::goobj {
 
@@ -24,6 +27,43 @@ struct StackMapSlot {
   StackMapSlotKind Kind = StackMapSlotKind::Invalid;
   uint32_t Bit = 0;
 };
+
+inline std::optional<SmallVector<int64_t, 4>>
+expandStackMapPointerWords(int64_t Offset, uint16_t Size, bool IsIndirect,
+                           uint32_t PointerSize) {
+  // A fixed vector of GC pointers is one indirect StackMaps location whose
+  // size covers every lane. Go pointer maps describe pointer-sized stack
+  // words, so expand that location without losing the vector at the IR or
+  // machine-statepoint layers. A direct location still denotes one address
+  // value and must remain pointer-sized.
+  if (!Size || !PointerSize || Size % PointerSize != 0 ||
+      (!IsIndirect && Size != PointerSize))
+    return std::nullopt;
+
+  SmallVector<int64_t, 4> WordOffsets;
+  WordOffsets.reserve(Size / PointerSize);
+  for (uint64_t Word = 0; Word != Size / PointerSize; ++Word) {
+    uint64_t ByteOffset = Word * PointerSize;
+    if (Offset >
+        std::numeric_limits<int64_t>::max() - static_cast<int64_t>(ByteOffset))
+      return std::nullopt;
+    WordOffsets.push_back(Offset + static_cast<int64_t>(ByteOffset));
+  }
+  return WordOffsets;
+}
+
+inline std::optional<uint32_t>
+classifyStackGrowthStackMapSlot(int64_t Offset, uint32_t PointerSize,
+                                uint64_t ArgsStart, uint64_t ArgsSize) {
+  if (Offset < 0 || !PointerSize)
+    return std::nullopt;
+  uint64_t UOffset = static_cast<uint64_t>(Offset);
+  if (UOffset < ArgsStart || UOffset - ArgsStart >= ArgsSize ||
+      ArgsSize - (UOffset - ArgsStart) < PointerSize ||
+      (UOffset - ArgsStart) % PointerSize != 0)
+    return std::nullopt;
+  return static_cast<uint32_t>((UOffset - ArgsStart) / PointerSize);
+}
 
 inline StackMapSlot
 classifyOrdinaryStackMapSlot(int64_t Offset, bool IsIndirect,

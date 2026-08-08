@@ -850,56 +850,55 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
         report_fatal_error(
             "GoObj statepoint GC pointer is not in a stack slot");
       }
-      if (Loc.Size != PointerSize || Loc.DwarfRegNum != StackPointerDwarfRegNum)
+      std::optional<SmallVector<int64_t, 4>> PointerWordOffsets =
+          goobj::expandStackMapPointerWords(
+              Loc.Offset, Loc.Size,
+              Loc.Type == MCContext::GoObjStackMapLocation::Indirect,
+              PointerSize);
+      if (!PointerWordOffsets || Loc.DwarfRegNum != StackPointerDwarfRegNum)
         report_fatal_error(
             Twine("GoObj statepoint in ") + Function.Name +
             " contains an invalid pointer stack slot: size=" + Twine(Loc.Size) +
             ", dwarf-reg=" + Twine(Loc.DwarfRegNum) +
             ", offset=" + Twine(Loc.Offset));
 
-      if (IsStackGrowth) {
-        if (Loc.Type != MCContext::GoObjStackMapLocation::Indirect ||
-            Loc.Offset < 0 ||
-            static_cast<uint64_t>(Loc.Offset) < FrameLayout.EntryArgsStart ||
-            static_cast<uint64_t>(Loc.Offset) + PointerSize >
-                static_cast<uint64_t>(FrameLayout.EntryArgsStart) + ArgSize ||
-            (static_cast<uint64_t>(Loc.Offset) - FrameLayout.EntryArgsStart) %
-                    PointerSize !=
-                0)
-          report_fatal_error(
-              "GoObj stack-growth statepoint contains an invalid argument "
-              "pointer slot");
-        uint32_t Bit =
-            (static_cast<uint32_t>(Loc.Offset) - FrameLayout.EntryArgsStart) /
-            PointerSize;
-        Pair.Args[Bit / 8] |= uint8_t(1u << (Bit % 8));
-        continue;
-      }
+      for (int64_t WordOffset : *PointerWordOffsets) {
+        if (IsStackGrowth) {
+          std::optional<uint32_t> Bit = goobj::classifyStackGrowthStackMapSlot(
+              WordOffset, PointerSize, FrameLayout.EntryArgsStart, ArgSize);
+          if (Loc.Type != MCContext::GoObjStackMapLocation::Indirect || !Bit)
+            report_fatal_error(
+                "GoObj stack-growth statepoint contains an invalid argument "
+                "pointer slot");
+          Pair.Args[*Bit / 8] |= uint8_t(1u << (*Bit % 8));
+          continue;
+        }
 
-      goobj::StackMapSlot Slot = goobj::classifyOrdinaryStackMapSlot(
-          Loc.Offset, Loc.Type == MCContext::GoObjStackMapLocation::Indirect,
-          PointerSize, FrameLayout.GCLocalsStart, FrameLayout.GCLocalsSize,
-          FrameLayout.GCLocalsBitOffset, OrdinaryArgsStart, ArgSize);
-      switch (Slot.Kind) {
-      case goobj::StackMapSlotKind::Invalid:
-        report_fatal_error(
-            "GoObj ordinary statepoint contains an invalid pointer stack "
-            "slot");
-      case goobj::StackMapSlotKind::Direct:
-        // Direct describes the pointer value SP+Offset, not a pointer stored
-        // at SP+Offset. Statepoint lowering rematerializes that address after
-        // stack movement; neither the locals nor args bitmap should scan the
-        // slot's contents.
-        break;
-      case goobj::StackMapSlotKind::Args:
-        Pair.Args[Slot.Bit / 8] |= uint8_t(1u << (Slot.Bit % 8));
-        break;
-      case goobj::StackMapSlotKind::Locals:
-        if (AllocaPointerBits.contains(Slot.Bit))
+        goobj::StackMapSlot Slot = goobj::classifyOrdinaryStackMapSlot(
+            WordOffset, Loc.Type == MCContext::GoObjStackMapLocation::Indirect,
+            PointerSize, FrameLayout.GCLocalsStart, FrameLayout.GCLocalsSize,
+            FrameLayout.GCLocalsBitOffset, OrdinaryArgsStart, ArgSize);
+        switch (Slot.Kind) {
+        case goobj::StackMapSlotKind::Invalid:
           report_fatal_error(
-              "GoObj alloca ptrmap overlaps an ordinary GC root slot");
-        Pair.Locals[Slot.Bit / 8] |= uint8_t(1u << (Slot.Bit % 8));
-        break;
+              "GoObj ordinary statepoint contains an invalid pointer stack "
+              "slot");
+        case goobj::StackMapSlotKind::Direct:
+          // Direct describes the pointer value SP+Offset, not a pointer stored
+          // at SP+Offset. Statepoint lowering rematerializes that address after
+          // stack movement; neither the locals nor args bitmap should scan the
+          // slot's contents.
+          break;
+        case goobj::StackMapSlotKind::Args:
+          Pair.Args[Slot.Bit / 8] |= uint8_t(1u << (Slot.Bit % 8));
+          break;
+        case goobj::StackMapSlotKind::Locals:
+          if (AllocaPointerBits.contains(Slot.Bit))
+            report_fatal_error(
+                "GoObj alloca ptrmap overlaps an ordinary GC root slot");
+          Pair.Locals[Slot.Bit / 8] |= uint8_t(1u << (Slot.Bit % 8));
+          break;
+        }
       }
     }
     return Pair;

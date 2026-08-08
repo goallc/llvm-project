@@ -13,6 +13,96 @@ using namespace llvm;
 
 namespace {
 
+TEST(GoObjStackMapUtilsTest, ExpandsIndirectPointerVectorLocations) {
+  auto Words = goobj::expandStackMapPointerWords(
+      /*Offset=*/24, /*Size=*/16, /*IsIndirect=*/true, /*PointerSize=*/8);
+  ASSERT_TRUE(Words);
+  EXPECT_EQ(*Words, (SmallVector<int64_t, 4>{24, 32}));
+}
+
+TEST(GoObjStackMapUtilsTest, RejectsInvalidPointerVectorLocations) {
+  EXPECT_FALSE(goobj::expandStackMapPointerWords(
+      /*Offset=*/24, /*Size=*/12, /*IsIndirect=*/true, /*PointerSize=*/8));
+  EXPECT_FALSE(goobj::expandStackMapPointerWords(
+      /*Offset=*/24, /*Size=*/16, /*IsIndirect=*/false, /*PointerSize=*/8));
+  EXPECT_FALSE(goobj::expandStackMapPointerWords(
+      /*Offset=*/std::numeric_limits<int64_t>::max(), /*Size=*/16,
+      /*IsIndirect=*/true, /*PointerSize=*/8));
+}
+
+TEST(GoObjStackMapUtilsTest, ClassifiesEveryPointerVectorWord) {
+  auto Locals = goobj::expandStackMapPointerWords(
+      /*Offset=*/8, /*Size=*/16, /*IsIndirect=*/true, /*PointerSize=*/8);
+  ASSERT_TRUE(Locals);
+  for (auto [Index, Offset] : llvm::enumerate(*Locals)) {
+    goobj::StackMapSlot Slot = goobj::classifyOrdinaryStackMapSlot(
+        Offset, /*IsIndirect=*/true, /*PointerSize=*/8, /*LocalsStart=*/8,
+        /*LocalsSize=*/32, /*LocalsBitOffset=*/0, /*ArgsStart=*/56,
+        /*ArgsSize=*/40);
+    EXPECT_EQ(Slot.Kind, goobj::StackMapSlotKind::Locals);
+    EXPECT_EQ(Slot.Bit, Index);
+  }
+
+  auto Args = goobj::expandStackMapPointerWords(
+      /*Offset=*/56, /*Size=*/16, /*IsIndirect=*/true, /*PointerSize=*/8);
+  ASSERT_TRUE(Args);
+  for (auto [Index, Offset] : llvm::enumerate(*Args)) {
+    goobj::StackMapSlot Slot = goobj::classifyOrdinaryStackMapSlot(
+        Offset, /*IsIndirect=*/true, /*PointerSize=*/8, /*LocalsStart=*/8,
+        /*LocalsSize=*/32, /*LocalsBitOffset=*/0, /*ArgsStart=*/56,
+        /*ArgsSize=*/40);
+    EXPECT_EQ(Slot.Kind, goobj::StackMapSlotKind::Args);
+    EXPECT_EQ(Slot.Bit, Index);
+  }
+}
+
+TEST(GoObjStackMapUtilsTest, RejectsInvalidVectorWordPlacement) {
+  auto Unaligned = goobj::expandStackMapPointerWords(
+      /*Offset=*/12, /*Size=*/16, /*IsIndirect=*/true, /*PointerSize=*/8);
+  ASSERT_TRUE(Unaligned);
+  for (int64_t Offset : *Unaligned)
+    EXPECT_EQ(goobj::classifyOrdinaryStackMapSlot(
+                  Offset, /*IsIndirect=*/true, /*PointerSize=*/8,
+                  /*LocalsStart=*/8, /*LocalsSize=*/32,
+                  /*LocalsBitOffset=*/0, /*ArgsStart=*/56, /*ArgsSize=*/40)
+                  .Kind,
+              goobj::StackMapSlotKind::Invalid);
+
+  auto OutOfBounds = goobj::expandStackMapPointerWords(
+      /*Offset=*/88, /*Size=*/16, /*IsIndirect=*/true, /*PointerSize=*/8);
+  ASSERT_TRUE(OutOfBounds);
+  EXPECT_EQ(goobj::classifyOrdinaryStackMapSlot(
+                (*OutOfBounds)[0], /*IsIndirect=*/true, /*PointerSize=*/8,
+                /*LocalsStart=*/8, /*LocalsSize=*/32,
+                /*LocalsBitOffset=*/0, /*ArgsStart=*/56, /*ArgsSize=*/40)
+                .Kind,
+            goobj::StackMapSlotKind::Args);
+  EXPECT_EQ(goobj::classifyOrdinaryStackMapSlot(
+                (*OutOfBounds)[1], /*IsIndirect=*/true, /*PointerSize=*/8,
+                /*LocalsStart=*/8, /*LocalsSize=*/32,
+                /*LocalsBitOffset=*/0, /*ArgsStart=*/56, /*ArgsSize=*/40)
+                .Kind,
+            goobj::StackMapSlotKind::Invalid);
+}
+
+TEST(GoObjStackMapUtilsTest, ClassifiesStackGrowthPointerVectorWords) {
+  auto Words = goobj::expandStackMapPointerWords(
+      /*Offset=*/64, /*Size=*/16, /*IsIndirect=*/true, /*PointerSize=*/8);
+  ASSERT_TRUE(Words);
+  EXPECT_EQ(goobj::classifyStackGrowthStackMapSlot(
+                (*Words)[0], /*PointerSize=*/8, /*ArgsStart=*/64,
+                /*ArgsSize=*/16),
+            0u);
+  EXPECT_EQ(goobj::classifyStackGrowthStackMapSlot(
+                (*Words)[1], /*PointerSize=*/8, /*ArgsStart=*/64,
+                /*ArgsSize=*/16),
+            1u);
+  EXPECT_FALSE(goobj::classifyStackGrowthStackMapSlot(
+      /*Offset=*/68, /*PointerSize=*/8, /*ArgsStart=*/64, /*ArgsSize=*/16));
+  EXPECT_FALSE(goobj::classifyStackGrowthStackMapSlot(
+      /*Offset=*/80, /*PointerSize=*/8, /*ArgsStart=*/64, /*ArgsSize=*/16));
+}
+
 TEST(GoObjStackMapUtilsTest, ClassifiesLocalsAndArgs) {
   constexpr uint32_t PointerSize = 8;
   constexpr uint64_t LocalsStart = 8;
