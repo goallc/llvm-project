@@ -10,6 +10,7 @@
 #define LLVM_LIB_MC_GOOBJSTACKMAPUTILS_H
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/MC/MCContext.h"
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -27,6 +28,12 @@ struct StackMapSlot {
   StackMapSlotKind Kind = StackMapSlotKind::Invalid;
   uint32_t Bit = 0;
 };
+
+inline bool
+isNullGCLiveLocation(const MCContext::GoObjStackMapLocation &Location) {
+  return Location.Type == MCContext::GoObjStackMapLocation::Constant &&
+         Location.Offset == 0;
+}
 
 inline std::optional<SmallVector<int64_t, 4>>
 expandStackMapPointerWords(int64_t Offset, uint16_t Size, bool IsIndirect,
