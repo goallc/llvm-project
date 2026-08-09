@@ -12067,6 +12067,14 @@ findArgumentCopyElisionCandidates(const DataLayout &DL,
       // to allocas.
       if (I.isDebugOrPseudoInst())
         continue;
+      // A lifetime marker describes the storage already represented by the
+      // alloca; passing the address to the marker neither escapes nor clobbers
+      // it. Frontends commonly place lifetime.start between a canonical
+      // argument alloca and its initializing store.
+      if (const auto *II = dyn_cast<IntrinsicInst>(&I);
+          II && (II->getIntrinsicID() == Intrinsic::lifetime_start ||
+                 II->getIntrinsicID() == Intrinsic::lifetime_end))
+        continue;
       // This is an unknown instruction. Assume it escapes or writes to all
       // static alloca operands.
       for (const Use &U : I.operands()) {

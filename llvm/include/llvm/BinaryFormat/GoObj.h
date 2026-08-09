@@ -35,14 +35,16 @@ inline constexpr uint64_t StackGrowthStatepointID = 0x476f537461636b47ULL;
 // Protocol length counts BEGIN through END and excludes its trailing duplicate;
 // record length counts RECORD-TAG through the final bitmap word. A matching
 // direct alloca in the statepoint gc-live operands says that the record's
-// contents contribute to that callsite's LocalsPointerMaps. An unmatched
-// record identifies a function-level native Go StackObject; the producer must
-// repeat that same layout at every ordinary statepoint. The direct address
-// itself remains a rematerialized frame index, not a bitmap slot. The first
-// contract has no version, requires a whole alloca at byte offset zero, and
-// uses 64-bit bitmap words. Bit N, stored low-bit first, describes the
-// pointer-sized slot at direct-base + byte-offset + N * pointer-size. Padding
-// bits must be zero.
+// contents contribute to that callsite's ArgsPointerMaps or
+// LocalsPointerMaps, according to the alloca's frame region. An unmatched
+// record identifies a function-level native Go StackObject; argument/result
+// objects use a non-negative argp-relative offset and local objects use a
+// negative varp-relative offset. The producer must repeat that same layout at
+// every ordinary statepoint. The direct address itself remains a rematerialized
+// frame index, not a bitmap slot. The first contract has no version, requires a
+// whole alloca at byte offset zero, and uses 64-bit bitmap words. Bit N, stored
+// low-bit first, describes the pointer-sized slot at direct-base + byte-offset
+// + N * pointer-size. Padding bits must be zero.
 // These tags are intentionally small enough to remain inline StackMaps
 // constants; bitmap payload words may use the StackMaps constant pool.
 inline constexpr int64_t AllocaPtrMapBeginMagic = 0x47414c41; // "GALA"
