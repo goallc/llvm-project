@@ -1,4 +1,5 @@
 ; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O0 < %s | FileCheck %s --check-prefix=A64
+; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O2 < %s | FileCheck %s --check-prefix=A64-O2
 
 define goabiinternal i64 @second_int(i64 %a, i64 %b) {
 ; A64-LABEL: second_int:
@@ -150,6 +151,12 @@ define goabiinternal i16 @call_stack_bytes() {
 ; A64: bl stack_bytes
 ; A64-DAG: ldrb w{{[0-9]+}}, [x{{[0-9]+}}, #16]
 ; A64-DAG: ldrb w{{[0-9]+}}, [x{{[0-9]+}}, #23]
+; A64-O2-LABEL: call_stack_bytes:
+; A64-O2:       bl stack_bytes
+; A64-O2-NEXT:  mov [[RESULT_SP:x[0-9]+]], sp
+; A64-O2:       ldrb w{{[0-9]+}}, {{\[}}[[RESULT_SP]], #23]
+; A64-O2:       ldrb w{{[0-9]+}}, {{\[}}[[RESULT_SP]], #16]
+; A64-O2:       add sp, sp, #{{[0-9]+}}
 entry:
   %result = call goabiinternal [8 x i8] @stack_bytes(
       [8 x i8] [i8 1, i8 2, i8 3, i8 4, i8 5, i8 6, i8 7, i8 8])

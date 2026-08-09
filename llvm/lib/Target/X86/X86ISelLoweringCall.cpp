@@ -537,6 +537,20 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
   DAG.addCallSiteInfo(Chain.getNode(), std::move(CSInfo));
   InGlue = Chain.getValue(1);
 
+  // A callee may grow the Go stack. Preserve the current outgoing-frame
+  // address after the call, rather than retaining the pre-call SP which may
+  // point into the retired stack segment. CALLSEQ_END changes SP, forcing
+  // this value to be materialized when stack results are present.
+  SDValue ResultStackPtr;
+  if (llvm::any_of(groupGoArgs(ArrayRef(Ins)), [&](const auto &Group) {
+        return !Layout.Results[Group.Index].InRegs;
+      })) {
+    ResultStackPtr = DAG.getCopyFromReg(
+        Chain, DL, RegInfo->getStackRegister(), PtrVT, InGlue);
+    Chain = ResultStackPtr.getValue(1);
+    InGlue = ResultStackPtr.getValue(2);
+  }
+
   Chain = DAG.getCALLSEQ_END(Chain, NumBytes, 0, InGlue, DL);
   InGlue = Chain.getValue(1);
 
@@ -572,17 +586,6 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
   // the stack without consuming that budget, so a later result can still be
   // register-assigned. Interleaving stack loads with glued physical-register
   // copies can create a cyclic scheduler dependency at statepoints.
-  SDValue ResultStackPtr;
-  if (llvm::any_of(groupGoArgs(ArrayRef(Ins)), [&](const auto &Group) {
-        return !Layout.Results[Group.Index].InRegs;
-      })) {
-    // A callee may grow the Go stack. The pre-call SP used for outgoing
-    // arguments can then point into the retired stack segment, so read the
-    // current stack register after the call before loading stack results.
-    ResultStackPtr =
-        DAG.getCopyFromReg(Chain, DL, RegInfo->getStackRegister(), PtrVT);
-    Chain = ResultStackPtr.getValue(1);
-  }
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
     const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
     if (ResultLayout.InRegs)
