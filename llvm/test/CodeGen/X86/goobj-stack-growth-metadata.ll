@@ -78,14 +78,27 @@ join:
 ; CHECK: aux 2.{{[0-9]+}}: type=pcsp target= pc=[{{.*}}:256,{{[0-9]+}}-{{[0-9]+}}:0]
 
 ; ASM-LABEL: big_frame:
-; ASM: retq
-; ASM-NEXT: .LBB0_{{[0-9]+}}:
+; Match Go's single stack-check loop: the hot entry executes the check
+; directly, and morestack jumps back to that same check.
+; ASM-NOT: jmp
+; ASM: [[BIG_CHECK:.LBB0_[0-9]+]]:
+; ASM: movq %rsp, %r12
+; ASM: subq $4872, %r12
+; ASM: jb [[BIG_MORESTACK:.LBB0_[0-9]+]]
+; ASM: cmpq 16(%r14), %r12
+; ASM: ja [[BIG_BODY:.LBB0_[0-9]+]]
+; ASM: [[BIG_MORESTACK]]:
 ; ASM: callq runtime.morestack_noctxt
+; ASM-NEXT: movq 8(%rsp), %rax
+; ASM-NEXT: jmp [[BIG_CHECK]]
+; ASM: [[BIG_BODY]]:
+; ASM: retq
 
 ; ASM-LABEL: big_closure_frame:
-; ASM: retq
-; ASM-NEXT: .LBB1_{{[0-9]+}}:
+; ASM: [[CLOSURE_CHECK:.LBB1_[0-9]+]]:
 ; ASM: callq runtime.morestack
+; ASM: jmp [[CLOSURE_CHECK]]
+; ASM: retq
 
 ; ASM-LABEL: large_outgoing_frame:
 ; ASM: leaq -128(%rsp), %r12
@@ -93,11 +106,11 @@ join:
 
 ; MIR-LABEL: name: big_frame
 ; MIR: fixedStack:
-; MIR-NEXT: - { id: 0, type: spill-slot, offset: 8, size: 8
+; MIR-NEXT: - { id: 0, type: spill-slot, offset: 0, size: 8
 
 ; PEI-LABEL: name: big_frame
 ; PEI: fixedStack:
-; PEI-NEXT: - { id: 0, type: spill-slot, offset: 8, size: 8
+; PEI-NEXT: - { id: 0, type: spill-slot, offset: 0, size: 8
 ; PEI: MOV64mr {{.*rsp}}, 1, {{.*noreg}}, 8, {{.*noreg}}, {{.*rax}}
 ; PEI: CALL64pcrel32 &runtime.morestack_noctxt
 ; PEI: {{.*rax}} = MOV64rm {{.*rsp}}, 1, {{.*noreg}}, 8, {{.*noreg}}
