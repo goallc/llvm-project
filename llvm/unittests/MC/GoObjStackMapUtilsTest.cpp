@@ -180,4 +180,43 @@ TEST(GoObjStackMapUtilsTest, AppliesX86LocalsCallSlotBias) {
   EXPECT_EQ(Classify(32).Kind, goobj::StackMapSlotKind::Invalid);
 }
 
+TEST(GoObjStackMapUtilsTest, ClassifiesCompleteAllocaFrameRegions) {
+  auto Classify = [](int64_t Offset, uint64_t Size) {
+    return goobj::classifyOrdinaryStackMapRange(
+        Offset, Size, /*PointerSize=*/8, /*LocalsStart=*/8,
+        /*LocalsSize=*/32, /*LocalsBitOffset=*/0, /*ArgsStart=*/56,
+        /*ArgsSize=*/40);
+  };
+
+  EXPECT_EQ(Classify(8, 32), goobj::StackMapSlotKind::Locals);
+  EXPECT_EQ(Classify(56, 40), goobj::StackMapSlotKind::Args);
+  EXPECT_FALSE(Classify(32, 32));
+  EXPECT_FALSE(Classify(88, 16));
+  EXPECT_FALSE(Classify(12, 8));
+  EXPECT_FALSE(Classify(56, 12));
+}
+
+TEST(GoObjStackMapUtilsTest, ComputesNativeGoStackObjectOffsets) {
+  constexpr uint64_t VarpOffset = 40;
+  constexpr uint64_t ArgsStart = 56;
+
+  EXPECT_EQ(goobj::getStackObjectFrameOffset(goobj::StackMapSlotKind::Locals,
+                                             /*BaseOffset=*/8, VarpOffset,
+                                             ArgsStart),
+            -32);
+  EXPECT_EQ(goobj::getStackObjectFrameOffset(goobj::StackMapSlotKind::Args,
+                                             /*BaseOffset=*/56, VarpOffset,
+                                             ArgsStart),
+            0);
+  EXPECT_EQ(goobj::getStackObjectFrameOffset(goobj::StackMapSlotKind::Args,
+                                             /*BaseOffset=*/80, VarpOffset,
+                                             ArgsStart),
+            24);
+  EXPECT_FALSE(goobj::getStackObjectFrameOffset(goobj::StackMapSlotKind::Locals,
+                                                /*BaseOffset=*/40, VarpOffset,
+                                                ArgsStart));
+  EXPECT_FALSE(goobj::getStackObjectFrameOffset(
+      goobj::StackMapSlotKind::Args, /*BaseOffset=*/48, VarpOffset, ArgsStart));
+}
+
 } // namespace
