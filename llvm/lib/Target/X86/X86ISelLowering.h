@@ -864,6 +864,7 @@ namespace llvm {
     std::optional<ArgumentCopyElisionFrameInfo>
     getArgumentCopyElisionFrameInfo(const Argument &Arg,
                                     MachineFunction &MF) const override;
+    int getGoABI0FrameIndex(MachineFunction &MF) const override;
     SDValue LowerCall(CallLoweringInfo &CLI,
                       SmallVectorImpl<SDValue> &InVals) const override;
 
