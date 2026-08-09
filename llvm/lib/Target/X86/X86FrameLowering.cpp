@@ -333,6 +333,14 @@ static void emitGoStackCheck(MachineFunction &MF,
     report_fatal_error("GoObj stack growth does not support dynamic allocas");
 
   uint64_t StackSize = MFI.getStackSize() + MFI.getUnsafeStackSize();
+  // PEI includes the maximum outgoing call frame in getStackSize() when the
+  // frame is reserved in the prologue. Push sequences and other unreserved
+  // call frames instead adjust RSP around each call, so their maximum depth is
+  // absent from getStackSize(). The Go stack check runs before those
+  // adjustments and must cover the deepest outgoing RSP as well.
+  if (!MF.getSubtarget<X86Subtarget>().getFrameLowering()->hasReservedCallFrame(
+          MF))
+    StackSize += MFI.getMaxCallFrameSize();
   const DebugLoc DL;
   const X86InstrInfo &TII = *MF.getSubtarget<X86Subtarget>().getInstrInfo();
   const X86MachineFunctionInfo *X86FI = MF.getInfo<X86MachineFunctionInfo>();
