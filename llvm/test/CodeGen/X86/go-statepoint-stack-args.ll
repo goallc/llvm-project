@@ -125,11 +125,11 @@ declare ptr addrspace(1) @llvm.experimental.gc.relocate.p1(
 ; CHECK-LABEL: name: aggregate_stack_arg
 ; CHECK: stack:           []
 ; CHECK: STATEPOINT 2,
-; CHECK-SAME: 2, 2, 1, 8, %fixed-stack.0, 0, 1, 8, %fixed-stack.2, 0,
+; CHECK-SAME: 2, 2, 1, 8, %fixed-stack.0, 0, 1, 8, %fixed-stack.1, 0,
 ; CHECK-SAME: (volatile load store (s64) on %fixed-stack.0{{[^)]*}}),
-; CHECK-SAME: (volatile load store (s64) on %fixed-stack.2{{[^)]*}})
+; CHECK-SAME: (volatile load store (s64) on %fixed-stack.1{{[^)]*}})
 ; CHECK-NEXT: ADJCALLSTACKUP64
-; CHECK-NEXT: [[AGGREGATE_RELOC:%[0-9]+]]:gr64 = MOV64rm %fixed-stack.2
+; CHECK-NEXT: [[AGGREGATE_RELOC:%[0-9]+]]:gr64 = MOV64rm %fixed-stack.1
 
 ; CHECK-LABEL: name: merged_stack_arg
 ; CHECK: stack:

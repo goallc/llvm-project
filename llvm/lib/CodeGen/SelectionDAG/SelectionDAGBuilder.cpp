@@ -12030,6 +12030,7 @@ findArgumentCopyElisionCandidates(const DataLayout &DL,
   enum StaticAllocaInfo { Unknown, Clobbered, Elidable };
   SmallDenseMap<const AllocaInst *, StaticAllocaInfo, 8> StaticAllocas;
   unsigned NumArgs = FuncInfo->Fn->arg_size();
+  bool IsGoCallingConv = goabi::isGoCallingConv(FuncInfo->Fn->getCallingConv());
   StaticAllocas.reserve(NumArgs * 2);
 
   auto GetInfoIfStaticAlloca = [&](const Value *V) -> StaticAllocaInfo * {
@@ -12085,18 +12086,17 @@ findArgumentCopyElisionCandidates(const DataLayout &DL,
 
     // Check if the stored value is an argument, and that this store fully
     // initializes the alloca.
-    // If the argument type has padding bits we can't directly forward a pointer
-    // as the upper bits may contain garbage.
+    // Generic ABIs cannot directly forward types with padding because the
+    // upper bits may contain garbage. Go's canonical home is defined for the
+    // complete logical value, including its padding layout.
     // Don't elide copies from the same argument twice.
     const Value *Val = SI->getValueOperand()->stripPointerCasts();
     const auto *Arg = dyn_cast<Argument>(Val);
     std::optional<TypeSize> AllocaSize = AI->getAllocationSize(DL);
     if (!Arg || Arg->hasPassPointeeByValueCopyAttr() ||
-        (goabi::isGoCallingConv(FuncInfo->Fn->getCallingConv()) &&
-         goabi::getPaddingPieces(Arg->getType()).any()) ||
         Arg->getType()->isEmptyTy() || !AllocaSize ||
         DL.getTypeStoreSize(Arg->getType()) != *AllocaSize ||
-        !DL.typeSizeEqualsStoreSize(Arg->getType()) ||
+        (!IsGoCallingConv && !DL.typeSizeEqualsStoreSize(Arg->getType())) ||
         ArgCopyElisionCandidates.count(Arg)) {
       *Info = StaticAllocaInfo::Clobbered;
       continue;
@@ -12124,13 +12124,23 @@ static void tryToElideArgumentCopy(
     DenseMap<int, int> &ArgCopyElisionFrameIndexMap,
     SmallPtrSetImpl<const Instruction *> &ElidedArgCopyInstrs,
     ArgCopyElisionMapTy &ArgCopyElisionCandidates, const Argument &Arg,
-    ArrayRef<SDValue> ArgVals, bool &ArgHasUses) {
-  // Check if this is a load from a fixed stack object.
-  auto *LNode = dyn_cast<LoadSDNode>(ArgVals[0]);
-  if (!LNode)
-    return;
-  auto *FINode = dyn_cast<FrameIndexSDNode>(LNode->getBasePtr().getNode());
-  if (!FINode)
+    ArrayRef<SDValue> ArgVals, const TargetLowering &TLI, bool &ArgHasUses) {
+  MachineFunction &MF = *FuncInfo.MF;
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+
+  int FixedIndex = INT_MAX;
+  bool ValueAlreadyInFrame = false;
+  if (auto FrameInfo = TLI.getArgumentCopyElisionFrameInfo(Arg, MF)) {
+    FixedIndex = FrameInfo->FrameIndex;
+    ValueAlreadyInFrame = FrameInfo->ValueAlreadyInFrame;
+  } else if (auto *LNode = dyn_cast<LoadSDNode>(ArgVals[0])) {
+    if (auto *FINode =
+            dyn_cast<FrameIndexSDNode>(LNode->getBasePtr().getNode())) {
+      FixedIndex = FINode->getIndex();
+      ValueAlreadyInFrame = true;
+    }
+  }
+  if (FixedIndex == INT_MAX || !MFI.isFixedObjectIndex(FixedIndex))
     return;
 
   // Check that the fixed stack object is the right size and alignment.
@@ -12139,10 +12149,8 @@ static void tryToElideArgumentCopy(
   auto ArgCopyIter = ArgCopyElisionCandidates.find(&Arg);
   assert(ArgCopyIter != ArgCopyElisionCandidates.end());
   const AllocaInst *AI = ArgCopyIter->second.first;
-  int FixedIndex = FINode->getIndex();
   int &AllocaIndex = FuncInfo.StaticAllocaMap[AI];
   int OldIndex = AllocaIndex;
-  MachineFrameInfo &MFI = FuncInfo.MF->getFrameInfo();
   if (MFI.getObjectSize(FixedIndex) != MFI.getObjectSize(OldIndex)) {
     LLVM_DEBUG(
         dbgs() << "  argument copy elision failed due to bad fixed stack "
@@ -12170,15 +12178,21 @@ static void tryToElideArgumentCopy(
   MFI.setIsAliasedObjectIndex(FixedIndex, true);
   AllocaIndex = FixedIndex;
   ArgCopyElisionFrameIndexMap.insert({OldIndex, FixedIndex});
-  for (SDValue ArgVal : ArgVals)
-    Chains.push_back(ArgVal.getValue(1));
+  if (ValueAlreadyInFrame)
+    for (SDValue ArgVal : ArgVals)
+      if (isa<LoadSDNode>(ArgVal))
+        Chains.push_back(ArgVal.getValue(1));
 
-  // Avoid emitting code for the store implementing the copy.
+  // A stack argument was written by the caller, so avoid emitting the
+  // redundant copy. A register argument still needs the canonical IR store;
+  // remapping the alloca makes that store initialize the physical ABI home.
   const StoreInst *SI = ArgCopyIter->second.second;
+  if (!ValueAlreadyInFrame)
+    return;
   ElidedArgCopyInstrs.insert(SI);
 
   // Check for uses of the argument again so that we can avoid exporting ArgVal
-  // if it is't used by anything other than the store.
+  // if it isn't used by anything other than the store.
   for (const Value *U : Arg.users()) {
     if (U != SI) {
       ArgHasUses = true;
@@ -12445,7 +12459,7 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
 
       tryToElideArgumentCopy(*FuncInfo, Chains, ArgCopyElisionFrameIndexMap,
                              ElidedArgCopyInstrs, ArgCopyElisionCandidates, Arg,
-                             ArrayRef(&InVals[i], NumParts), ArgHasUses);
+                             ArrayRef(&InVals[i], NumParts), *TLI, ArgHasUses);
     }
 
     // If this argument is unused then remember its value. It is used to generate
@@ -12496,18 +12510,41 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
               Load->getExtensionType() != ISD::NON_EXTLOAD ||
               Load->getMemoryVT().getStoreSize().getKnownMinValue() != PartSize)
             continue;
-          auto *FI = dyn_cast<FrameIndexSDNode>(Load->getBasePtr());
+          SDValue BasePtr = Load->getBasePtr();
+          uint64_t OffsetWithinObject = 0;
+          if (DAG.isBaseWithConstantOffset(BasePtr)) {
+            auto *Offset = dyn_cast<ConstantSDNode>(BasePtr.getOperand(1));
+            if (!Offset || Offset->getSExtValue() < 0)
+              continue;
+            OffsetWithinObject = Offset->getZExtValue();
+            BasePtr = BasePtr.getOperand(0);
+          }
+          auto *FI = dyn_cast<FrameIndexSDNode>(BasePtr);
           if (!FI)
             continue;
 
           MachineFrameInfo &MFI = DAG.getMachineFunction().getFrameInfo();
           if (!MFI.isFixedObjectIndex(FI->getIndex()) ||
-              !MFI.isImmutableObjectIndex(FI->getIndex()) ||
-              MFI.getObjectSize(FI->getIndex()) != int64_t(PartSize))
+              OffsetWithinObject + PartSize >
+                  uint64_t(MFI.getObjectSize(FI->getIndex())))
             continue;
 
-          FuncInfo->addArgumentValueHome(&Arg, *PartOffset, PartSize,
-                                         FI->getIndex());
+          int HomeFI = FI->getIndex();
+          if (OffsetWithinObject != 0 ||
+              MFI.getObjectSize(HomeFI) != int64_t(PartSize)) {
+            // Statepoint locations currently name an exact fixed object, not
+            // an object plus a byte offset. Create a narrow aliasing view for
+            // the pointer piece while retaining the one full logical argument
+            // home used by ordinary parameter addressing.
+            int64_t ViewOffset =
+                MFI.getObjectOffset(HomeFI) + OffsetWithinObject;
+            MFI.setIsImmutableObjectIndex(HomeFI, false);
+            MFI.setIsAliasedObjectIndex(HomeFI, true);
+            HomeFI = MFI.CreateFixedObject(PartSize, ViewOffset,
+                                           /*IsImmutable=*/false,
+                                           /*IsAliased=*/true);
+          }
+          FuncInfo->addArgumentValueHome(&Arg, *PartOffset, PartSize, HomeFI);
         }
       }
 

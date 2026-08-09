@@ -195,40 +195,44 @@ static unsigned getIntegerLoadOpcode(unsigned Size) {
   }
 }
 
-static void
-emitGoRegSpills(MachineFunction &MF, MachineBasicBlock &MBB,
-                ArrayRef<X86MachineFunctionInfo::GoRegArgSpillSlot> Spills,
-                bool Reload) {
+static void emitGoRegSpills(MachineFunction &MF, MachineBasicBlock &MBB,
+                            ArrayRef<X86MachineFunctionInfo::GoArgHome> Homes,
+                            bool Reload) {
   const DebugLoc DL;
   const X86InstrInfo &TII = *MF.getSubtarget<X86Subtarget>().getInstrInfo();
   MachineFrameInfo &MFI = MF.getFrameInfo();
-  for (const X86MachineFunctionInfo::GoRegArgSpillSlot &Spill : Spills) {
-    assert(MFI.isFixedObjectIndex(Spill.FrameIndex) &&
-           "Go register argument spill slot must be a fixed object");
-    int64_t Offset = MFI.getObjectOffset(Spill.FrameIndex);
-    if (Spill.IsFP) {
-      unsigned Opc =
-          Reload ? (Spill.Size == 4 ? X86::MOVSSrm_alt : X86::MOVSDrm_alt)
-                 : (Spill.Size == 4 ? X86::MOVSSmr : X86::MOVSDmr);
-      if (Reload)
-        addRegOffset(BuildMI(&MBB, DL, TII.get(Opc), Spill.Reg), X86::RSP,
-                     false, Offset);
-      else
-        addRegOffset(BuildMI(&MBB, DL, TII.get(Opc)), X86::RSP, false, Offset)
-            .addReg(Spill.Reg);
-      continue;
-    }
+  for (const X86MachineFunctionInfo::GoArgHome &Home : Homes)
+    for (const X86MachineFunctionInfo::GoArgHome::RegisterPiece &Piece :
+         Home.RegisterPieces) {
+      assert(MFI.isFixedObjectIndex(Home.FrameIndex) &&
+             "Go register argument home must be a fixed object");
+      int64_t Offset = MFI.getObjectOffset(Home.FrameIndex) + Piece.Offset;
+      if (goabi::isGoABIInternalCallingConv(MF.getFunction().getCallingConv()))
+        Offset += MF.getDataLayout().getPointerSize();
+      if (Piece.IsFP) {
+        unsigned Opc =
+            Reload ? (Piece.Size == 4 ? X86::MOVSSrm_alt : X86::MOVSDrm_alt)
+                   : (Piece.Size == 4 ? X86::MOVSSmr : X86::MOVSDmr);
+        if (Reload)
+          addRegOffset(BuildMI(&MBB, DL, TII.get(Opc), Piece.Reg), X86::RSP,
+                       false, Offset);
+        else
+          addRegOffset(BuildMI(&MBB, DL, TII.get(Opc)), X86::RSP, false, Offset)
+              .addReg(Piece.Reg);
+        continue;
+      }
 
-    if (Reload)
-      addRegOffset(BuildMI(&MBB, DL, TII.get(getIntegerLoadOpcode(Spill.Size)),
-                           Spill.Reg),
-                   X86::RSP, false, Offset);
-    else
-      addRegOffset(
-          BuildMI(&MBB, DL, TII.get(getIntegerStoreOpcode(Spill.Size))),
-          X86::RSP, false, Offset)
-          .addReg(Spill.Reg);
-  }
+      if (Reload)
+        addRegOffset(BuildMI(&MBB, DL,
+                             TII.get(getIntegerLoadOpcode(Piece.Size)),
+                             Piece.Reg),
+                     X86::RSP, false, Offset);
+      else
+        addRegOffset(
+            BuildMI(&MBB, DL, TII.get(getIntegerStoreOpcode(Piece.Size))),
+            X86::RSP, false, Offset)
+            .addReg(Piece.Reg);
+    }
 }
 
 static bool shouldEmitGoStackCheck(const MachineFunction &MF) {
@@ -344,8 +348,7 @@ static void emitGoStackCheck(MachineFunction &MF,
   const DebugLoc DL;
   const X86InstrInfo &TII = *MF.getSubtarget<X86Subtarget>().getInstrInfo();
   const X86MachineFunctionInfo *X86FI = MF.getInfo<X86MachineFunctionInfo>();
-  ArrayRef<X86MachineFunctionInfo::GoRegArgSpillSlot> Spills =
-      X86FI->getGoRegArgSpillSlots();
+  ArrayRef<X86MachineFunctionInfo::GoArgHome> Homes = X86FI->getGoArgHomes();
   MachineBasicBlock &EntryMBB = getGoStackCheckEntryMBB(MF, PrologueMBB);
 
   MachineBasicBlock *CheckMBB = MF.CreateMachineBasicBlock();
@@ -370,12 +373,14 @@ static void emitGoStackCheck(MachineFunction &MF,
   // ABIInternal register argument into its fixed home. Keep those physical
   // inputs live through the newly inserted check blocks independently of
   // ordinary IR uses.
-  for (const X86MachineFunctionInfo::GoRegArgSpillSlot &Spill : Spills) {
-    CheckMBB->addLiveIn(Spill.Reg);
-    if (CompareMBB != CheckMBB)
-      CompareMBB->addLiveIn(Spill.Reg);
-    MorestackMBB->addLiveIn(Spill.Reg);
-  }
+  for (const X86MachineFunctionInfo::GoArgHome &Home : Homes)
+    for (const X86MachineFunctionInfo::GoArgHome::RegisterPiece &Piece :
+         Home.RegisterPieces) {
+      CheckMBB->addLiveIn(Piece.Reg);
+      if (CompareMBB != CheckMBB)
+        CompareMBB->addLiveIn(Piece.Reg);
+      MorestackMBB->addLiveIn(Piece.Reg);
+    }
 
   MF.push_front(MorestackMBB);
   if (CompareMBB != CheckMBB)
@@ -417,7 +422,7 @@ static void emitGoStackCheck(MachineFunction &MF,
       .addMBB(&EntryMBB)
       .addImm(X86::COND_A);
 
-  emitGoRegSpills(MF, *MorestackMBB, Spills, /*Reload=*/false);
+  emitGoRegSpills(MF, *MorestackMBB, Homes, /*Reload=*/false);
   bool HasClosureContext = hasGoClosureContext(MF.getFunction());
   const char *MorestackName =
       HasClosureContext ? "runtime.morestack" : "runtime.morestack_noctxt";
@@ -429,7 +434,7 @@ static void emitGoStackCheck(MachineFunction &MF,
                 .addExternalSymbol(MorestackName);
   if (HasClosureContext)
     Morestack.addReg(X86::RDX, RegState::Implicit);
-  emitGoRegSpills(MF, *MorestackMBB, Spills, /*Reload=*/true);
+  emitGoRegSpills(MF, *MorestackMBB, Homes, /*Reload=*/true);
   BuildMI(MorestackMBB, DL, TII.get(X86::JMP_1)).addMBB(&EntryMBB);
 
   if (CompareMBB != CheckMBB) {

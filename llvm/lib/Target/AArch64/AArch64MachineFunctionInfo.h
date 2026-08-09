@@ -50,11 +50,24 @@ enum class SignReturnAddress {
 /// contains private AArch64-specific information for each MachineFunction.
 class AArch64FunctionInfo final : public MachineFunctionInfo {
 public:
-  struct GoRegArgSpillSlot {
-    unsigned Reg = 0;
+  struct GoArgHome {
+    struct RegisterPiece {
+      unsigned Reg = 0;
+      uint32_t Offset = 0;
+      unsigned Size = 0;
+      bool IsFP = false;
+    };
+
+    unsigned ArgNo = 0;
     int FrameIndex = 0;
-    unsigned Size = 0;
-    bool IsFP = false;
+    SmallVector<RegisterPiece, 2> RegisterPieces;
+
+    bool valueAlreadyInFrame() const { return RegisterPieces.empty(); }
+
+    void addRegisterPiece(unsigned Reg, uint32_t Offset, unsigned Size,
+                          bool IsFP) {
+      RegisterPieces.push_back({Reg, Offset, Size, IsFP});
+    }
   };
 
   struct GoArgPointerSlot {
@@ -64,8 +77,9 @@ public:
   };
 
 private:
-  /// Fixed frame objects for Go ABIInternal register argument home slots.
-  SmallVector<GoRegArgSpillSlot, 16> GoRegArgSpillSlots;
+  /// Canonical fixed frame objects for Go arguments and the register pieces
+  /// that the pre-frame morestack path must save into them.
+  SmallVector<GoArgHome, 16> GoArgHomes;
   SmallVector<GoArgPointerSlot, 16> GoArgPointerSlots;
 
   /// Number of bytes of arguments this function has on the stack. If the callee
@@ -299,14 +313,12 @@ public:
   unsigned getBytesInStackArgArea() const { return BytesInStackArgArea; }
   void setBytesInStackArgArea(unsigned bytes) { BytesInStackArgArea = bytes; }
 
-  void clearGoRegArgSpillSlots() { GoRegArgSpillSlots.clear(); }
-  void addGoRegArgSpillSlot(unsigned Reg, int FrameIndex, unsigned Size,
-                            bool IsFP) {
-    GoRegArgSpillSlots.push_back({Reg, FrameIndex, Size, IsFP});
+  void clearGoArgHomes() { GoArgHomes.clear(); }
+  GoArgHome &addGoArgHome(unsigned ArgNo, int FrameIndex) {
+    GoArgHomes.push_back({ArgNo, FrameIndex, {}});
+    return GoArgHomes.back();
   }
-  ArrayRef<GoRegArgSpillSlot> getGoRegArgSpillSlots() const {
-    return GoRegArgSpillSlots;
-  }
+  ArrayRef<GoArgHome> getGoArgHomes() const { return GoArgHomes; }
 
   void clearGoArgPointerSlots() { GoArgPointerSlots.clear(); }
   void addGoArgPointerSlot(int FrameIndex, uint32_t OffsetWithinObject,

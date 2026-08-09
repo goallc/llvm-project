@@ -9133,7 +9133,7 @@ static SDValue lowerAArch64GoFormalArguments(
   }
 
   FuncInfo->setBytesInStackArgArea(Layout.TotalStackSize);
-  FuncInfo->clearGoRegArgSpillSlots();
+  FuncInfo->clearGoArgHomes();
   FuncInfo->clearGoArgPointerSlots();
   unsigned StackBias = getAArch64GoStackBias(F.getCallingConv());
 
@@ -9176,7 +9176,21 @@ static SDValue lowerAArch64GoFormalArguments(
       continue;
     }
 
-    const goabi::ValueLayout &ArgLayout = Layout.Args[LayoutMap[Group.Index]];
+    unsigned LayoutIndex = LayoutMap[Group.Index];
+    const goabi::ValueLayout &ArgLayout = Layout.Args[LayoutIndex];
+    uint64_t LogicalHomeOffset =
+        ArgLayout.InRegs ? ArgSpillOffsets[LayoutIndex] : ArgLayout.StackOffset;
+    int64_t FixedHomeOffset = StackBias + LogicalHomeOffset;
+    int HomeFI =
+        ArgLayout.InRegs
+            ? MFI.CreateFixedSpillStackObject(ArgLayout.Size, FixedHomeOffset,
+                                              /*IsImmutable=*/false)
+            : MFI.CreateFixedObject(ArgLayout.Size, FixedHomeOffset,
+                                    /*IsImmutable=*/true);
+    AArch64FunctionInfo::GoArgHome &Home =
+        FuncInfo->addGoArgHome(Group.Index, HomeFI);
+    RecordPointerSlots(HomeFI, LogicalHomeOffset, ArgLayout.Size);
+
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
     for (unsigned I = Group.Start; I != Group.End; ++I) {
@@ -9197,13 +9211,8 @@ static SDValue lowerAArch64GoFormalArguments(
         // its Go ABI home retains the original piece's size and offset.
         unsigned Size = static_cast<unsigned>(
             std::max<uint64_t>(1, In.ArgVT.getStoreSize().getKnownMinValue()));
-        uint64_t ArgSpillOffset = ArgSpillOffsets[LayoutMap[Group.Index]];
-        int FI = MFI.CreateFixedSpillStackObject(
-            Size, StackBias + ArgSpillOffset + In.PartOffset,
-            /*IsImmutable=*/false);
-        FuncInfo->addGoRegArgSpillSlot(PReg, FI, Size,
-                                       isAArch64GoFloatPiece(In.OrigTy));
-        RecordPointerSlots(FI, ArgSpillOffset + In.PartOffset, Size);
+        Home.addRegisterPiece(PReg, In.PartOffset, Size,
+                              isAArch64GoFloatPiece(In.OrigTy));
 
         if (In.VT != CopyVT)
           Val = DAG.getNode(ISD::TRUNCATE, DL, In.VT, Val);
@@ -9211,16 +9220,13 @@ static SDValue lowerAArch64GoFormalArguments(
         continue;
       }
 
-      unsigned Size = static_cast<unsigned>(
-          std::max<uint64_t>(1, In.ArgVT.getStoreSize().getKnownMinValue()));
-      int FI = MFI.CreateFixedObject(
-          Size, StackBias + ArgLayout.StackOffset + In.PartOffset,
-          /*IsImmutable=*/true);
-      RecordPointerSlots(FI, ArgLayout.StackOffset + In.PartOffset, Size);
-      SDValue Addr = DAG.getFrameIndex(FI, PtrVT);
-      InVals.push_back(
-          loadAArch64GoStackPiece(DAG, Chain, DL, In.VT, In.ArgVT, Addr,
-                                  MachinePointerInfo::getFixedStack(MF, FI)));
+      SDValue Addr = DAG.getFrameIndex(HomeFI, PtrVT);
+      if (In.PartOffset != 0)
+        Addr =
+            DAG.getObjectPtrOffset(DL, Addr, TypeSize::getFixed(In.PartOffset));
+      InVals.push_back(loadAArch64GoStackPiece(
+          DAG, Chain, DL, In.VT, In.ArgVT, Addr,
+          MachinePointerInfo::getFixedStack(MF, HomeFI, In.PartOffset)));
     }
   }
 
@@ -9514,6 +9520,21 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
 }
 
 } // namespace
+
+std::optional<TargetLowering::ArgumentCopyElisionFrameInfo>
+AArch64TargetLowering::getArgumentCopyElisionFrameInfo(
+    const Argument &Arg, MachineFunction &MF) const {
+  if (!goabi::isGoCallingConv(MF.getFunction().getCallingConv()))
+    return std::nullopt;
+  const auto *FuncInfo = MF.getInfo<AArch64FunctionInfo>();
+  uint64_t ArgSize = MF.getDataLayout().getTypeAllocSize(Arg.getType());
+  for (const AArch64FunctionInfo::GoArgHome &Home : FuncInfo->getGoArgHomes())
+    if (Home.ArgNo == Arg.getArgNo() &&
+        MF.getFrameInfo().getObjectSize(Home.FrameIndex) == int64_t(ArgSize))
+      return ArgumentCopyElisionFrameInfo{Home.FrameIndex,
+                                          Home.valueAlreadyInFrame()};
+  return std::nullopt;
+}
 
 static unsigned getIntrinsicID(const SDNode *N) {
   unsigned Opcode = N->getOpcode();
