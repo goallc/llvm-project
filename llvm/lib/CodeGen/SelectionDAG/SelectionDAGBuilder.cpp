@@ -6779,6 +6779,13 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
              DAG.getNode(ISD::SPONENTRY, sdl,
                          TLI.getValueType(DAG.getDataLayout(), I.getType())));
     return;
+  case Intrinsic::go_abi0_frame: {
+    MachineFunction &MF = DAG.getMachineFunction();
+    int FI = TLI.getGoABI0FrameIndex(MF);
+    setValue(&I, DAG.getFrameIndex(
+                     FI, TLI.getValueType(DAG.getDataLayout(), I.getType())));
+    return;
+  }
   case Intrinsic::frameaddress:
     setValue(&I, DAG.getNode(ISD::FRAMEADDR, sdl,
                              TLI.getFrameIndexTy(DAG.getDataLayout()),

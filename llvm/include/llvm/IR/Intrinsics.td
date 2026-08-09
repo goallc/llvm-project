@@ -1136,6 +1136,12 @@ def int_go_defer_edge : Intrinsic<[], [],
     [IntrNoMem, IntrHasSideEffects, IntrNoCallback, IntrNoSync, IntrNoFree,
      IntrNoDuplicate, IntrNoMerge]>;
 
+// Return the base of the current Go ABI0 function's contiguous argument and
+// result frame. The caller must be noinline because the returned address is
+// tied to this physical activation record.
+def int_go_abi0_frame : DefaultAttrsIntrinsic<[llvm_ptr_ty], [],
+    [IntrNoMem, IntrNoCallback, IntrNoSync, IntrNoFree, IntrWillReturn]>;
+
 def int_structured_gep
     : DefaultAttrsIntrinsic<[llvm_anyptr_ty],
                             [LLVMMatchType<0>, llvm_vararg_ty],

@@ -9278,6 +9278,8 @@ static SDValue lowerAArch64GoReturn(const AArch64TargetLowering &TLI,
       int FI = MFI.CreateFixedObject(
           Size, StackBias + ResultLayout.StackOffset + Out.PartOffset,
           /*IsImmutable=*/false);
+      if (MF.getInfo<AArch64FunctionInfo>()->hasGoABI0FrameIndex())
+        MFI.setIsAliasedObjectIndex(FI, true);
       SDValue Addr =
           DAG.getFrameIndex(FI, TLI.getPointerTy(DAG.getDataLayout()));
       MemOps.push_back(
@@ -9526,6 +9528,35 @@ AArch64TargetLowering::getArgumentCopyElisionFrameInfo(
       return ArgumentCopyElisionFrameInfo{Home.FrameIndex,
                                           Home.valueAlreadyInFrame()};
   return std::nullopt;
+}
+
+int AArch64TargetLowering::getGoABI0FrameIndex(MachineFunction &MF) const {
+  const Function &F = MF.getFunction();
+  if (!goabi::isGoABI0CallingConv(F.getCallingConv()))
+    report_fatal_error("llvm.go.abi0.frame requires Go ABI0");
+  auto *FuncInfo = MF.getInfo<AArch64FunctionInfo>();
+  if (FuncInfo->hasGoABI0FrameIndex())
+    return FuncInfo->getGoABI0FrameIndex();
+
+  SmallVector<int, 8> LayoutMap;
+  SmallVector<Type *, 8> ArgTys = getAArch64GoArgTypes(F, LayoutMap);
+  const AArch64Subtarget &Subtarget = MF.getSubtarget<AArch64Subtarget>();
+  goabi::CallLayout Layout = goabi::computeCallLayout(
+      ArgTys, getAArch64GoReturnTypes(F.getReturnType(), F.getAttributes()),
+      MF.getDataLayout(),
+      getAArch64GoABIConfig(*this, Subtarget, F.getCallingConv()));
+  if (Layout.ArgSize == 0)
+    report_fatal_error("llvm.go.abi0.frame requires a non-empty ABI0 frame");
+
+  int FI = MF.getFrameInfo().CreateFixedObject(
+      Layout.ArgSize, getAArch64GoStackBias(F.getCallingConv()),
+      /*IsImmutable=*/false, /*IsAliased=*/true);
+  for (const AArch64FunctionInfo::GoArgHome &Home : FuncInfo->getGoArgHomes()) {
+    MF.getFrameInfo().setIsImmutableObjectIndex(Home.FrameIndex, false);
+    MF.getFrameInfo().setIsAliasedObjectIndex(Home.FrameIndex, true);
+  }
+  FuncInfo->setGoABI0FrameIndex(FI);
+  return FI;
 }
 
 static unsigned getIntrinsicID(const SDNode *N) {

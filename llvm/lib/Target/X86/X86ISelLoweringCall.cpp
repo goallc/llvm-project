@@ -389,6 +389,8 @@ static SDValue lowerX86GoReturn(const X86TargetLowering &TLI, SDValue Chain,
       int FI =
           MFI.CreateFixedObject(Size, ResultLayout.StackOffset + Out.PartOffset,
                                 /*IsImmutable=*/false);
+      if (MF.getInfo<X86MachineFunctionInfo>()->hasGoABI0FrameIndex())
+        MFI.setIsAliasedObjectIndex(FI, true);
       SDValue Addr = DAG.getFrameIndex(FI, TLI.getPointerTy(DAG.getDataLayout()));
       MemOps.push_back(storeX86GoStackPiece(
           DAG, Chain, DL, Val, Out.ArgVT, Addr,
@@ -620,6 +622,35 @@ X86TargetLowering::getArgumentCopyElisionFrameInfo(const Argument &Arg,
       return ArgumentCopyElisionFrameInfo{Home.FrameIndex,
                                           Home.valueAlreadyInFrame()};
   return std::nullopt;
+}
+
+int X86TargetLowering::getGoABI0FrameIndex(MachineFunction &MF) const {
+  const Function &F = MF.getFunction();
+  if (!goabi::isGoABI0CallingConv(F.getCallingConv()))
+    report_fatal_error("llvm.go.abi0.frame requires Go ABI0");
+  auto *FuncInfo = MF.getInfo<X86MachineFunctionInfo>();
+  if (FuncInfo->hasGoABI0FrameIndex())
+    return FuncInfo->getGoABI0FrameIndex();
+
+  SmallVector<int, 8> LayoutMap;
+  SmallVector<Type *, 8> ArgTys = getX86GoArgTypes(F, LayoutMap);
+  goabi::CallLayout Layout = goabi::computeCallLayout(
+      ArgTys, getX86GoReturnTypes(F.getReturnType(), F.getAttributes()),
+      MF.getDataLayout(),
+      getX86GoABIConfig(MF.getSubtarget<X86Subtarget>(), F.getCallingConv()));
+  if (Layout.ArgSize == 0)
+    report_fatal_error("llvm.go.abi0.frame requires a non-empty ABI0 frame");
+
+  int FI = MF.getFrameInfo().CreateFixedObject(Layout.ArgSize, /*SPOffset=*/0,
+                                               /*IsImmutable=*/false,
+                                               /*IsAliased=*/true);
+  for (const X86MachineFunctionInfo::GoArgHome &Home :
+       FuncInfo->getGoArgHomes()) {
+    MF.getFrameInfo().setIsImmutableObjectIndex(Home.FrameIndex, false);
+    MF.getFrameInfo().setIsAliasedObjectIndex(Home.FrameIndex, true);
+  }
+  FuncInfo->setGoABI0FrameIndex(FI);
+  return FI;
 }
 
 /// Call this when the user attempts to do something unsupported, like

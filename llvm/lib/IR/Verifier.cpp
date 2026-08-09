@@ -6932,6 +6932,14 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
           &Call);
     break;
   }
+  case Intrinsic::go_abi0_frame: {
+    const Function *Parent = Call.getFunction();
+    Check(Parent->getCallingConv() == CallingConv::GoABI0,
+          "llvm.go.abi0.frame requires a goabi0 function", &Call);
+    Check(Parent->hasFnAttribute(Attribute::NoInline),
+          "llvm.go.abi0.frame requires a noinline function", &Call);
+    break;
+  }
   case Intrinsic::structured_gep: {
     // Parser should refuse those 2 cases.
     assert(Call.arg_size() >= 1);
