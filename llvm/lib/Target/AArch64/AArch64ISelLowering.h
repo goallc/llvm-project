@@ -642,6 +642,7 @@ private:
   std::optional<ArgumentCopyElisionFrameInfo>
   getArgumentCopyElisionFrameInfo(const Argument &Arg,
                                   MachineFunction &MF) const override;
+  int getGoABI0FrameIndex(MachineFunction &MF) const override;
 
   void AdjustInstrPostInstrSelection(MachineInstr &MI,
                                      SDNode *Node) const override;

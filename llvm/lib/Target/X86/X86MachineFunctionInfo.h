@@ -148,6 +148,8 @@ private:
   /// that the pre-frame morestack path must save into them.
   SmallVector<GoArgHome, 16> GoArgHomes;
   SmallVector<GoArgPointerSlot, 16> GoArgPointerSlots;
+  int GoABI0FrameIndex = 0;
+  bool HasGoABI0FrameIndex = false;
 
   /// NumLocalDynamics - Number of local-dynamic TLS accesses.
   unsigned NumLocalDynamics = 0;
@@ -285,6 +287,13 @@ public:
     return GoArgHomes.back();
   }
   ArrayRef<GoArgHome> getGoArgHomes() const { return GoArgHomes; }
+
+  bool hasGoABI0FrameIndex() const { return HasGoABI0FrameIndex; }
+  int getGoABI0FrameIndex() const { return GoABI0FrameIndex; }
+  void setGoABI0FrameIndex(int FrameIndex) {
+    GoABI0FrameIndex = FrameIndex;
+    HasGoABI0FrameIndex = true;
+  }
 
   void clearGoArgPointerSlots() { GoArgPointerSlots.clear(); }
   void addGoArgPointerSlot(int FrameIndex, uint32_t OffsetWithinObject,

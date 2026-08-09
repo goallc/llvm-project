@@ -5155,6 +5155,13 @@ public:
     return std::nullopt;
   }
 
+  /// Return the fixed frame object for llvm.go.abi0.frame. Targets supporting
+  /// the Go calling conventions must create a mutable, aliased object covering
+  /// the complete contiguous ABI0 argument/result area.
+  virtual int getGoABI0FrameIndex(MachineFunction &) const {
+    llvm_unreachable("llvm.go.abi0.frame is unsupported on this target");
+  }
+
   /// This hook should be implemented to check whether the return values
   /// described by the Outs array can fit into the return registers.  If false
   /// is returned, an sret-demotion is performed.
