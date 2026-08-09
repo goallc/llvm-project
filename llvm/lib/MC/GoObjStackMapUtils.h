@@ -102,6 +102,69 @@ classifyOrdinaryStackMapSlot(int64_t Offset, bool IsIndirect,
                   /*BitOffset=*/0);
 }
 
+inline std::optional<StackMapSlotKind>
+classifyOrdinaryStackMapRange(int64_t Offset, uint64_t Size,
+                              uint32_t PointerSize, uint64_t LocalsStart,
+                              uint64_t LocalsSize, uint32_t LocalsBitOffset,
+                              uint64_t ArgsStart, uint64_t ArgsSize) {
+  if (!Size || !PointerSize || Size % PointerSize != 0)
+    return std::nullopt;
+
+  std::optional<StackMapSlotKind> Kind;
+  for (uint64_t ByteOffset = 0; ByteOffset != Size; ByteOffset += PointerSize) {
+    if (ByteOffset >
+            static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+        Offset > std::numeric_limits<int64_t>::max() -
+                     static_cast<int64_t>(ByteOffset))
+      return std::nullopt;
+    StackMapSlot Slot = classifyOrdinaryStackMapSlot(
+        Offset + static_cast<int64_t>(ByteOffset), /*IsIndirect=*/true,
+        PointerSize, LocalsStart, LocalsSize, LocalsBitOffset, ArgsStart,
+        ArgsSize);
+    if (Slot.Kind != StackMapSlotKind::Args &&
+        Slot.Kind != StackMapSlotKind::Locals)
+      return std::nullopt;
+    if (!Kind)
+      Kind = Slot.Kind;
+    else if (*Kind != Slot.Kind)
+      return std::nullopt;
+  }
+  return Kind;
+}
+
+inline std::optional<int32_t> getStackObjectFrameOffset(StackMapSlotKind Kind,
+                                                        int64_t BaseOffset,
+                                                        uint64_t VarpOffset,
+                                                        uint64_t ArgsStart) {
+  switch (Kind) {
+  case StackMapSlotKind::Args: {
+    if (BaseOffset < 0)
+      return std::nullopt;
+    uint64_t UBaseOffset = static_cast<uint64_t>(BaseOffset);
+    if (UBaseOffset < ArgsStart ||
+        UBaseOffset - ArgsStart >
+            static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+      return std::nullopt;
+    return static_cast<int32_t>(UBaseOffset - ArgsStart);
+  }
+  case StackMapSlotKind::Locals: {
+    if (BaseOffset < 0)
+      return std::nullopt;
+    uint64_t UBaseOffset = static_cast<uint64_t>(BaseOffset);
+    if (UBaseOffset >= VarpOffset ||
+        VarpOffset - UBaseOffset >
+            static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) + 1)
+      return std::nullopt;
+    int64_t Offset = -static_cast<int64_t>(VarpOffset - UBaseOffset);
+    return static_cast<int32_t>(Offset);
+  }
+  case StackMapSlotKind::Invalid:
+  case StackMapSlotKind::Direct:
+    return std::nullopt;
+  }
+  return std::nullopt;
+}
+
 } // namespace llvm::goobj
 
 #endif // LLVM_LIB_MC_GOOBJSTACKMAPUTILS_H
