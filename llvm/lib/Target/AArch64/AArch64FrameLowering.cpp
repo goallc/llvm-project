@@ -1362,45 +1362,47 @@ static unsigned getAArch64GoSpillOpcode(unsigned Size, bool IsFP, bool Reload) {
 
 static void
 emitAArch64GoRegSpills(MachineFunction &MF, MachineBasicBlock &MBB,
-                       ArrayRef<AArch64FunctionInfo::GoRegArgSpillSlot> Spills,
+                       ArrayRef<AArch64FunctionInfo::GoArgHome> Homes,
                        bool Reload) {
   const DebugLoc DL;
   const AArch64InstrInfo &TII =
       *MF.getSubtarget<AArch64Subtarget>().getInstrInfo();
   MachineFrameInfo &MFI = MF.getFrameInfo();
-  for (const AArch64FunctionInfo::GoRegArgSpillSlot &Spill : Spills) {
-    assert(MFI.isFixedObjectIndex(Spill.FrameIndex) &&
-           "Go register argument spill slot must be a fixed object");
-    int64_t Offset = MFI.getObjectOffset(Spill.FrameIndex);
-    Register BaseReg = AArch64::SP;
-    int64_t ScaledOffset = 0;
-    if (Offset >= 0 && Offset % Spill.Size == 0 &&
-        Offset / Spill.Size <= 4095) {
-      ScaledOffset = Offset / Spill.Size;
-    } else {
-      // These accesses run on the frameless morestack path, so ordinary frame
-      // index elimination cannot materialize an out-of-range entry-SP offset.
-      // Match the Go assembler's large-offset expansion: reserve as much of
-      // the address as possible for the scaled load/store immediate and use
-      // Go's R27/REGTMP for the remaining base adjustment.
-      int64_t BaseOffset = Offset;
-      if (Offset > 0) {
-        ScaledOffset = std::min<int64_t>(Offset / Spill.Size, 4095);
-        BaseOffset -= ScaledOffset * Spill.Size;
+  for (const AArch64FunctionInfo::GoArgHome &Home : Homes)
+    for (const AArch64FunctionInfo::GoArgHome::RegisterPiece &Piece :
+         Home.RegisterPieces) {
+      assert(MFI.isFixedObjectIndex(Home.FrameIndex) &&
+             "Go register argument home must be a fixed object");
+      int64_t Offset = MFI.getObjectOffset(Home.FrameIndex) + Piece.Offset;
+      Register BaseReg = AArch64::SP;
+      int64_t ScaledOffset = 0;
+      if (Offset >= 0 && Offset % Piece.Size == 0 &&
+          Offset / Piece.Size <= 4095) {
+        ScaledOffset = Offset / Piece.Size;
+      } else {
+        // These accesses run on the frameless morestack path, so ordinary frame
+        // index elimination cannot materialize an out-of-range entry-SP offset.
+        // Match the Go assembler's large-offset expansion: reserve as much of
+        // the address as possible for the scaled load/store immediate and use
+        // Go's R27/REGTMP for the remaining base adjustment.
+        int64_t BaseOffset = Offset;
+        if (Offset > 0) {
+          ScaledOffset = std::min<int64_t>(Offset / Piece.Size, 4095);
+          BaseOffset -= ScaledOffset * Piece.Size;
+        }
+        BaseReg = AArch64::X27;
+        emitFrameOffset(MBB, MBB.end(), DL, BaseReg, AArch64::SP,
+                        StackOffset::getFixed(BaseOffset), &TII,
+                        MachineInstr::NoFlags);
       }
-      BaseReg = AArch64::X27;
-      emitFrameOffset(MBB, MBB.end(), DL, BaseReg, AArch64::SP,
-                      StackOffset::getFixed(BaseOffset), &TII,
-                      MachineInstr::NoFlags);
+      unsigned Opc = getAArch64GoSpillOpcode(Piece.Size, Piece.IsFP, Reload);
+      MachineInstrBuilder MIB = Reload
+                                    ? BuildMI(&MBB, DL, TII.get(Opc), Piece.Reg)
+                                    : BuildMI(&MBB, DL, TII.get(Opc));
+      if (!Reload)
+        MIB.addReg(Piece.Reg);
+      MIB.addReg(BaseReg).addImm(ScaledOffset);
     }
-    unsigned Opc = getAArch64GoSpillOpcode(Spill.Size, Spill.IsFP, Reload);
-    MachineInstrBuilder MIB = Reload
-                                  ? BuildMI(&MBB, DL, TII.get(Opc), Spill.Reg)
-                                  : BuildMI(&MBB, DL, TII.get(Opc));
-    if (!Reload)
-      MIB.addReg(Spill.Reg);
-    MIB.addReg(BaseReg).addImm(ScaledOffset);
-  }
 }
 
 static void emitAArch64GoStackCheck(MachineFunction &MF,
@@ -1437,11 +1439,12 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
   // ABIInternal register argument into its fixed home. Keep those physical
   // inputs live through the newly inserted check block independently of
   // ordinary IR uses.
-  for (const AArch64FunctionInfo::GoRegArgSpillSlot &Spill :
-       AFI->getGoRegArgSpillSlots()) {
-    CheckMBB->addLiveIn(Spill.Reg);
-    MorestackMBB->addLiveIn(Spill.Reg);
-  }
+  for (const AArch64FunctionInfo::GoArgHome &Home : AFI->getGoArgHomes())
+    for (const AArch64FunctionInfo::GoArgHome::RegisterPiece &Piece :
+         Home.RegisterPieces) {
+      CheckMBB->addLiveIn(Piece.Reg);
+      MorestackMBB->addLiveIn(Piece.Reg);
+    }
 
   MF.push_front(MorestackMBB);
   MF.push_front(CheckMBB);
@@ -1469,7 +1472,7 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
       .addImm(AArch64CC::HI)
       .addMBB(&EntryMBB);
 
-  emitAArch64GoRegSpills(MF, *MorestackMBB, AFI->getGoRegArgSpillSlots(),
+  emitAArch64GoRegSpills(MF, *MorestackMBB, AFI->getGoArgHomes(),
                          /*Reload=*/false);
   BuildMI(MorestackMBB, DL, TII.get(TargetOpcode::COPY), AArch64::X3)
       .addReg(AArch64::LR);
@@ -1484,7 +1487,7 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
   Morestack.addReg(AArch64::X3, RegState::Implicit);
   if (HasClosureContext)
     Morestack.addReg(AArch64::X26, RegState::Implicit);
-  emitAArch64GoRegSpills(MF, *MorestackMBB, AFI->getGoRegArgSpillSlots(),
+  emitAArch64GoRegSpills(MF, *MorestackMBB, AFI->getGoArgHomes(),
                          /*Reload=*/true);
   BuildMI(MorestackMBB, DL, TII.get(AArch64::B)).addMBB(&EntryMBB);
 

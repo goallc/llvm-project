@@ -226,11 +226,10 @@ static SDValue lowerX86GoFormalArguments(
   FuncInfo->setBytesToPopOnReturn(0);
   FuncInfo->setArgumentStackSize(Layout.TotalStackSize);
   FuncInfo->setRegSaveFrameIndex(0xAAAAAAA);
-  FuncInfo->clearGoRegArgSpillSlots();
+  FuncInfo->clearGoArgHomes();
   FuncInfo->clearGoArgPointerSlots();
 
-  auto RecordPointerSlots = [&](int FI, uint64_t ArgOffset, uint64_t Size,
-                                int64_t FixedObjectBias) {
+  auto RecordPointerSlots = [&](int FI, uint64_t ArgOffset, uint64_t Size) {
     if (!EntryArgs)
       return;
     uint64_t PointerSize = EntryArgs->PointerSize;
@@ -249,8 +248,7 @@ static SDValue lowerX86GoFormalArguments(
             "Go entry argument pointer offset exceeds X86 metadata range");
       int64_t FixedObjectOffset =
           MFI.getObjectOffset(FI) + static_cast<int64_t>(WithinObject);
-      int64_t ExpectedFixedObjectOffset =
-          FixedObjectBias + static_cast<int64_t>(PointerOffset);
+      int64_t ExpectedFixedObjectOffset = static_cast<int64_t>(PointerOffset);
       int64_t EntryOffset =
           EntryStackBias + static_cast<int64_t>(PointerOffset);
       if (FixedObjectOffset != ExpectedFixedObjectOffset ||
@@ -282,7 +280,21 @@ static SDValue lowerX86GoFormalArguments(
       continue;
     }
 
-    const goabi::ValueLayout &ArgLayout = Layout.Args[LayoutMap[Group.Index]];
+    unsigned LayoutIndex = LayoutMap[Group.Index];
+    const goabi::ValueLayout &ArgLayout = Layout.Args[LayoutIndex];
+    uint64_t LogicalHomeOffset =
+        ArgLayout.InRegs ? ArgSpillOffsets[LayoutIndex] : ArgLayout.StackOffset;
+    int64_t FixedHomeOffset = LogicalHomeOffset;
+    int HomeFI =
+        ArgLayout.InRegs
+            ? MFI.CreateFixedSpillStackObject(ArgLayout.Size, FixedHomeOffset,
+                                              /*IsImmutable=*/false)
+            : MFI.CreateFixedObject(ArgLayout.Size, FixedHomeOffset,
+                                    /*IsImmutable=*/true);
+    X86MachineFunctionInfo::GoArgHome &Home =
+        FuncInfo->addGoArgHome(Group.Index, HomeFI);
+    RecordPointerSlots(HomeFI, LogicalHomeOffset, ArgLayout.Size);
+
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
     for (unsigned I = Group.Start; I != Group.End; ++I) {
@@ -304,13 +316,7 @@ static SDValue lowerX86GoFormalArguments(
         // retains the original piece's size and offset.
         unsigned Size = static_cast<unsigned>(
             std::max<uint64_t>(1, In.ArgVT.getStoreSize().getKnownMinValue()));
-        uint64_t ArgSpillOffset = ArgSpillOffsets[LayoutMap[Group.Index]];
-        int FI = MFI.CreateFixedSpillStackObject(
-            Size, EntryStackBias + ArgSpillOffset + In.PartOffset,
-            /*IsImmutable=*/false);
-        FuncInfo->addGoRegArgSpillSlot(PReg, FI, Size, IsFP);
-        RecordPointerSlots(FI, ArgSpillOffset + In.PartOffset, Size,
-                           EntryStackBias);
+        Home.addRegisterPiece(PReg, In.PartOffset, Size, IsFP);
 
         if (In.VT != CopyVT)
           Val = DAG.getNode(ISD::TRUNCATE, DL, In.VT, Val);
@@ -318,17 +324,13 @@ static SDValue lowerX86GoFormalArguments(
         continue;
       }
 
-      unsigned Size = static_cast<unsigned>(
-          std::max<uint64_t>(1, In.ArgVT.getStoreSize().getKnownMinValue()));
-      int FI = MFI.CreateFixedObject(
-          Size, ArgLayout.StackOffset + In.PartOffset,
-          /*IsImmutable=*/true);
-      RecordPointerSlots(FI, ArgLayout.StackOffset + In.PartOffset, Size,
-                         /*FixedObjectBias=*/0);
-      SDValue Addr = DAG.getFrameIndex(FI, PtrVT);
+      SDValue Addr = DAG.getFrameIndex(HomeFI, PtrVT);
+      if (In.PartOffset != 0)
+        Addr =
+            DAG.getObjectPtrOffset(DL, Addr, TypeSize::getFixed(In.PartOffset));
       InVals.push_back(loadX86GoStackPiece(
           DAG, Chain, DL, In.VT, In.ArgVT, Addr,
-          MachinePointerInfo::getFixedStack(MF, FI)));
+          MachinePointerInfo::getFixedStack(MF, HomeFI, In.PartOffset)));
     }
   }
 
@@ -384,9 +386,9 @@ static SDValue lowerX86GoReturn(const X86TargetLowering &TLI, SDValue Chain,
 
       unsigned Size = static_cast<unsigned>(
           std::max<uint64_t>(1, Out.ArgVT.getStoreSize().getKnownMinValue()));
-      int FI = MFI.CreateFixedObject(
-          Size, ResultLayout.StackOffset + Out.PartOffset,
-          /*IsImmutable=*/false);
+      int FI =
+          MFI.CreateFixedObject(Size, ResultLayout.StackOffset + Out.PartOffset,
+                                /*IsImmutable=*/false);
       SDValue Addr = DAG.getFrameIndex(FI, TLI.getPointerTy(DAG.getDataLayout()));
       MemOps.push_back(storeX86GoStackPiece(
           DAG, Chain, DL, Val, Out.ArgVT, Addr,
@@ -603,6 +605,22 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
 }
 
 } // namespace
+
+std::optional<TargetLowering::ArgumentCopyElisionFrameInfo>
+X86TargetLowering::getArgumentCopyElisionFrameInfo(const Argument &Arg,
+                                                   MachineFunction &MF) const {
+  if (!goabi::isGoCallingConv(MF.getFunction().getCallingConv()))
+    return std::nullopt;
+  const auto *FuncInfo = MF.getInfo<X86MachineFunctionInfo>();
+  uint64_t ArgSize = MF.getDataLayout().getTypeAllocSize(Arg.getType());
+  for (const X86MachineFunctionInfo::GoArgHome &Home :
+       FuncInfo->getGoArgHomes())
+    if (Home.ArgNo == Arg.getArgNo() &&
+        MF.getFrameInfo().getObjectSize(Home.FrameIndex) == int64_t(ArgSize))
+      return ArgumentCopyElisionFrameInfo{Home.FrameIndex,
+                                          Home.valueAlreadyInFrame()};
+  return std::nullopt;
+}
 
 /// Call this when the user attempts to do something unsupported, like
 /// returning a double without SSE2 enabled on x86_64. This is not fatal, unlike

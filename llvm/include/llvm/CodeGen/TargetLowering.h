@@ -5141,6 +5141,20 @@ public:
   /// Target-specific cleanup for formal ByVal parameters.
   virtual void HandleByVal(CCState *, unsigned &, Align) const {}
 
+  struct ArgumentCopyElisionFrameInfo {
+    int FrameIndex;
+    bool ValueAlreadyInFrame;
+  };
+
+  /// Return the canonical incoming frame object for an argument when the
+  /// target ABI defines one. ValueAlreadyInFrame distinguishes stack arguments
+  /// whose incoming value is already present from register arguments that
+  /// still need the canonical IR store copied into that frame object.
+  virtual std::optional<ArgumentCopyElisionFrameInfo>
+  getArgumentCopyElisionFrameInfo(const Argument &, MachineFunction &) const {
+    return std::nullopt;
+  }
+
   /// This hook should be implemented to check whether the return values
   /// described by the Outs array can fit into the return registers.  If false
   /// is returned, an sret-demotion is performed.

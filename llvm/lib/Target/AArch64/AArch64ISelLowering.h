@@ -636,6 +636,9 @@ private:
                                const SmallVectorImpl<ISD::InputArg> &Ins,
                                const SDLoc &DL, SelectionDAG &DAG,
                                SmallVectorImpl<SDValue> &InVals) const override;
+  std::optional<ArgumentCopyElisionFrameInfo>
+  getArgumentCopyElisionFrameInfo(const Argument &Arg,
+                                  MachineFunction &MF) const override;
 
   void AdjustInstrPostInstrSelection(MachineInstr &MI,
                                      SDNode *Node) const override;
