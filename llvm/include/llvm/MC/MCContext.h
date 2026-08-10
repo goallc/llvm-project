@@ -10,6 +10,7 @@
 #define LLVM_MC_MCCONTEXT_H
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
@@ -161,6 +162,28 @@ public:
     uint8_t Flags2 = 0;
   };
 
+  struct GoObjDebugInlineFrame {
+    const MCSymbol *Callee = nullptr;
+    std::string CallFile;
+    uint32_t CallLine = 0;
+    uint64_t SiteID = 0;
+  };
+
+  // Labels keep source and inline state attached to final machine layout.
+  struct GoObjDebugLocation {
+    const MCSymbol *Label = nullptr;
+    std::string File;
+    uint32_t Line = 0;
+    std::vector<GoObjDebugInlineFrame> InlineFrames;
+    std::vector<GoObjDebugInlineFrame> AnchorChildFrames;
+  };
+
+  struct GoObjFunctionDebugInfo {
+    std::string File;
+    uint32_t StartLine = 0;
+    std::vector<GoObjDebugLocation> Locations;
+  };
+
 private:
   Environment Env;
 
@@ -290,6 +313,9 @@ private:
   /// Go object statepoint stack maps keyed by function MC symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjStackMapEntry>>
       GoObjSymbolStackMapEntries;
+
+  DenseMap<const MCSymbol *, GoObjFunctionDebugInfo> GoObjFunctionDebugInfos;
+  DenseSet<const MCSymbol *> GoObjInlineAnchorSymbols;
 
   /// A mapping from a local label number and an instance count to a symbol.
   /// For example, in the assembly
@@ -905,6 +931,31 @@ public:
     if (It == GoObjSymbolStackMapEntries.end())
       return nullptr;
     return &It->second;
+  }
+
+  void setGoObjFunctionSource(const MCSymbol *Sym, StringRef File,
+                              uint32_t StartLine) {
+    GoObjFunctionDebugInfo &Info = GoObjFunctionDebugInfos[Sym];
+    Info.File = File.str();
+    Info.StartLine = StartLine;
+  }
+
+  void addGoObjDebugLocation(const MCSymbol *Sym, GoObjDebugLocation Location) {
+    GoObjFunctionDebugInfos[Sym].Locations.push_back(std::move(Location));
+  }
+
+  const GoObjFunctionDebugInfo *
+  getGoObjFunctionDebugInfo(const MCSymbol *Sym) const {
+    auto It = GoObjFunctionDebugInfos.find(Sym);
+    return It == GoObjFunctionDebugInfos.end() ? nullptr : &It->second;
+  }
+
+  void markGoObjInlineAnchor(const MCSymbol *Sym) {
+    GoObjInlineAnchorSymbols.insert(Sym);
+  }
+
+  bool isGoObjInlineAnchor(const MCSymbol *Sym) const {
+    return GoObjInlineAnchorSymbols.contains(Sym);
   }
 
   /// Allocates and returns a new `WasmSignature` instance (with empty parameter

@@ -1310,6 +1310,9 @@ void TargetPassConfig::addMachinePasses() {
     addPass(llvm::createBasicBlockSectionsPass());
   }
 
+  for (auto &CreatePass : PreBranchRelaxationPassFactories)
+    addPass(CreatePass());
+
   addPostBBSections();
 
   if (!DisableCFIFixup && TM->Options.EnableCFIFixup)

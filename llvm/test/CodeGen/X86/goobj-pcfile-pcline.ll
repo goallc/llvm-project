@@ -58,12 +58,14 @@ done:
 ; COMMON: hasheddef-count: 4
 ; COMMON: nonpkgdef-count: 0
 ; X86: hash 0: a21821a940f91b1a89b53461b092269e
-; X86-NEXT: hash 1: 699ffe10973b9c71f84745b4aa867da7
+; X86-NEXT: hash 1: f9ced9dca799cb1833bd530443fd1f9e
+; X86-NEXT: hash 2: 2677aa574f61b902c15de55332c2c2ea
 ; ARM64: hash 0: 105a58e8d53963b571ff833d8449eeda
 ; ARM64-NEXT: hash 1: 3bef6118e9cf260f78533cdf1a6375ec
-; COMMON-NEXT: hash 2: 4b0e7a681c0340c9a97ef4802a3af2f8
-; COMMON: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000 pkg=hashed sym=2
-; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000 pkg=hashed sym=2
+; ARM64-NEXT: hash 2: 3a577c7591ae76fd8b51f8e7ea4ac9d8
+; COMMON-NEXT: hash 3: 4b0e7a681c0340c9a97ef4802a3af2f8
+; COMMON: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000 pkg=hashed sym=3
+; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000 pkg=hashed sym=3
 ; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcsp target= pc={{.*}} pkg=hashed sym=0
 ; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcfile target= pc={{.*}}:0{{.*}} pkg=hashed sym=0
 ; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcline target= pc=[
@@ -71,5 +73,5 @@ done:
 ; COMMON-SAME: :3
 ; COMMON-SAME: :5
 ; COMMON-SAME: pkg=hashed sym=1
-; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc={{.*}} pkg=hashed sym=3
+; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc={{.*}} pkg=hashed sym=2
 ; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc={{.*}} pkg=hashed sym=0
