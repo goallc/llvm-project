@@ -29,9 +29,8 @@ entry:
 
 ; CHECK-LABEL: statepoint_with_register_and_stack_results:
 ; CHECK:       callq overflow_results
-; CHECK:       movq %rsp, [[RESULT_SP:%r[a-z0-9]+]]
-; CHECK-DAG:   movq ([[RESULT_SP]]), [[STACK0:%r[a-z0-9]+]]
-; CHECK-DAG:   movq 8([[RESULT_SP]]), [[STACK1:%r[a-z0-9]+]]
+; CHECK-DAG:   movq (%rsp), [[STACK0:%r[a-z0-9]+]]
+; CHECK-DAG:   movq 8(%rsp), [[STACK1:%r[a-z0-9]+]]
 
 declare void @use(ptr)
 declare token @llvm.experimental.gc.statepoint.p0(

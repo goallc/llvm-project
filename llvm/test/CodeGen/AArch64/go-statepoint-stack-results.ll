@@ -30,8 +30,7 @@ entry:
 
 ; CHECK-LABEL: _statepoint_with_register_and_stack_results:
 ; CHECK:       bl _overflow_results
-; CHECK:       mov [[RESULT_SP:x[0-9]+]], sp
-; CHECK-DAG:   ldp [[STACK0:x[0-9]+]], [[STACK1:x[0-9]+]], {{\[}}[[RESULT_SP]], #8]
+; CHECK-DAG:   ldp [[STACK0:x[0-9]+]], [[STACK1:x[0-9]+]], [sp, #8]
 ; CHECK-DAG:   mov [[REGISTER:x[0-9]+]], x15
 ; CHECK:       bl _use
 ; CHECK:       mov x0, [[REGISTER]]
