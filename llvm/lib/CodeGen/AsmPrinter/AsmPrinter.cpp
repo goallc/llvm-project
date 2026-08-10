@@ -14,6 +14,7 @@
 #include "CodeViewDebug.h"
 #include "DwarfDebug.h"
 #include "DwarfException.h"
+#include "GoObjDebug.h"
 #include "PseudoProbePrinter.h"
 #include "WasmException.h"
 #include "WinCFGuard.h"
@@ -697,6 +698,8 @@ bool AsmPrinter::doInitialization(Module &M) {
   }
 
   if (MAI.doesSupportDebugInformation()) {
+    if (Target.isOSBinFormatGoObj() && hasDebugInfo())
+      Handlers.push_back(createGoObjDebugHandler(*this));
     bool EmitCodeView = M.getCodeViewFlag();
     // On Windows targets, emit minimal CodeView compiler info even when debug
     // info is disabled.

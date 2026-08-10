@@ -51,12 +51,10 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MD5.h"
 #include "llvm/Support/MathExtras.h"
-#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Triple.h"
-#include <algorithm>
 #include <cstddef>
 #include <iterator>
 #include <optional>
@@ -340,25 +338,6 @@ DwarfDebug::DwarfDebug(AsmPrinter *A)
       IsDarwin(A->TM.getTargetTriple().isOSDarwin()),
       InfoHolder(A, "info_string", DIEValueAllocator) {
   const Triple &TT = Asm->TM.getTargetTriple();
-
-  if (TT.isOSBinFormatGoObj()) {
-    if (const NamedMDNode *Funcs =
-            MMI->getModule()->getNamedMetadata("goobj.debug.funcs")) {
-      for (const MDNode *Entry : Funcs->operands()) {
-        if (Entry->getNumOperands() != 2)
-          report_fatal_error(
-              "expected !goobj.debug.funcs entries to have two operands");
-        const auto *SP = dyn_cast_or_null<DISubprogram>(Entry->getOperand(0));
-        const auto *CAM =
-            dyn_cast_or_null<ConstantAsMetadata>(Entry->getOperand(1));
-        const auto *GV = CAM ? dyn_cast<GlobalValue>(CAM->getValue()) : nullptr;
-        if (!SP || !GV)
-          report_fatal_error("invalid !goobj.debug.funcs entry");
-        if (!GoObjSubprogramSymbols.try_emplace(SP, Asm->getSymbol(GV)).second)
-          report_fatal_error("duplicate !goobj.debug.funcs subprogram");
-      }
-    }
-  }
 
   // Make sure we know our "debugger tuning".  The target option takes
   // precedence; fall back to triple-based defaults.
@@ -2260,12 +2239,7 @@ void DwarfDebug::beginInstruction(const MachineInstr *MI) {
       (!PrevInstBB ||
        PrevInstBB->getSectionID() == MI->getParent()->getSectionID());
   bool ForceIsStmt = ForceIsStmtInstrs.contains(MI);
-  bool IsGoObjInlineAnchor = Asm->TM.getTargetTriple().isOSBinFormatGoObj() &&
-                             MI->getPreInstrSymbol() &&
-                             Asm->OutStreamer->getContext().isGoObjInlineAnchor(
-                                 MI->getPreInstrSymbol());
-  if (PrevInstInSameSection && !ForceIsStmt && !IsGoObjInlineAnchor &&
-      DL.isSameSourceLocation(PrevInstLoc)) {
+  if (PrevInstInSameSection && !ForceIsStmt && DL.isSameSourceLocation(PrevInstLoc)) {
     // If we have an ongoing unspecified location, nothing to do here.
     if (!DL)
       return;
@@ -2339,92 +2313,6 @@ void DwarfDebug::beginInstruction(const MachineInstr *MI) {
 
 /// Default implementation of target-specific source line recording.
 void DwarfDebug::recordTargetSourceLine(const DebugLoc &DL, unsigned Flags) {
-  if (Asm->TM.getTargetTriple().isOSBinFormatGoObj() && CurFn && DL &&
-      DL.getLine() != 0) {
-    auto FilePath = [](const DIFile *File) {
-      if (!File)
-        return std::string("llvm-ir");
-      SmallString<256> Path(File->getFilename());
-      if (!sys::path::is_absolute(Path) && !File->getDirectory().empty()) {
-        Path = File->getDirectory();
-        sys::path::append(Path, File->getFilename());
-      }
-      return Path.empty() ? std::string("llvm-ir") : Path.str().str();
-    };
-    auto GetSubprogramSymbol = [&](const DISubprogram *SP) -> const MCSymbol * {
-      if (auto It = GoObjSubprogramSymbols.find(SP);
-          It != GoObjSubprogramSymbols.end())
-        return It->second;
-      StringRef LinkageName = SP->getLinkageName();
-      if (LinkageName.empty())
-        LinkageName = SP->getName();
-      if (const auto *GV = dyn_cast_or_null<GlobalValue>(
-              MMI->getModule()->getNamedValue(LinkageName)))
-        return Asm->getSymbol(GV);
-      report_fatal_error(
-          Twine("GoObj inline subprogram has no exact symbol: ") + LinkageName);
-    };
-    auto GetInlineFrames = [&](const DILocation *Loc) {
-      SmallVector<MCContext::GoObjDebugInlineFrame, 4> Reversed;
-      while (const DILocation *Call = Loc->getInlinedAt()) {
-        MCContext::GoObjDebugInlineFrame Frame;
-        Frame.Callee = GetSubprogramSymbol(Loc->getScope()->getSubprogram());
-        Frame.CallFile = FilePath(Call->getFile());
-        Frame.CallLine = Call->getLine();
-        auto [It, Inserted] = GoObjInlineSiteIDs.try_emplace(Call, 0);
-        if (Inserted)
-          It->second = NextGoObjInlineSiteID++;
-        Frame.SiteID = It->second;
-        Reversed.push_back(std::move(Frame));
-        Loc = Call;
-      }
-      std::vector<MCContext::GoObjDebugInlineFrame> Result;
-      Result.reserve(Reversed.size());
-      for (auto It = Reversed.rbegin(); It != Reversed.rend(); ++It)
-        Result.push_back(*It);
-      return Result;
-    };
-
-    MCContext &Context = Asm->OutStreamer->getContext();
-    const MCSymbol *Label = CurMI ? CurMI->getPreInstrSymbol() : nullptr;
-    bool IsAnchor = Label && Context.isGoObjInlineAnchor(Label);
-    if (!Label || !IsAnchor) {
-      MCSymbol *LocationLabel = Context.createTempSymbol();
-      Asm->OutStreamer->emitLabel(LocationLabel);
-      Label = LocationLabel;
-    }
-
-    MCContext::GoObjDebugLocation Location;
-    Location.Label = Label;
-    Location.File = FilePath(DL->getFile());
-    Location.Line = DL.getLine();
-    Location.InlineFrames = GetInlineFrames(DL.get());
-    if (IsAnchor) {
-      auto It = std::next(CurMI->getIterator());
-      while (It != CurMI->getParent()->end() && It->isMetaInstruction())
-        ++It;
-      if (It == CurMI->getParent()->end() || !It->getDebugLoc())
-        report_fatal_error(
-            "GoObj inline anchor has no following source instruction");
-      Location.AnchorChildFrames = GetInlineFrames(It->getDebugLoc().get());
-      if (Location.AnchorChildFrames.size() !=
-              Location.InlineFrames.size() + 1 ||
-          !std::equal(Location.InlineFrames.begin(),
-                      Location.InlineFrames.end(),
-                      Location.AnchorChildFrames.begin(),
-                      [](const auto &LHS, const auto &RHS) {
-                        return LHS.Callee == RHS.Callee &&
-                               LHS.CallFile == RHS.CallFile &&
-                               LHS.CallLine == RHS.CallLine &&
-                               LHS.SiteID == RHS.SiteID;
-                      }))
-        report_fatal_error(
-            "GoObj inline anchor does not precede its child frame");
-    }
-    Context.addGoObjDebugLocation(Asm->getSymbol(&CurFn->getFunction()),
-                                  std::move(Location));
-  }
-
   SmallString<128> LocationString;
   if (Asm->OutStreamer->isVerboseAsm()) {
     raw_svector_ostream OS(LocationString);
@@ -2919,18 +2807,6 @@ void DwarfDebug::beginFunctionImpl(const MachineFunction *MF) {
   assert(LScopes.empty() || SP == LScopes.getCurrentFunctionScope()->getScopeNode());
   if (SP->getUnit()->getEmissionKind() == DICompileUnit::NoDebug)
     return;
-
-  if (Asm->TM.getTargetTriple().isOSBinFormatGoObj()) {
-    const DIFile *File = SP->getFile();
-    SmallString<256> Path(File ? File->getFilename() : StringRef("llvm-ir"));
-    if (File && !sys::path::is_absolute(Path) &&
-        !File->getDirectory().empty()) {
-      Path = File->getDirectory();
-      sys::path::append(Path, File->getFilename());
-    }
-    Asm->OutStreamer->getContext().setGoObjFunctionSource(
-        Asm->getSymbol(&MF->getFunction()), Path, SP->getLine());
-  }
 
   DwarfCompileUnit &CU = getOrCreateDwarfCompileUnit(SP->getUnit());
   FunctionLineTableLabel = CU.emitFuncLineTableOffsets()

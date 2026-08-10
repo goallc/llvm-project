@@ -376,10 +376,6 @@ class DwarfDebug : public DebugHandlerBase {
   /// create DIEs.
   SmallSetVector<const DISubprogram *, 16> ProcessedSPNodes;
 
-  DenseMap<const DISubprogram *, const MCSymbol *> GoObjSubprogramSymbols;
-  DenseMap<const DILocation *, uint64_t> GoObjInlineSiteIDs;
-  uint64_t NextGoObjInlineSiteID = 1;
-
   /// Map function-local imported entities to their parent local scope
   /// (either DILexicalBlock or DISubprogram) for a processed function
   /// (including inlined subprograms).
