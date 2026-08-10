@@ -9445,23 +9445,6 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
     DAG.addCalledGlobal(Chain.getNode(), CalledGlobal, OpFlags);
   InGlue = Chain.getValue(1);
 
-  // A Go stack can grow while the callee is running. Preserve the current
-  // outgoing-frame address after the call, rather than retaining a pointer
-  // into the old stack segment. CALLSEQ_END changes SP, forcing this value to
-  // be materialized when stack results are present.
-  SDValue ResultStackPtr;
-  if (llvm::any_of(groupGoArgs(ArrayRef(Ins)), [&](const auto &Group) {
-        return !Layout.Results[Group.Index].InRegs;
-      })) {
-    ResultStackPtr =
-        DAG.getCopyFromReg(Chain, DL, AArch64::SP, PtrVT, InGlue);
-    Chain = ResultStackPtr.getValue(1);
-    InGlue = ResultStackPtr.getValue(2);
-  }
-
-  Chain = DAG.getCALLSEQ_END(Chain, NumBytes, 0, InGlue, DL);
-  InGlue = Chain.getValue(1);
-
   SmallVector<SDValue, 8> ResultVals(Ins.size());
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
     const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
@@ -9494,6 +9477,20 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
   // on the stack without consuming that budget, so a later result can still
   // be register-assigned. Interleaving those stack loads with glued physical
   // register copies can create a cyclic scheduler dependency at statepoints.
+  //
+  // Keep the call sequence active while reading stack results. The load chain
+  // is after the call, so the physical SP is the current post-growth Go stack;
+  // CALLSEQ_END cannot release the outgoing frame until every result is read.
+  bool HasStackResults =
+      llvm::any_of(groupGoArgs(ArrayRef(Ins)), [&](const auto &Group) {
+        return !Layout.Results[Group.Index].InRegs;
+      });
+  SDValue ResultStackPtr;
+  if (HasStackResults) {
+    ResultStackPtr = DAG.getCopyFromReg(Chain, DL, AArch64::SP, PtrVT, InGlue);
+    Chain = ResultStackPtr.getValue(1);
+    InGlue = ResultStackPtr.getValue(2);
+  }
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
     const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
     if (ResultLayout.InRegs)
@@ -9512,6 +9509,9 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
       ResultVals[I] = Load;
     }
   }
+
+  Chain = DAG.getCALLSEQ_END(Chain, NumBytes, 0,
+                             HasStackResults ? SDValue() : InGlue, DL);
 
   InVals.append(ResultVals.begin(), ResultVals.end());
   return Chain;
