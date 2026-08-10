@@ -333,17 +333,23 @@ static void emitGoStackCheck(MachineFunction &MF,
   ArrayRef<X86MachineFunctionInfo::GoArgHome> Homes = X86FI->getGoArgHomes();
   MachineBasicBlock &EntryMBB = getGoStackCheckEntryMBB(MF, PrologueMBB);
 
+  // LLVM's machine block frequency analysis requires the function entry not
+  // to be a loop header. Keep a zero-instruction preheader so morestack can
+  // retry the single stack-check block without adding a hot-path instruction.
+  MachineBasicBlock *StartMBB = MF.CreateMachineBasicBlock();
   MachineBasicBlock *CheckMBB = MF.CreateMachineBasicBlock();
   MachineBasicBlock *CompareMBB = CheckMBB;
   if (StackSize > GoStackBig)
     CompareMBB = MF.CreateMachineBasicBlock();
   MachineBasicBlock *MorestackMBB = MF.CreateMachineBasicBlock();
   for (const auto &LI : EntryMBB.liveins()) {
+    StartMBB->addLiveIn(LI);
     CheckMBB->addLiveIn(LI);
     if (CompareMBB != CheckMBB)
       CompareMBB->addLiveIn(LI);
     MorestackMBB->addLiveIn(LI);
   }
+  StartMBB->addLiveIn(X86::R14);
   CheckMBB->addLiveIn(X86::R14);
   if (CompareMBB != CheckMBB) {
     CompareMBB->addLiveIn(X86::R12);
@@ -358,6 +364,7 @@ static void emitGoStackCheck(MachineFunction &MF,
   for (const X86MachineFunctionInfo::GoArgHome &Home : Homes)
     for (const X86MachineFunctionInfo::GoArgHome::RegisterPiece &Piece :
          Home.RegisterPieces) {
+      StartMBB->addLiveIn(Piece.Reg);
       CheckMBB->addLiveIn(Piece.Reg);
       if (CompareMBB != CheckMBB)
         CompareMBB->addLiveIn(Piece.Reg);
@@ -368,6 +375,7 @@ static void emitGoStackCheck(MachineFunction &MF,
   if (CompareMBB != CheckMBB)
     MF.push_front(CompareMBB);
   MF.push_front(CheckMBB);
+  MF.push_front(StartMBB);
 
   bool UseStackGrowthStatepoint =
       MF.getFunction().hasFnAttribute(goabi::StackGrowthStatepointAttr);
@@ -417,18 +425,24 @@ static void emitGoStackCheck(MachineFunction &MF,
   if (HasClosureContext)
     Morestack.addReg(X86::RDX, RegState::Implicit);
   emitGoRegSpills(MF, *MorestackMBB, Homes, /*Reload=*/true);
-  BuildMI(MorestackMBB, DL, TII.get(X86::JMP_1)).addMBB(&EntryMBB);
+  BuildMI(MorestackMBB, DL, TII.get(X86::JMP_1)).addMBB(CheckMBB);
 
+  // The slow path is possible, not impossible. Besides modeling that fact,
+  // keeping a tiny nonzero edge weight prevents loop placement from rotating
+  // MorestackMBB ahead of the check and adding a jump at every function entry.
+  const BranchProbability MorestackProb(1, 1 << 20);
+  const BranchProbability FastPathProb = MorestackProb.getCompl();
   if (CompareMBB != CheckMBB) {
-    CheckMBB->addSuccessor(MorestackMBB, BranchProbability::getZero());
-    CheckMBB->addSuccessor(CompareMBB, BranchProbability::getOne());
-    CompareMBB->addSuccessor(MorestackMBB, BranchProbability::getZero());
-    CompareMBB->addSuccessor(&EntryMBB, BranchProbability::getOne());
+    CheckMBB->addSuccessor(MorestackMBB, MorestackProb);
+    CheckMBB->addSuccessor(CompareMBB, FastPathProb);
+    CompareMBB->addSuccessor(MorestackMBB, MorestackProb);
+    CompareMBB->addSuccessor(&EntryMBB, FastPathProb);
   } else {
-    CheckMBB->addSuccessor(MorestackMBB, BranchProbability::getZero());
-    CheckMBB->addSuccessor(&EntryMBB, BranchProbability::getOne());
+    CheckMBB->addSuccessor(MorestackMBB, MorestackProb);
+    CheckMBB->addSuccessor(&EntryMBB, FastPathProb);
   }
-  MorestackMBB->addSuccessor(&EntryMBB);
+  StartMBB->addSuccessor(CheckMBB);
+  MorestackMBB->addSuccessor(CheckMBB);
 }
 } // namespace
 // Push-Pop Acceleration (PPX) hint is used to indicate that the POP reads the

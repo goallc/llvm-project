@@ -32,6 +32,14 @@ entry:
   ret i64 %result
 }
 
+define goabiinternal i64 @mediumframe(i64 %value) #0 {
+entry:
+  %buf = alloca [2048 x i8], align 16
+  %slot = getelementptr inbounds [2048 x i8], ptr %buf, i64 0, i64 2047
+  store volatile i8 1, ptr %slot, align 1
+  ret i64 %value
+}
+
 define goabiinternal i64 @largeframe(i64 %value) #0 {
 entry:
   %buf = alloca [8192 x i8], align 16
@@ -75,47 +83,71 @@ entry:
 ; ASM: str x{{[0-9]+}}, [sp, #24]
 
 ; ASM-LABEL: calls:
+; ASM: [[CALLS_CHECK:.LBB[0-9_]+]]:
 ; ASM: ldr x17, [x28, #16]
 ; ASM: cmp sp, x17
-; ASM: b.ls [[CALLS_MORESTACK:.LBB[0-9_]+]]
+; ASM: b.hi [[CALLS_BODY:.LBB[0-9_]+]]
+; ASM: mov x3, x30
+; ASM: bl runtime.morestack_noctxt
+; ASM-NEXT: b [[CALLS_CHECK]]
+; ASM: [[CALLS_BODY]]:
 ; ASM: str x30, [sp, #-16]!
 ; ASM: stur x29, [sp, #-8]
 ; ASM: sub x29, sp, #8
 ; ASM: bl runtime.GC
 ; ASM: ldur x29, [sp, #-8]
 ; ASM-NEXT: ldr x30, [sp], #16
-; ASM: [[CALLS_MORESTACK]]:
-; ASM: mov x3, x30
-; ASM: bl runtime.morestack_noctxt
 
 ; ASM-LABEL: local_calls:
-; ASM: str x30, [sp, #-32]!
-; ASM: str x0, [sp, #16]
+; ASM: str x30, [sp, #-16]!
+; ASM: str x0, [sp, #24]
 ; ASM: bl runtime.GC
-; ASM: ldr x0, [sp, #16]
-; ASM: ldr x30, [sp], #32
+; ASM: ldr x0, [sp, #24]
+; ASM: ldr x30, [sp], #16
+
+; ASM-LABEL: mediumframe:
+; The StackSmall < frame <= StackBig path needs no explicit underflow branch.
+; ASM: ldr x17, [x28, #16]
+; ASM-NEXT: sub x16, sp, #{{[0-9]+}}
+; ASM-NEXT: cmp x16, x17
+; ASM-NEXT: b.hi
 
 ; ASM-LABEL: largeframe:
-; ASM: sub x16, sp, #{{[0-9]+}}
+; Match Go's single stack-check loop: the hot entry executes the check
+; directly, and morestack branches back to that same check.
+; ASM-NOT: b .LBB
+; ASM: [[LARGE_CHECK:.LBB[0-9_]+]]:
+; ASM: mov x17, #{{[0-9]+}}
+; ASM-NEXT: subs x16, sp, x17
+; ASM-NEXT: b.lo [[LARGE_MORESTACK:.LBB[0-9_]+]]
+; ASM: ldr x17, [x28, #16]
 ; ASM: cmp x16, x17
-; ASM: b.ls [[LARGE_MORESTACK:.LBB[0-9_]+]]
-; ASM: stp x29, x30, [x16, #-8]
-; ASM-NEXT: mov sp, x16
-; ASM: sub x29, sp, #8
-; ASM: ldp x29, x30, [sp, #-8]
-; ASM: mov sp, x16
+; ASM: b.hi [[LARGE_BODY:.LBB[0-9_]+]]
 ; ASM: [[LARGE_MORESTACK]]:
 ; ASM: mov x3, x30
 ; ASM: str x0, [sp, #8]
 ; ASM: bl runtime.morestack_noctxt
 ; ASM: ldr x0, [sp, #8]
+; ASM-NEXT: b [[LARGE_CHECK]]
+; ASM: [[LARGE_BODY]]:
+; ASM: stp x29, x30, [x16, #-8]
+; ASM-NEXT: mov sp, x16
+; ASM: sub x29, sp, #8
+; ASM: ldp x29, x30, [sp, #-8]
+; ASM: mov sp, x16
 
 ; ASM-LABEL: largeclosure:
-; ASM: sub x16, sp, #{{[0-9]+}}
-; ASM: b.ls [[CLOSURE_MORESTACK:.LBB[0-9_]+]]
+; ASM: [[CLOSURE_CHECK:.LBB[0-9_]+]]:
+; ASM: mov x17, #{{[0-9]+}}
+; ASM-NEXT: subs x16, sp, x17
+; ASM-NEXT: b.lo [[CLOSURE_MORESTACK:.LBB[0-9_]+]]
+; ASM: ldr x17, [x28, #16]
+; ASM: b.hi [[CLOSURE_BODY:.LBB[0-9_]+]]
 ; ASM: [[CLOSURE_MORESTACK]]:
 ; ASM: mov x3, x30
 ; ASM: bl runtime.morestack
+; ASM: b [[CLOSURE_CHECK]]
+; ASM: [[CLOSURE_BODY]]:
 
 ; ASM-LABEL: aggregate_frame:
 ; ASM: str x30, [sp, #-96]!
@@ -128,15 +160,16 @@ entry:
 ; OBJ: symdef {{[0-9]+}}: stackadd abi=0 type=1
 ; OBJ: symdef {{[0-9]+}}: calls abi=1 type=1
 ; OBJ: symdef {{[0-9]+}}: local_calls abi=1 type=1
+; OBJ: symdef {{[0-9]+}}: mediumframe abi=1 type=1
 ; OBJ: symdef {{[0-9]+}}: largeframe abi=1 type=1
 ; OBJ: symdef {{[0-9]+}}: largeclosure abi=1 type=1
 ; OBJ: symdef {{[0-9]+}}: aggregate_frame abi=1 type=1
-; OBJ: nonpkgref {{[0-9]+}}: runtime.GC abi=1 type=0 size=0
-; OBJ: nonpkgref {{[0-9]+}}: runtime.morestack_noctxt abi=0 type=0 size=0
-; OBJ: nonpkgref {{[0-9]+}}: runtime.morestack abi=0 type=0 size=0
+; OBJ-DAG: nonpkgref {{[0-9]+}}: runtime.GC abi=1 type=0 size=0
+; OBJ-DAG: nonpkgref {{[0-9]+}}: runtime.morestack_noctxt abi=0 type=0 size=0
+; OBJ-DAG: nonpkgref {{[0-9]+}}: runtime.morestack abi=0 type=0 size=0
 ; OBJ: aux {{[0-9]+}}.{{[0-9]+}}: type=funcinfo target= args=0 locals=8
-; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=runtime.GC
-; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=runtime.morestack_noctxt
-; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=runtime.morestack
+; OBJ-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=runtime.GC
+; OBJ-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=runtime.morestack_noctxt
+; OBJ-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=runtime.morestack
 
 attributes #0 = { "frame-pointer"="non-leaf" }
