@@ -1142,6 +1142,14 @@ def int_go_defer_edge : Intrinsic<[], [],
 def int_go_abi0_frame : DefaultAttrsIntrinsic<[llvm_ptr_ty], [],
     [IntrNoMem, IntrNoCallback, IntrNoSync, IntrNoFree, IntrWillReturn]>;
 
+// Observe the current physical address of a pointer. Go stack pointers may be
+// relocated by a stack-growing call, so this operation is deliberately
+// side-effecting even though it lowers to ptrtoint. Statepoint rewriting must
+// relocate the pointer operand before lowering the observation.
+def int_go_pointer_address : DefaultAttrsIntrinsic<
+    [llvm_anyint_ty], [llvm_anyptr_ty],
+    [IntrNoMem, IntrHasSideEffects, NoCapture<ArgIndex<0>>]>;
+
 def int_structured_gep
     : DefaultAttrsIntrinsic<[llvm_anyptr_ty],
                             [LLVMMatchType<0>, llvm_vararg_ty],
