@@ -1,4 +1,5 @@
 ; RUN: llc -mtriple=x86_64-unknown-linux-gnu -O0 < %s | FileCheck %s --check-prefix=X86
+; RUN: llc -mtriple=x86_64-unknown-linux-gnu -O2 < %s | FileCheck %s --check-prefix=X86-O2
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -O0 -filetype=null < %s
 
 define goabiinternal i64 @second_int(i64 %a, i64 %b) {
@@ -110,6 +111,42 @@ entry:
 }
 
 %pair = type { i64, i64 }
+%method.results = type { i64, i64, [2 x i64], double, [2 x double] }
+
+; Aggregate arguments and results can share one outgoing call frame. Preserve
+; the post-call frame address before releasing the frame, then load stack
+; results through that preserved address.
+define goabiinternal i64 @call_method_results(ptr %callee, ptr %recv,
+                                               ptr nest %ctxt) {
+; X86-O2-LABEL: call_method_results:
+; X86-O2:       callq *
+; X86-O2-NEXT:  movq %rsp, [[RESULT_SP:%r[a-z0-9]+]]
+; X86-O2:       addq 32([[RESULT_SP]]), %rax
+; X86-O2:       addq 40([[RESULT_SP]]), %rax
+; X86-O2:       addq 48([[RESULT_SP]]), %rax
+; X86-O2:       addq 56([[RESULT_SP]]), %rax
+; X86-O2:       addq ${{[0-9]+}}, %rsp
+entry:
+  %result = call goabiinternal %method.results %callee(
+      ptr %recv, i64 123, [2 x i64] [i64 456, i64 789],
+      double 1.2, [2 x double] [double 3.4, double 5.6], ptr nest %ctxt) #0
+  %s = extractvalue %method.results %result, 0
+  %a = extractvalue %method.results %result, 1
+  %x = extractvalue %method.results %result, 2
+  %x0 = extractvalue [2 x i64] %x, 0
+  %x1 = extractvalue [2 x i64] %x, 1
+  %y = extractvalue %method.results %result, 4
+  %y0 = extractvalue [2 x double] %y, 0
+  %y1 = extractvalue [2 x double] %y, 1
+  %y0i = bitcast double %y0 to i64
+  %y1i = bitcast double %y1 to i64
+  %sum0 = add i64 %s, %a
+  %sum1 = add i64 %sum0, %x0
+  %sum2 = add i64 %sum1, %x1
+  %sum3 = add i64 %sum2, %y0i
+  %sum4 = add i64 %sum3, %y1i
+  ret i64 %sum4
+}
 
 define goabiinternal i64 @stack_pair(
     i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4,

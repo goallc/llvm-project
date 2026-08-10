@@ -409,7 +409,13 @@ static std::pair<SDValue, SDNode *> lowerCallFromStatepointLoweringInfo(
     CallEnd = peelCallResultChain(CallEnd);
 
   assert(CallEnd->getOpcode() == ISD::CALLSEQ_END && "expected!");
-  return std::make_pair(ReturnValue, CallEnd->getOperand(0).getNode());
+  // Some calling conventions need to preserve the post-call stack pointer
+  // before CALLSEQ_END releases an outgoing frame containing stack results.
+  // Peel those register copies to recover the underlying call node.
+  SDNode *CallNode = CallEnd->getOperand(0).getNode();
+  while (CallNode->getOpcode() == ISD::CopyFromReg)
+    CallNode = CallNode->getOperand(0).getNode();
+  return std::make_pair(ReturnValue, CallNode);
 }
 
 static MachineMemOperand* getMachineMemOperand(MachineFunction &MF,
