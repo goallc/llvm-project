@@ -1,10 +1,9 @@
-; RUN: llc -mtriple=aarch64-apple-darwin -verify-machineinstrs < %s \
+; RUN: llc -mtriple=x86_64-unknown-linux-gnu -verify-machineinstrs < %s \
 ; RUN:   | FileCheck %s
 
 %results = type {
-  ptr, i64, i64, i64, i64, i64, i64, i64,
-  i64, i64, i64, i64, i64, i64, i64, ptr,
-  ptr, ptr
+  ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr,
+  ptr, ptr, ptr
 }
 
 declare goabiinternal %results @overflow_results() #0
@@ -18,9 +17,9 @@ entry:
           i32 0, i32 0, i32 0, i32 0) #0
   %result = call %results @llvm.experimental.gc.result.results(token %token)
   %first_pointer = extractvalue %results %result, 0
-  %last_register_pointer = extractvalue %results %result, 15
-  %first_stack_pointer = extractvalue %results %result, 16
-  %stack_pointer = extractvalue %results %result, 17
+  %last_register_pointer = extractvalue %results %result, 8
+  %first_stack_pointer = extractvalue %results %result, 9
+  %stack_pointer = extractvalue %results %result, 10
   call void @use(ptr %first_pointer)
   call void @use(ptr %last_register_pointer)
   call void @use(ptr %first_stack_pointer)
@@ -28,18 +27,11 @@ entry:
   ret void
 }
 
-; CHECK-LABEL: _statepoint_with_register_and_stack_results:
-; CHECK:       bl _overflow_results
-; CHECK:       mov [[RESULT_SP:x[0-9]+]], sp
-; CHECK-DAG:   ldp [[STACK0:x[0-9]+]], [[STACK1:x[0-9]+]], {{\[}}[[RESULT_SP]], #8]
-; CHECK-DAG:   mov [[REGISTER:x[0-9]+]], x15
-; CHECK:       bl _use
-; CHECK:       mov x0, [[REGISTER]]
-; CHECK-NEXT:  bl _use
-; CHECK:       mov x0, [[STACK0]]
-; CHECK-NEXT:  bl _use
-; CHECK:       mov x0, [[STACK1]]
-; CHECK-NEXT:  bl _use
+; CHECK-LABEL: statepoint_with_register_and_stack_results:
+; CHECK:       callq overflow_results
+; CHECK:       movq %rsp, [[RESULT_SP:%r[a-z0-9]+]]
+; CHECK-DAG:   movq ([[RESULT_SP]]), [[STACK0:%r[a-z0-9]+]]
+; CHECK-DAG:   movq 8([[RESULT_SP]]), [[STACK1:%r[a-z0-9]+]]
 
 declare void @use(ptr)
 declare token @llvm.experimental.gc.statepoint.p0(

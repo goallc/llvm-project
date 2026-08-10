@@ -9445,6 +9445,20 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
     DAG.addCalledGlobal(Chain.getNode(), CalledGlobal, OpFlags);
   InGlue = Chain.getValue(1);
 
+  // A Go stack can grow while the callee is running. Preserve the current
+  // outgoing-frame address after the call, rather than retaining a pointer
+  // into the old stack segment. CALLSEQ_END changes SP, forcing this value to
+  // be materialized when stack results are present.
+  SDValue ResultStackPtr;
+  if (llvm::any_of(groupGoArgs(ArrayRef(Ins)), [&](const auto &Group) {
+        return !Layout.Results[Group.Index].InRegs;
+      })) {
+    ResultStackPtr =
+        DAG.getCopyFromReg(Chain, DL, AArch64::SP, PtrVT, InGlue);
+    Chain = ResultStackPtr.getValue(1);
+    InGlue = ResultStackPtr.getValue(2);
+  }
+
   Chain = DAG.getCALLSEQ_END(Chain, NumBytes, 0, InGlue, DL);
   InGlue = Chain.getValue(1);
 
@@ -9480,16 +9494,6 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
   // on the stack without consuming that budget, so a later result can still
   // be register-assigned. Interleaving those stack loads with glued physical
   // register copies can create a cyclic scheduler dependency at statepoints.
-  SDValue ResultStackPtr;
-  if (llvm::any_of(groupGoArgs(ArrayRef(Ins)), [&](const auto &Group) {
-        return !Layout.Results[Group.Index].InRegs;
-      })) {
-    // A Go stack can grow while the callee is running. Do not retain the
-    // pre-call SP value used to store arguments: it may point into the old
-    // stack segment after the call returns.
-    ResultStackPtr = DAG.getCopyFromReg(Chain, DL, AArch64::SP, PtrVT);
-    Chain = ResultStackPtr.getValue(1);
-  }
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
     const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
     if (ResultLayout.InRegs)
