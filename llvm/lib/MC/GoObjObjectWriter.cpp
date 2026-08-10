@@ -859,6 +859,14 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
 
     for (const MCContext::GoObjStackMapLocation &RawLoc : GCLiveLocations) {
       MCContext::GoObjStackMapLocation Loc = NormalizeFrameLocation(RawLoc);
+      // Statepoint lowering does not allocate a spill slot for a null GC
+      // pointer.  A path-sensitive constant fold can therefore leave a null
+      // base/derived pair in the stack map even when the original IR operand
+      // was not syntactically null.  Null needs neither scanning nor stack
+      // relocation, so omit it from the Go pointer maps.  Keep every other
+      // non-frame location fail-closed.
+      if (goobj::isNullGCLiveLocation(Loc))
+        continue;
       switch (Loc.Type) {
       case MCContext::GoObjStackMapLocation::Direct:
       case MCContext::GoObjStackMapLocation::Indirect:

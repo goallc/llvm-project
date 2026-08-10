@@ -13,6 +13,18 @@ using namespace llvm;
 
 namespace {
 
+TEST(GoObjStackMapUtilsTest, RecognizesOnlyConstantZeroAsNullGCLive) {
+  using Location = MCContext::GoObjStackMapLocation;
+  EXPECT_TRUE(goobj::isNullGCLiveLocation(
+      {Location::Constant, /*Size=*/8, /*DwarfRegNum=*/0, /*Offset=*/0}));
+  EXPECT_FALSE(goobj::isNullGCLiveLocation(
+      {Location::Constant, /*Size=*/8, /*DwarfRegNum=*/0, /*Offset=*/1}));
+  EXPECT_FALSE(goobj::isNullGCLiveLocation(
+      {Location::ConstantIndex, /*Size=*/8, /*DwarfRegNum=*/0, /*Offset=*/0}));
+  EXPECT_FALSE(goobj::isNullGCLiveLocation(
+      {Location::Register, /*Size=*/8, /*DwarfRegNum=*/0, /*Offset=*/0}));
+}
+
 TEST(GoObjStackMapUtilsTest, ExpandsIndirectPointerVectorLocations) {
   auto Words = goobj::expandStackMapPointerWords(
       /*Offset=*/24, /*Size=*/16, /*IsIndirect=*/true, /*PointerSize=*/8);
