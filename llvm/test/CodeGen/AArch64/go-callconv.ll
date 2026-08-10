@@ -153,9 +153,8 @@ define goabiinternal i16 @call_stack_bytes() {
 ; A64-DAG: ldrb w{{[0-9]+}}, [x{{[0-9]+}}, #23]
 ; A64-O2-LABEL: call_stack_bytes:
 ; A64-O2:       bl stack_bytes
-; A64-O2-NEXT:  mov [[RESULT_SP:x[0-9]+]], sp
-; A64-O2:       ldrb w{{[0-9]+}}, {{\[}}[[RESULT_SP]], #23]
-; A64-O2:       ldrb w{{[0-9]+}}, {{\[}}[[RESULT_SP]], #16]
+; A64-O2-NEXT:  ldrb w{{[0-9]+}}, [sp, #23]
+; A64-O2:       ldrb w{{[0-9]+}}, [sp, #16]
 ; A64-O2:       add sp, sp, #{{[0-9]+}}
 entry:
   %result = call goabiinternal [8 x i8] @stack_bytes(

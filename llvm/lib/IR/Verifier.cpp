@@ -6942,6 +6942,14 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
           "llvm.go.abi0.frame requires a noinline function", &Call);
     break;
   }
+  case Intrinsic::go_pointer_address: {
+    auto *PointerTy = cast<PointerType>(Call.getArgOperand(0)->getType());
+    Check(Call.getType()->getIntegerBitWidth() ==
+              M.getDataLayout().getPointerSizeInBits(
+                  PointerTy->getAddressSpace()),
+          "llvm.go.pointer.address result must match the pointer width", &Call);
+    break;
+  }
   case Intrinsic::structured_gep: {
     // Parser should refuse those 2 cases.
     assert(Call.arg_size() >= 1);

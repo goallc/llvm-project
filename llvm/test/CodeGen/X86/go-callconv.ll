@@ -113,18 +113,16 @@ entry:
 %pair = type { i64, i64 }
 %method.results = type { i64, i64, [2 x i64], double, [2 x double] }
 
-; Aggregate arguments and results can share one outgoing call frame. Preserve
-; the post-call frame address before releasing the frame, then load stack
-; results through that preserved address.
+; Aggregate arguments and results can share one outgoing call frame. Read stack
+; results from the post-call SP before releasing that frame.
 define goabiinternal i64 @call_method_results(ptr %callee, ptr %recv,
                                                ptr nest %ctxt) {
 ; X86-O2-LABEL: call_method_results:
 ; X86-O2:       callq *
-; X86-O2-NEXT:  movq %rsp, [[RESULT_SP:%r[a-z0-9]+]]
-; X86-O2:       addq 32([[RESULT_SP]]), %rax
-; X86-O2:       addq 40([[RESULT_SP]]), %rax
-; X86-O2:       addq 48([[RESULT_SP]]), %rax
-; X86-O2:       addq 56([[RESULT_SP]]), %rax
+; X86-O2:       addq 32(%rsp), %rax
+; X86-O2:       addq 40(%rsp), %rax
+; X86-O2:       addq 48(%rsp), %rax
+; X86-O2:       addq 56(%rsp), %rax
 ; X86-O2:       addq ${{[0-9]+}}, %rsp
 entry:
   %result = call goabiinternal %method.results %callee(
