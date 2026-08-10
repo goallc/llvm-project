@@ -1246,6 +1246,7 @@ void AArch64FrameLowering::emitPacRetPlusLeafHardening(
 
 namespace {
 constexpr uint64_t GoStackSmall = 128;
+constexpr uint64_t GoStackBig = 4096;
 constexpr int64_t GoGStackGuard0Offset = 16;
 
 static bool shouldEmitAArch64GoStackCheck(const MachineFunction &MF) {
@@ -1424,14 +1425,31 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
   const AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
   MachineBasicBlock &EntryMBB = getAArch64GoStackCheckEntryMBB(MF, PrologueMBB);
 
+  // LLVM's machine block frequency analysis requires the function entry not
+  // to be a loop header. Keep a zero-instruction preheader so morestack can
+  // retry the single stack-check block without adding a hot-path instruction.
+  MachineBasicBlock *StartMBB = MF.CreateMachineBasicBlock();
   MachineBasicBlock *CheckMBB = MF.CreateMachineBasicBlock();
+  MachineBasicBlock *CompareMBB = CheckMBB;
+  if (StackSize > GoStackBig)
+    CompareMBB = MF.CreateMachineBasicBlock();
   MachineBasicBlock *MorestackMBB = MF.CreateMachineBasicBlock();
   for (const auto &LI : EntryMBB.liveins()) {
+    StartMBB->addLiveIn(LI);
     CheckMBB->addLiveIn(LI);
+    if (CompareMBB != CheckMBB)
+      CompareMBB->addLiveIn(LI);
     MorestackMBB->addLiveIn(LI);
   }
+  StartMBB->addLiveIn(AArch64::X28);
+  StartMBB->addLiveIn(AArch64::LR);
   CheckMBB->addLiveIn(AArch64::X28);
   CheckMBB->addLiveIn(AArch64::LR);
+  if (CompareMBB != CheckMBB) {
+    CompareMBB->addLiveIn(AArch64::X16);
+    CompareMBB->addLiveIn(AArch64::X28);
+    CompareMBB->addLiveIn(AArch64::LR);
+  }
   MorestackMBB->addLiveIn(AArch64::X28);
   MorestackMBB->addLiveIn(AArch64::LR);
   // Formal argument copies can be eliminated when an argument is unused in
@@ -1442,18 +1460,39 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
   for (const AArch64FunctionInfo::GoArgHome &Home : AFI->getGoArgHomes())
     for (const AArch64FunctionInfo::GoArgHome::RegisterPiece &Piece :
          Home.RegisterPieces) {
+      StartMBB->addLiveIn(Piece.Reg);
       CheckMBB->addLiveIn(Piece.Reg);
+      if (CompareMBB != CheckMBB)
+        CompareMBB->addLiveIn(Piece.Reg);
       MorestackMBB->addLiveIn(Piece.Reg);
     }
 
   MF.push_front(MorestackMBB);
+  if (CompareMBB != CheckMBB)
+    MF.push_front(CompareMBB);
   MF.push_front(CheckMBB);
+  MF.push_front(StartMBB);
 
   bool UseStackGrowthStatepoint =
       MF.getFunction().hasFnAttribute(goabi::StackGrowthStatepointAttr);
 
   Register ScratchReg = AArch64::SP;
-  if (StackSize > GoStackSmall) {
+  if (StackSize > GoStackBig) {
+    ScratchReg = AArch64::X16;
+    // Match the native Go huge-frame check. Materialize the entire offset and
+    // subtract it once so NZCV describes underflow of the complete operation;
+    // splitting the offset across multiple SUBS instructions would only retain
+    // flags from the final piece.
+    BuildMI(CheckMBB, DL, TII.get(AArch64::MOVi64imm), AArch64::X17)
+        .addImm(static_cast<int64_t>(StackSize - GoStackSmall));
+    BuildMI(CheckMBB, DL, TII.get(AArch64::SUBSXrx64), ScratchReg)
+        .addReg(AArch64::SP)
+        .addReg(AArch64::X17)
+        .addImm(AArch64_AM::getArithExtendImm(AArch64_AM::UXTX, 0));
+    BuildMI(CheckMBB, DL, TII.get(AArch64::Bcc))
+        .addImm(AArch64CC::LO)
+        .addMBB(MorestackMBB);
+  } else if (StackSize > GoStackSmall) {
     ScratchReg = AArch64::X16;
     emitFrameOffset(
         *CheckMBB, CheckMBB->end(), DL, ScratchReg, AArch64::SP,
@@ -1461,14 +1500,14 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
         &TII, MachineInstr::NoFlags);
   }
 
-  BuildMI(CheckMBB, DL, TII.get(AArch64::LDRXui), AArch64::X17)
+  BuildMI(CompareMBB, DL, TII.get(AArch64::LDRXui), AArch64::X17)
       .addReg(AArch64::X28)
       .addImm(GoGStackGuard0Offset / 8);
-  BuildMI(CheckMBB, DL, TII.get(AArch64::SUBSXrx64), AArch64::XZR)
+  BuildMI(CompareMBB, DL, TII.get(AArch64::SUBSXrx64), AArch64::XZR)
       .addReg(ScratchReg)
       .addReg(AArch64::X17)
       .addImm(AArch64_AM::getArithExtendImm(AArch64_AM::UXTX, 0));
-  BuildMI(CheckMBB, DL, TII.get(AArch64::Bcc))
+  BuildMI(CompareMBB, DL, TII.get(AArch64::Bcc))
       .addImm(AArch64CC::HI)
       .addMBB(&EntryMBB);
 
@@ -1489,11 +1528,25 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
     Morestack.addReg(AArch64::X26, RegState::Implicit);
   emitAArch64GoRegSpills(MF, *MorestackMBB, AFI->getGoArgHomes(),
                          /*Reload=*/true);
-  BuildMI(MorestackMBB, DL, TII.get(AArch64::B)).addMBB(&EntryMBB);
+  BuildMI(MorestackMBB, DL, TII.get(AArch64::B)).addMBB(CheckMBB);
 
-  CheckMBB->addSuccessor(MorestackMBB, BranchProbability::getZero());
-  CheckMBB->addSuccessor(&EntryMBB, BranchProbability::getOne());
-  MorestackMBB->addSuccessor(&EntryMBB);
+  // The slow path is possible, not impossible. Besides modeling that fact,
+  // keeping a tiny nonzero edge weight prevents loop placement from rotating
+  // MorestackMBB ahead of the check and adding a branch at every function
+  // entry.
+  const BranchProbability MorestackProb(1, 1 << 20);
+  const BranchProbability FastPathProb = MorestackProb.getCompl();
+  if (CompareMBB != CheckMBB) {
+    CheckMBB->addSuccessor(MorestackMBB, MorestackProb);
+    CheckMBB->addSuccessor(CompareMBB, FastPathProb);
+    CompareMBB->addSuccessor(MorestackMBB, MorestackProb);
+    CompareMBB->addSuccessor(&EntryMBB, FastPathProb);
+  } else {
+    CheckMBB->addSuccessor(MorestackMBB, MorestackProb);
+    CheckMBB->addSuccessor(&EntryMBB, FastPathProb);
+  }
+  StartMBB->addSuccessor(CheckMBB);
+  MorestackMBB->addSuccessor(CheckMBB);
 }
 
 } // namespace
