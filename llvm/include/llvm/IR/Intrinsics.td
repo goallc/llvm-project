@@ -1129,27 +1129,6 @@ def int_call_preallocated_teardown : DefaultAttrsIntrinsic<[], [llvm_token_ty]>;
 def int_callbr_landingpad : Intrinsic<[llvm_any_ty], [LLVMMatchType<0>],
                                       [IntrNoMerge]>;
 
-// Model the out-of-band control-flow edge from a Go defer registration site to
-// the function's deferreturn path. This intrinsic is only valid as the callee
-// of a callbr with one indirect destination and emits no machine instruction.
-def int_go_defer_edge : Intrinsic<[], [],
-    [IntrNoMem, IntrHasSideEffects, IntrNoCallback, IntrNoSync, IntrNoFree,
-     IntrNoDuplicate, IntrNoMerge]>;
-
-// Return the base of the current Go ABI0 function's contiguous argument and
-// result frame. The caller must be noinline because the returned address is
-// tied to this physical activation record.
-def int_go_abi0_frame : DefaultAttrsIntrinsic<[llvm_ptr_ty], [],
-    [IntrNoMem, IntrNoCallback, IntrNoSync, IntrNoFree, IntrWillReturn]>;
-
-// Observe the current physical address of a pointer. Go stack pointers may be
-// relocated by a stack-growing call, so this operation is deliberately
-// side-effecting even though it lowers to ptrtoint. Statepoint rewriting must
-// relocate the pointer operand before lowering the observation.
-def int_go_pointer_address : DefaultAttrsIntrinsic<
-    [llvm_anyint_ty], [llvm_anyptr_ty],
-    [IntrNoMem, IntrHasSideEffects, NoCapture<ArgIndex<0>>]>;
-
 def int_structured_gep
     : DefaultAttrsIntrinsic<[llvm_anyptr_ty],
                             [LLVMMatchType<0>, llvm_vararg_ty],
@@ -1941,21 +1920,6 @@ def int_experimental_patchpoint : Intrinsic<[llvm_any_ty],
 
 //===------------------------ Garbage Collection Intrinsics ---------------===//
 // These are documented in docs/Statepoint.rst
-
-// Acquire Entries pointer-sized slots from the current P's Go write-barrier
-// buffer.  This is deliberately an intrinsic rather than an ordinary call:
-// the runtime entry point uses a private ABI and returns the buffer pointer in
-// a target-specific fixed register.
-//
-// Do not narrow this to inaccessible memory.  In addition to updating runtime
-// state, the operation orders the caller's stores to the returned buffer with
-// the surrounding write-barrier sequence.  Likewise, do not give it the
-// default nosync/nofree/willreturn attributes; the slow path may flush the
-// buffer through the runtime.  The entry count is the number of pointer-sized
-// slots and currently follows Go's 1..8 batching limit.
-def int_go_gc_write_barrier : Intrinsic<
-    [llvm_ptr_ty], [llvm_i32_ty],
-    [IntrNoCallback, ImmArg<ArgIndex<0>>, Range<ArgIndex<0>, 1, 9>]>;
 
 def int_experimental_gc_statepoint : Intrinsic<[llvm_token_ty],
                                [llvm_i64_ty, llvm_i32_ty,
@@ -3237,6 +3201,12 @@ def int_protected_field_ptr :
   DefaultAttrsIntrinsic<[llvm_anyptr_ty],
                         [LLVMMatchType<0>, llvm_i64_ty, llvm_i1_ty],
                         [IntrNoMem, ImmArg<ArgIndex<2>>]>;
+
+//===----------------------------------------------------------------------===//
+// Go compiler and GoObj backend intrinsics
+//===----------------------------------------------------------------------===//
+
+include "llvm/IR/IntrinsicsGo.td"
 
 //===----------------------------------------------------------------------===//
 // Target-specific intrinsics

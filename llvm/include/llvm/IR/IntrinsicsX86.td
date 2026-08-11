@@ -17,18 +17,6 @@ let TargetPrefix = "x86" in {  // All intrinsics start with "llvm.x86.".
 }
 
 //===----------------------------------------------------------------------===//
-// Go integer operations
-let TargetPrefix = "x86" in {
-  // Divide the unsigned 128-bit integer (high, low) by divisor and return
-  // (quotient, remainder). The divisor must be non-zero and high must be less
-  // than divisor, so that both results fit in 64 bits. The intrinsic is not
-  // speculatable because violating either precondition traps on X86.
-  def int_x86_go_udivrem_i128_i64 :
-      Intrinsic<[llvm_i64_ty, llvm_i64_ty],
-                [llvm_i64_ty, llvm_i64_ty, llvm_i64_ty], [IntrNoMem]>;
-}
-
-//===----------------------------------------------------------------------===//
 // SEH intrinsics for Windows
 let TargetPrefix = "x86" in {
   def int_x86_seh_lsda : Intrinsic<[llvm_ptr_ty], [llvm_ptr_ty], [IntrNoMem]>;
@@ -635,17 +623,6 @@ let TargetPrefix = "x86" in {  // All intrinsics start with "llvm.x86.".
 
 //===----------------------------------------------------------------------===//
 // SSE4.1
-
-// Go's generic SSA keeps CPU-feature guards in the control-flow graph while
-// LLVM lowering happens before the target-specific Go SSA rewrites. This
-// intrinsic preserves the fact that the instruction is guarded, so X86
-// codegen may select it without enabling the feature for the whole function.
-let TargetPrefix = "x86" in {
-  def int_x86_go_sse41_round_f64
-      : DefaultAttrsIntrinsic<[llvm_double_ty],
-                              [llvm_double_ty, llvm_i32_ty],
-                              [IntrNoMem, ImmArg<ArgIndex<1>>]>;
-}
 
 // FP rounding ops
 let TargetPrefix = "x86" in {  // All intrinsics start with "llvm.x86.".
@@ -1814,13 +1791,6 @@ let TargetPrefix = "x86" in {  // All intrinsics start with "llvm.x86.".
 // FMA3 and FMA4
 
 let TargetPrefix = "x86" in {  // All intrinsics start with "llvm.x86.".
-  // This is emitted only behind Go's runtime FMA feature check (or when
-  // GOAMD64 already guarantees FMA).
-  def int_x86_go_fma_f64
-      : DefaultAttrsIntrinsic<[llvm_double_ty],
-                              [llvm_double_ty, llvm_double_ty, llvm_double_ty],
-                              [IntrNoMem]>;
-
   def int_x86_fma_vfmaddsub_ps : ClangBuiltin<"__builtin_ia32_vfmaddsubps">,
       DefaultAttrsIntrinsic<[llvm_v4f32_ty],
                             [llvm_v4f32_ty, llvm_v4f32_ty, llvm_v4f32_ty],
