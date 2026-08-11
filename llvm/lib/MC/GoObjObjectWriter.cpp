@@ -1916,6 +1916,52 @@ uint64_t GoObjObjectWriter::writeObject() {
     }
   }
 
+  // Package export data refers to definitions by the indices assigned by the
+  // Go frontend. Machine layout may reorder definitions, and optimization can
+  // remove compiler-only auxiliary definitions, so rebuild the package block
+  // around the explicit indices instead of exposing MC layout order. Empty
+  // slots preserve indices for definitions that LLVM does not emit; LLVM-owned
+  // auxiliary definitions follow the frontend-owned range.
+  DenseMap<uint32_t, uint32_t> IndexedSymdefs;
+  std::vector<uint32_t> UnindexedSymdefs;
+  std::optional<uint32_t> MaxSymdefIndex;
+  for (uint32_t I : SymdefSymbols) {
+    std::optional<uint32_t> Index =
+        Symbols[I].Symbol
+            ? Asm->getContext().getGoObjPackageSymbolIndex(Symbols[I].Symbol)
+            : std::nullopt;
+    if (!Index) {
+      UnindexedSymdefs.push_back(I);
+      continue;
+    }
+    if (*Index == UINT32_MAX)
+      report_fatal_error("GoObj package symbol index is too large");
+    if (!IndexedSymdefs.try_emplace(*Index, I).second)
+      report_fatal_error("duplicate GoObj package symbol index");
+    MaxSymdefIndex = std::max(MaxSymdefIndex.value_or(0), *Index);
+  }
+  if (MaxSymdefIndex) {
+    std::vector<uint32_t> OrderedSymdefs;
+    OrderedSymdefs.reserve(static_cast<size_t>(*MaxSymdefIndex) + 1 +
+                           UnindexedSymdefs.size());
+    for (uint32_t Index = 0; Index <= *MaxSymdefIndex; ++Index) {
+      auto It = IndexedSymdefs.find(Index);
+      if (It != IndexedSymdefs.end()) {
+        OrderedSymdefs.push_back(It->second);
+        continue;
+      }
+      GoObjSymbol Placeholder;
+      Placeholder.DefinedBlock = GoObj::DefinedSymbolBlock::Symdef;
+      Placeholder.Type = GoObj::SRODATA;
+      Symbols.push_back(std::move(Placeholder));
+      OrderedSymdefs.push_back(
+          checkedUint32(Symbols.size() - 1, "symbol count"));
+    }
+    OrderedSymdefs.insert(OrderedSymdefs.end(), UnindexedSymdefs.begin(),
+                          UnindexedSymdefs.end());
+    SymdefSymbols = std::move(OrderedSymdefs);
+  }
+
   std::vector<uint32_t> DefinedSymbolOrder;
   DefinedSymbolOrder.reserve(Symbols.size());
   DefinedSymbolOrder.insert(DefinedSymbolOrder.end(), SymdefSymbols.begin(),
