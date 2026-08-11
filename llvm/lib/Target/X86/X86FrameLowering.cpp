@@ -279,10 +279,11 @@ static MachineInstrBuilder buildGoStackGrowthStatepoint(MachineFunction &MF,
   ArrayRef<X86MachineFunctionInfo::GoArgPointerSlot> PointerSlots =
       MF.getInfo<X86MachineFunctionInfo>()->getGoArgPointerSlots();
   uint64_t PointerSize = MF.getDataLayout().getPointerSize();
-  int64_t StackBias =
-      goabi::isGoABI0CallingConv(MF.getFunction().getCallingConv())
-          ? 0
-          : static_cast<int64_t>(PointerSize);
+  // X86 entry RSP points at the return address for both Go calling
+  // conventions. GoArgPointerSlot::EntryOffset is a physical stack-map
+  // location even though the corresponding fixed home uses a logical Go
+  // argument-area offset.
+  int64_t StackMapBias = static_cast<int64_t>(PointerSize);
   AddConstant(MF.getFunction().getCallingConv());
   AddConstant(0);                   // Statepoint flags.
   AddConstant(0);                   // Deopt arguments.
@@ -292,7 +293,7 @@ static MachineInstrBuilder buildGoStackGrowthStatepoint(MachineFunction &MF,
       report_fatal_error(
           "X86 Go entry argument pointer slot is not a fixed object");
     int64_t ExpectedOffset =
-        StackBias + static_cast<int64_t>(Slot.ArgWord) * PointerSize;
+        StackMapBias + static_cast<int64_t>(Slot.ArgWord) * PointerSize;
     if (PointerSize == 0 || Slot.EntryOffset != ExpectedOffset)
       report_fatal_error(
           "X86 Go entry argument pointer slot has invalid RSP offset");
