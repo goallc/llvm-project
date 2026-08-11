@@ -1814,6 +1814,13 @@ let TargetPrefix = "x86" in {  // All intrinsics start with "llvm.x86.".
 // FMA3 and FMA4
 
 let TargetPrefix = "x86" in {  // All intrinsics start with "llvm.x86.".
+  // This is emitted only behind Go's runtime FMA feature check (or when
+  // GOAMD64 already guarantees FMA).
+  def int_x86_go_fma_f64
+      : DefaultAttrsIntrinsic<[llvm_double_ty],
+                              [llvm_double_ty, llvm_double_ty, llvm_double_ty],
+                              [IntrNoMem]>;
+
   def int_x86_fma_vfmaddsub_ps : ClangBuiltin<"__builtin_ia32_vfmaddsubps">,
       DefaultAttrsIntrinsic<[llvm_v4f32_ty],
                             [llvm_v4f32_ty, llvm_v4f32_ty, llvm_v4f32_ty],
