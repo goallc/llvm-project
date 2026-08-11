@@ -17,18 +17,6 @@ let TargetPrefix = "x86" in {  // All intrinsics start with "llvm.x86.".
 }
 
 //===----------------------------------------------------------------------===//
-// Go integer operations
-let TargetPrefix = "x86" in {
-  // Divide the unsigned 128-bit integer (high, low) by divisor and return
-  // (quotient, remainder). The divisor must be non-zero and high must be less
-  // than divisor, so that both results fit in 64 bits. The intrinsic is not
-  // speculatable because violating either precondition traps on X86.
-  def int_x86_go_udivrem_i128_i64 :
-      Intrinsic<[llvm_i64_ty, llvm_i64_ty],
-                [llvm_i64_ty, llvm_i64_ty, llvm_i64_ty], [IntrNoMem]>;
-}
-
-//===----------------------------------------------------------------------===//
 // SEH intrinsics for Windows
 let TargetPrefix = "x86" in {
   def int_x86_seh_lsda : Intrinsic<[llvm_ptr_ty], [llvm_ptr_ty], [IntrNoMem]>;
