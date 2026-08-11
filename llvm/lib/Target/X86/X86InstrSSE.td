@@ -5713,6 +5713,13 @@ let Predicates = [UseSSE41] in {
             (ROUNDSDri FR64:$src1, timm:$src2)>;
 }
 
+// Go emits this intrinsic only on a control-flow edge protected by its
+// runtime SSE4.1 feature check, or when GOAMD64 guarantees SSE4.1. Do not make
+// the entire LLVM function an SSE4.1 function just to select the protected
+// instruction.
+def : Pat<(int_x86_go_sse41_round_f64 FR64:$src, timm:$mode),
+          (ROUNDSDri FR64:$src, timm:$mode)>;
+
 let Predicates = [UseSSE41, OptForSize] in {
   def : Pat<(X86any_VRndScale (loadf32 addr:$src1), timm:$src2),
             (ROUNDSSmi addr:$src1, timm:$src2)>;

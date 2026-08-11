@@ -636,6 +636,17 @@ let TargetPrefix = "x86" in {  // All intrinsics start with "llvm.x86.".
 //===----------------------------------------------------------------------===//
 // SSE4.1
 
+// Go's generic SSA keeps CPU-feature guards in the control-flow graph while
+// LLVM lowering happens before the target-specific Go SSA rewrites. This
+// intrinsic preserves the fact that the instruction is guarded, so X86
+// codegen may select it without enabling the feature for the whole function.
+let TargetPrefix = "x86" in {
+  def int_x86_go_sse41_round_f64
+      : DefaultAttrsIntrinsic<[llvm_double_ty],
+                              [llvm_double_ty, llvm_i32_ty],
+                              [IntrNoMem, ImmArg<ArgIndex<1>>]>;
+}
+
 // FP rounding ops
 let TargetPrefix = "x86" in {  // All intrinsics start with "llvm.x86.".
   def int_x86_sse41_round_ss
