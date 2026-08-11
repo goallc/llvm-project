@@ -191,10 +191,11 @@ static SDValue lowerX86GoFormalArguments(
   const Function &F = MF.getFunction();
   const X86Subtarget &Subtarget = MF.getSubtarget<X86Subtarget>();
   MVT PtrVT = TLI.getPointerTy(DAG.getDataLayout());
-  int64_t EntryStackBias =
-      goabi::isGoABI0CallingConv(F.getCallingConv())
-          ? 0
-          : static_cast<int64_t>(PtrVT.getStoreSize());
+  // Fixed argument homes use offsets in the logical Go argument area. Stack
+  // map locations are instead relative to the physical entry RSP, which
+  // points at the return address for both Go calling conventions.
+  int64_t EntryStackMapBias =
+      static_cast<int64_t>(PtrVT.getStoreSize());
 
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys = getX86GoArgTypes(F, LayoutMap);
@@ -250,7 +251,7 @@ static SDValue lowerX86GoFormalArguments(
           MFI.getObjectOffset(FI) + static_cast<int64_t>(WithinObject);
       int64_t ExpectedFixedObjectOffset = static_cast<int64_t>(PointerOffset);
       int64_t EntryOffset =
-          EntryStackBias + static_cast<int64_t>(PointerOffset);
+          EntryStackMapBias + static_cast<int64_t>(PointerOffset);
       if (FixedObjectOffset != ExpectedFixedObjectOffset ||
           !isInt<32>(EntryOffset))
         report_fatal_error(
