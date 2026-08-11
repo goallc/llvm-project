@@ -4,11 +4,11 @@
 # RUN:   -start-after=block-placement -filetype=obj %t/inconsistent.mir -o /dev/null 2>&1 | \
 # RUN:   FileCheck %s --check-prefix=INCONSISTENT
 # RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj \
-# RUN:   -start-after=block-placement -filetype=obj %t/unreachable.mir -o /dev/null 2>&1 | \
-# RUN:   FileCheck %s --check-prefix=UNREACHABLE
+# RUN:   -start-after=block-placement -filetype=obj %t/disconnected-inconsistent.mir -o /dev/null 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=DISCONNECTED
 
 # INCONSISTENT: LLVM ERROR: inconsistent GoObj pcsp value{{.*}}in function inconsistent
-# UNREACHABLE: LLVM ERROR: cannot determine GoObj pcsp value{{.*}}in function unreachable
+# DISCONNECTED: LLVM ERROR: inconsistent GoObj pcsp value{{.*}}in function disconnected_inconsistent
 
 #--- inconsistent.mir
 --- |
@@ -47,21 +47,41 @@ body: |
     RET64
 ...
 
-#--- unreachable.mir
+#--- disconnected-inconsistent.mir
 --- |
   target triple = "x86_64-unknown-linux-goobj"
 
-  define goabiinternal void @unreachable() {
+  define goabiinternal void @disconnected_inconsistent() {
     ret void
   }
 ...
 ---
-name: unreachable
+name: disconnected_inconsistent
 tracksRegLiveness: true
+frameInfo:
+  stackSize: 16
+  adjustsStack: true
 body: |
   bb.0:
     RET64
 
   bb.1:
+    successors: %bb.2, %bb.3
+
+    JCC_1 %bb.2, 4, implicit undef $eflags
+    JMP_1 %bb.3
+
+  bb.2:
+    successors: %bb.4
+
+    $rsp = frame-setup SUB64ri32 $rsp, 16, implicit-def dead $eflags
+    JMP_1 %bb.4
+
+  bb.3:
+    successors: %bb.4
+
+    JMP_1 %bb.4
+
+  bb.4:
     RET64
 ...
