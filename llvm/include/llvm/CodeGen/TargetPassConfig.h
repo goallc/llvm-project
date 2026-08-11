@@ -18,7 +18,10 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Error.h"
 #include <cassert>
+#include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace llvm {
 
@@ -105,6 +108,10 @@ private:
   bool Stopped = false;
   bool AddingMachinePasses = false;
   bool DebugifyIsSafe = true;
+
+  /// Plugin-provided machine passes that must observe final block placement
+  /// but may still change instruction sizes before target branch relaxation.
+  std::vector<std::function<Pass *()>> PreBranchRelaxationPassFactories;
 
   /// Set the StartAfter, StartBefore and StopAfter passes to allow running only
   /// a portion of the normal code-gen pass sequence.
@@ -212,6 +219,14 @@ public:
 
   /// Insert InsertedPassID pass after TargetPassID pass.
   void insertPass(AnalysisID TargetPassID, IdentifyingPassPtr InsertedPassID);
+
+  /// Register a late MachineFunction pass after generic block layout and BB
+  /// sections, but before target addPostBBSections hooks such as AArch64 branch
+  /// relaxation. The factory is invoked while constructing the legacy codegen
+  /// pipeline, so ownership of the returned pass transfers normally to it.
+  void addPreBranchRelaxationPass(std::function<Pass *()> Factory) {
+    PreBranchRelaxationPassFactories.push_back(std::move(Factory));
+  }
 
   /// Allow the target to enable a specific standard pass by default.
   void enablePass(AnalysisID PassID) { substitutePass(PassID, PassID); }
