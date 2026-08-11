@@ -22,9 +22,11 @@ CMake package, shared LLVM library, component archives, and `FileCheck`. The
 pass plugin is not part of the LLVM release: Go's `make.bash` builds and
 installs the matching plugin through `cmd/dist`.
 
-Tags matching `goallc-llvm23.1.0-vN` trigger
-`.github/workflows/goallc-release.yml`. The workflow builds a relocatable
-Linux payload natively on both amd64 and arm64, and publishes each `.tar.zst`
-archive together with its SHA-256 file on the tag's GitHub Release. Consumers
-must select the asset matching the host architecture and pin both the tag and
-archive digest.
+New release tags use a UTC timestamp in the form
+`goallc-llvm23.1.0-YYYYMMDDTHHMMSSZ` and trigger
+`.github/workflows/goallc-release.yml`. Historical `goallc-llvm23.1.0-vN`
+tags remain accepted so their payloads can be rebuilt. The workflow builds a
+relocatable Linux payload natively on both amd64 and arm64, and publishes each
+`.tar.zst` archive together with its SHA-256 file on the tag's GitHub Release.
+Consumers must select the asset matching the host architecture and pin both
+the tag and archive digest.
