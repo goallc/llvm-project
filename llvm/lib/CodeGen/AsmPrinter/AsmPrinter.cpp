@@ -1060,6 +1060,20 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
   }
 
   for (const GlobalObject &GO : M.global_objects()) {
+    const MDNode *MD = GO.getMetadata("goobj.symbol.index");
+    if (!MD)
+      continue;
+    const auto *Index =
+        MD->getNumOperands() == 1
+            ? mdconst::dyn_extract<ConstantInt>(MD->getOperand(0))
+            : nullptr;
+    if (!Index || Index->getValue().ugt(UINT32_MAX) || GO.isDeclaration())
+      report_fatal_error("invalid !goobj.symbol.index attachment");
+    AP.OutContext.setGoObjPackageSymbolIndex(
+        AP.getSymbol(&GO), static_cast<uint32_t>(Index->getZExtValue()));
+  }
+
+  for (const GlobalObject &GO : M.global_objects()) {
     const MDNode *MD = GO.getMetadata("goobj.symbol.nonpackage");
     if (!MD)
       continue;

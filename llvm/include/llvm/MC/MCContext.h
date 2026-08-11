@@ -225,6 +225,9 @@ private:
   /// Go object linker names for MC symbols whose LLVM names were made unique.
   DenseMap<const MCSymbol *, std::string> GoObjSymbolNames;
 
+  /// Package-local indices assigned to Go object definitions by the frontend.
+  DenseMap<const MCSymbol *, uint32_t> GoObjPackageSymbolIndexes;
+
   /// Compiler-validated cgo directives serialized in the Go object header.
   std::string GoObjCgoPragmas;
 
@@ -682,6 +685,18 @@ public:
     auto It = GoObjSymbolNames.find(Sym);
     if (It == GoObjSymbolNames.end())
       return {};
+    return It->second;
+  }
+
+  void setGoObjPackageSymbolIndex(const MCSymbol *Sym, uint32_t Index) {
+    GoObjPackageSymbolIndexes[Sym] = Index;
+  }
+
+  std::optional<uint32_t>
+  getGoObjPackageSymbolIndex(const MCSymbol *Sym) const {
+    auto It = GoObjPackageSymbolIndexes.find(Sym);
+    if (It == GoObjPackageSymbolIndexes.end())
+      return std::nullopt;
     return It->second;
   }
 
