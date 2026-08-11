@@ -264,6 +264,36 @@ def main(path):
                     f" args={args} locals={locals_} funcid={func_id}"
                     f" funcflag={func_flag}"
                 )
+                if len(payload) >= 20:
+                    start_line, file_count = struct.unpack_from("<iI", payload, 12)
+                    file_end = 20 + file_count * 4
+                    if file_end + 4 <= len(payload):
+                        files = list(
+                            struct.unpack_from(f"<{file_count}I", payload, 20)
+                        )
+                        inline_count = struct.unpack_from("<I", payload, file_end)[0]
+                        inline_off = file_end + 4
+                        inline_nodes = []
+                        for node_index in range(inline_count):
+                            node_off = inline_off + node_index * 24
+                            if node_off + 24 > len(payload):
+                                break
+                            parent, file_index, line, callee_pkg, callee_sym, parent_pc = struct.unpack_from(
+                                "<iIiIIi", payload, node_off
+                            )
+                            inline_nodes.append(
+                                (
+                                    parent,
+                                    file_index,
+                                    line,
+                                    resolve_ref(callee_pkg, callee_sym),
+                                    parent_pc,
+                                )
+                            )
+                        extra += (
+                            f" startline={start_line} files={files}"
+                            f" inline={inline_nodes}"
+                        )
             if aux_type == 2 and payload is not None:
                 extra = f" data={payload.hex()}"
             if aux_type in (7, 8, 9, 10, 11) and payload is not None:

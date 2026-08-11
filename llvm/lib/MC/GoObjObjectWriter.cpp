@@ -9,6 +9,7 @@
 #include "GoObjStackMapUtils.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
@@ -39,6 +40,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -102,10 +104,21 @@ struct GoObjPCTabEntry {
   int32_t Value = 0;
 };
 
+struct GoObjInlineTreeNode {
+  int32_t Parent = -1;
+  uint32_t File = 0;
+  int32_t Line = 0;
+  const MCSymbol *Callee = nullptr;
+  int32_t ParentPC = -1;
+  uint64_t SiteID = 0;
+};
+
 struct GoObjFuncDebugLines {
   SmallVector<uint32_t, 4> Files;
   SmallVector<GoObjPCTabEntry, 8> PCFile;
   SmallVector<GoObjPCTabEntry, 8> PCLine;
+  SmallVector<GoObjPCTabEntry, 8> PCInline;
+  SmallVector<GoObjInlineTreeNode, 4> InlineTree;
   int32_t StartLine = 1;
 
   bool hasLines() const { return !PCFile.empty() && !PCLine.empty(); }
@@ -254,7 +267,8 @@ SmallString<0> makeConstantPCTab(int32_t Value, uint64_t CodeSize,
 
 SmallString<0> makeFuncInfoData(uint32_t ArgSize, uint32_t StackSize,
                                 uint8_t FuncID, uint8_t FuncFlag,
-                                ArrayRef<uint32_t> Files, int32_t StartLine) {
+                                ArrayRef<uint32_t> Files, int32_t StartLine,
+                                ArrayRef<GoObjInlineTreeNode> InlineTree) {
   SmallString<0> Data;
   raw_svector_ostream OS(Data);
   support::endian::Writer W(OS, llvm::endianness::little);
@@ -268,7 +282,16 @@ SmallString<0> makeFuncInfoData(uint32_t ArgSize, uint32_t StackSize,
   W.write<uint32_t>(checkedUint32(Files.size(), "GoObj FuncInfo file count"));
   for (uint32_t File : Files)
     W.write<uint32_t>(File);
-  W.write<uint32_t>(0); // Inline tree count.
+  W.write<uint32_t>(
+      checkedUint32(InlineTree.size(), "GoObj FuncInfo inline tree count"));
+  for (const GoObjInlineTreeNode &Node : InlineTree) {
+    W.write<uint32_t>(static_cast<uint32_t>(Node.Parent));
+    W.write<uint32_t>(Node.File);
+    W.write<uint32_t>(static_cast<uint32_t>(Node.Line));
+    W.write<uint32_t>(0); // Callee package index, patched after ref numbering.
+    W.write<uint32_t>(0); // Callee symbol index, patched after ref numbering.
+    W.write<uint32_t>(static_cast<uint32_t>(Node.ParentPC));
+  }
   return Data;
 }
 
@@ -1095,16 +1118,13 @@ uint32_t getOrAddFileIndex(StringMap<uint32_t> &FileIndexes,
   return Insert.first->second;
 }
 
-uint32_t getOrAddLocalFileIndex(GoObjFuncDebugLines &Info,
-                                uint32_t ObjectFileIndex) {
-  for (uint32_t I = 0, E = checkedUint32(Info.Files.size(),
-                                         "GoObj function file count");
-       I != E; ++I) {
-    if (Info.Files[I] == ObjectFileIndex)
-      return I;
-  }
-  Info.Files.push_back(ObjectFileIndex);
-  return checkedUint32(Info.Files.size() - 1, "GoObj function file index");
+uint32_t recordFunctionFile(GoObjFuncDebugLines &Info,
+                            uint32_t ObjectFileIndex) {
+  if (!llvm::is_contained(Info.Files, ObjectFileIndex))
+    Info.Files.push_back(ObjectFileIndex);
+  // PCDATA_File indexes the CU-wide file block. FuncInfo.File only catalogs
+  // the subset referenced by this function.
+  return ObjectFileIndex;
 }
 
 uint32_t addAuxCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
@@ -1694,11 +1714,117 @@ uint64_t GoObjObjectWriter::writeObject() {
   StringMap<uint32_t> FileIndexes;
   StringMap<uint32_t> AuxCarrierIndexes;
   StringMap<uint32_t> GCBitmapCarrierIndexes;
+  struct PendingFuncInfoPatch {
+    uint32_t CarrierSymbol = 0;
+    uint32_t FileCount = 0;
+    std::vector<GoObjInlineTreeNode> InlineTree;
+  };
+  std::vector<PendingFuncInfoPatch> PendingFuncInfoPatches;
   auto GetFallbackFile = [&]() {
     return getOrAddFileIndex(FileIndexes, FilePaths, "llvm-ir");
   };
 
   if (Config.SourceKind == GoObj::SourceKind::Compiler) {
+    auto GetInlineIndex =
+        [&](GoObjFuncDebugLines &Info,
+            ArrayRef<MCContext::GoObjDebugInlineFrame> Frames) {
+          int32_t Parent = -1;
+          for (const MCContext::GoObjDebugInlineFrame &Frame : Frames) {
+            int32_t Existing = -1;
+            for (uint32_t NodeIndex = 0,
+                          NodeEnd = checkedUint32(Info.InlineTree.size(),
+                                                  "GoObj inline tree size");
+                 NodeIndex != NodeEnd; ++NodeIndex) {
+              const GoObjInlineTreeNode &Node = Info.InlineTree[NodeIndex];
+              if (Node.SiteID != Frame.SiteID)
+                continue;
+              if (Node.Parent != Parent || Node.Callee != Frame.Callee ||
+                  Node.Line != static_cast<int32_t>(Frame.CallLine))
+                report_fatal_error("inconsistent GoObj inline site identity");
+              Existing = static_cast<int32_t>(NodeIndex);
+              break;
+            }
+            if (Existing >= 0) {
+              Parent = Existing;
+              continue;
+            }
+
+            uint32_t ObjectFileIndex =
+                getOrAddFileIndex(FileIndexes, FilePaths, Frame.CallFile);
+            recordFunctionFile(Info, ObjectFileIndex);
+            GoObjInlineTreeNode Node;
+            Node.Parent = Parent;
+            Node.File = ObjectFileIndex;
+            Node.Line = static_cast<int32_t>(Frame.CallLine);
+            Node.Callee = Frame.Callee;
+            Node.SiteID = Frame.SiteID;
+            Parent = static_cast<int32_t>(Info.InlineTree.size());
+            Info.InlineTree.push_back(std::move(Node));
+          }
+          return Parent;
+        };
+
+    // Preserve complete DILocation/inlinedAt chains separately from the
+    // flattened MC line table.
+    for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
+         I != E; ++I) {
+      GoObjSymbol &Sym = Symbols[I];
+      if (Sym.Type != GoObj::STEXT || Sym.Size == 0 || !Sym.Symbol)
+        continue;
+      const auto *DebugInfo =
+          Asm->getContext().getGoObjFunctionDebugInfo(Sym.Symbol);
+      if (!DebugInfo)
+        continue;
+
+      GoObjFuncDebugLines &Info = FuncDebugLines[I];
+      if (DebugInfo->StartLine != 0)
+        Info.StartLine = static_cast<int32_t>(DebugInfo->StartLine);
+      if (!DebugInfo->File.empty())
+        recordFunctionFile(
+            Info, getOrAddFileIndex(FileIndexes, FilePaths, DebugInfo->File));
+
+      for (const MCContext::GoObjDebugLocation &Location :
+           DebugInfo->Locations) {
+        if (!Location.Label || !Location.Label->isInSection() ||
+            &Location.Label->getSection() != Sym.Section)
+          report_fatal_error(
+              "GoObj debug location is outside its function section");
+        uint64_t LabelOffset = Asm->getSymbolOffset(*Location.Label);
+        if (LabelOffset < Sym.SectionBegin || LabelOffset >= Sym.SectionEnd)
+          report_fatal_error("GoObj debug location is outside its function");
+        uint64_t PC = LabelOffset - Sym.SectionBegin;
+        if (PC % PCQuantum != 0)
+          report_fatal_error("GoObj debug location is not PC-quantum aligned");
+
+        uint32_t FileIndex =
+            getOrAddFileIndex(FileIndexes, FilePaths,
+                              Location.File.empty() ? StringRef("llvm-ir")
+                                                    : StringRef(Location.File));
+        recordFunctionFile(Info, FileIndex);
+        Info.PCFile.push_back({PC, static_cast<int32_t>(FileIndex)});
+        Info.PCLine.push_back({PC, static_cast<int32_t>(Location.Line)});
+        Info.PCInline.push_back(
+            {PC, GetInlineIndex(Info, Location.InlineFrames)});
+
+        if (!Location.AnchorChildFrames.empty()) {
+          int32_t Child = GetInlineIndex(Info, Location.AnchorChildFrames);
+          if (Child < 0)
+            report_fatal_error("GoObj inline anchor has no child node");
+          if (PC > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+            report_fatal_error("GoObj inline ParentPC exceeds int32 range");
+          GoObjInlineTreeNode &Node = Info.InlineTree[Child];
+          if (Node.ParentPC >= 0 && Node.ParentPC != static_cast<int32_t>(PC))
+            report_fatal_error(
+                "duplicate GoObj inline anchor has conflicting PC");
+          Node.ParentPC = static_cast<int32_t>(PC);
+        }
+      }
+      for (const GoObjInlineTreeNode &Node : Info.InlineTree)
+        if (Node.ParentPC < 0)
+          report_fatal_error(
+              "GoObj inline tree node has no final-layout anchor");
+    }
+
     for (const auto &[CUID, LineTable] :
          Asm->getContext().getMCDwarfLineTables()) {
       (void)CUID;
@@ -1719,16 +1845,21 @@ uint64_t GoObjObjectWriter::writeObject() {
                 LabelOffset < Sym.SectionBegin || LabelOffset >= Sym.SectionEnd)
               continue;
 
+            // The side table is authoritative when present; consuming both
+            // would make same-PC ordering depend on line-table lowering.
+            if (Sym.Symbol &&
+                Asm->getContext().getGoObjFunctionDebugInfo(Sym.Symbol))
+              break;
+
             std::string Path =
                 getDwarfFilePath(LineTable, LineEntry.getFileNum());
             uint32_t ObjectFileIndex =
                 getOrAddFileIndex(FileIndexes, FilePaths, Path);
             GoObjFuncDebugLines &Info = FuncDebugLines[I];
-            uint32_t LocalFileIndex =
-                getOrAddLocalFileIndex(Info, ObjectFileIndex);
+            uint32_t CUFileIndex = recordFunctionFile(Info, ObjectFileIndex);
             uint64_t PC = LabelOffset - Sym.SectionBegin;
             int32_t Line = static_cast<int32_t>(LineEntry.getLine());
-            Info.PCFile.push_back({PC, static_cast<int32_t>(LocalFileIndex)});
+            Info.PCFile.push_back({PC, static_cast<int32_t>(CUFileIndex)});
             Info.PCLine.push_back({PC, Line});
             if (Info.PCLine.size() == 1)
               Info.StartLine = Line;
@@ -1794,14 +1925,25 @@ uint64_t GoObjObjectWriter::writeObject() {
               : GoObj::UnsafePointSafe;
 
       GoObjFuncDebugLines &LineInfo = FuncDebugLines[I];
-      if (!LineInfo.hasLines())
-        LineInfo.Files.push_back(GetFallbackFile());
-      llvm::stable_sort(LineInfo.PCFile, [](const auto &LHS, const auto &RHS) {
-        return LHS.PC < RHS.PC;
-      });
-      llvm::stable_sort(LineInfo.PCLine, [](const auto &LHS, const auto &RHS) {
-        return LHS.PC < RHS.PC;
-      });
+      if (LineInfo.Files.empty())
+        recordFunctionFile(LineInfo, GetFallbackFile());
+      auto NormalizePCTab = [&](auto &Entries) {
+        llvm::stable_sort(Entries, [](const auto &LHS, const auto &RHS) {
+          return LHS.PC < RHS.PC;
+        });
+        using EntriesT = std::decay_t<decltype(Entries)>;
+        EntriesT Normalized;
+        for (const GoObjPCTabEntry &Entry : Entries) {
+          if (!Normalized.empty() && Normalized.back().PC == Entry.PC)
+            Normalized.back().Value = Entry.Value;
+          else
+            Normalized.push_back(Entry);
+        }
+        Entries = std::move(Normalized);
+      };
+      NormalizePCTab(LineInfo.PCFile);
+      NormalizePCTab(LineInfo.PCLine);
+      NormalizePCTab(LineInfo.PCInline);
 
       auto [FuncID, FuncFlag] =
           Asm->getContext()
@@ -1810,23 +1952,34 @@ uint64_t GoObjObjectWriter::writeObject() {
       uint32_t FuncInfoSym = addAuxCarrierSymbol(
           Symbols, GoObj::DefinedSymbolBlock::Symdef,
           makeFuncInfoData(ArgSize, FrameLayout.FuncInfoLocalsSize, FuncID,
-                           FuncFlag, LineInfo.Files, LineInfo.StartLine));
+                           FuncFlag, LineInfo.Files, LineInfo.StartLine,
+                           LineInfo.InlineTree));
+      if (!LineInfo.InlineTree.empty())
+        PendingFuncInfoPatches.push_back(
+            {FuncInfoSym,
+             checkedUint32(LineInfo.Files.size(), "GoObj FuncInfo file count"),
+             std::vector<GoObjInlineTreeNode>(LineInfo.InlineTree.begin(),
+                                              LineInfo.InlineTree.end())});
       uint32_t PcspSym = getOrAddHashedAuxCarrierSymbol(
           Symbols, AuxCarrierIndexes, 'P',
           PCSPEntries.empty()
               ? makeConstantPCTab(static_cast<int32_t>(StackSize), CodeSize,
                                   PCQuantum)
               : makePCTab(0, PCSPEntries, CodeSize, PCQuantum));
-      int32_t InitialFile =
-          LineInfo.hasLines() ? LineInfo.PCFile.front().Value : 0;
-      int32_t InitialLine =
-          LineInfo.hasLines() ? LineInfo.PCLine.front().Value : 1;
+      int32_t InitialFile = LineInfo.hasLines()
+                                ? LineInfo.PCFile.front().Value
+                                : static_cast<int32_t>(LineInfo.Files.front());
+      int32_t InitialLine = LineInfo.hasLines() ? LineInfo.PCLine.front().Value
+                                                : LineInfo.StartLine;
       uint32_t PcfileSym = getOrAddHashedAuxCarrierSymbol(
           Symbols, AuxCarrierIndexes, 'P',
           makePCTab(InitialFile, LineInfo.PCFile, CodeSize, PCQuantum));
       uint32_t PclineSym = getOrAddHashedAuxCarrierSymbol(
           Symbols, AuxCarrierIndexes, 'P',
           makePCTab(InitialLine, LineInfo.PCLine, CodeSize, PCQuantum));
+      uint32_t PcinlineSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'P',
+          makePCTab(-1, LineInfo.PCInline, CodeSize, PCQuantum));
       SmallString<0> ArgsMap = makeEmptyStackMap();
       SmallString<0> LocalsMap = makeEmptyStackMap();
       SmallString<0> StackMapIndex = makeConstantPCTab(0, CodeSize, PCQuantum);
@@ -1882,6 +2035,8 @@ uint64_t GoObjObjectWriter::writeObject() {
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcsp, PcspSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcfile, PcfileSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcline, PclineSym});
+      if (!LineInfo.InlineTree.empty())
+        Symbols[I].Auxiliaries.push_back({GoObj::AuxPcinline, PcinlineSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, UnsafePointSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, StackMapIndexSym});
     }
@@ -2255,6 +2410,38 @@ uint64_t GoObjObjectWriter::writeObject() {
     if (Addend != 0)
       report_fatal_error("GoObj gotype auxiliary target has an addend");
     Source.Auxiliaries.emplace_back(GoObj::AuxGotype, TargetSymRef);
+  }
+
+  // FuncInfo stores inline callees as final Go SymRefs rather than
+  // relocations, so patch them after package and symbol numbering is known.
+  for (const PendingFuncInfoPatch &Patch : PendingFuncInfoPatches) {
+    if (Patch.CarrierSymbol >= Symbols.size())
+      report_fatal_error("GoObj FuncInfo patch references an invalid carrier");
+    GoObjSymbol &Carrier = Symbols[Patch.CarrierSymbol];
+    uint64_t InlineTreeOffset = 24 + static_cast<uint64_t>(Patch.FileCount) * 4;
+    uint64_t RequiredSize =
+        InlineTreeOffset + static_cast<uint64_t>(Patch.InlineTree.size()) * 24;
+    if (Carrier.Data.size() != RequiredSize)
+      report_fatal_error("GoObj FuncInfo inline tree has an invalid size");
+
+    for (uint32_t I = 0, E = checkedUint32(Patch.InlineTree.size(),
+                                           "GoObj inline tree size");
+         I != E; ++I) {
+      const GoObjInlineTreeNode &Node = Patch.InlineTree[I];
+      if (!Node.Callee)
+        report_fatal_error("GoObj inline tree node has no callee symbol");
+      GoObjRelocationEntry Reloc;
+      Reloc.Symbol = Node.Callee;
+      int64_t Addend = 0;
+      GoObjSymRef Ref = GetTargetSymRef(Reloc, Addend);
+      if (Addend != 0)
+        report_fatal_error("GoObj inline callee symbol has an addend");
+      uint64_t NodeOffset = InlineTreeOffset + static_cast<uint64_t>(I) * 24;
+      support::endian::write32le(Carrier.Data.data() + NodeOffset + 12,
+                                 Ref.PkgIdx);
+      support::endian::write32le(Carrier.Data.data() + NodeOffset + 16,
+                                 Ref.SymIdx);
+    }
   }
 
   for (GoObjSymbol &Symbol : Symbols) {
