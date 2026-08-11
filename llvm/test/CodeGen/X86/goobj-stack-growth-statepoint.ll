@@ -11,12 +11,22 @@
   i64, i64, i64, i64, i64, i64, i64, %pointer.aggregate
 }
 
+declare goabiinternal void @use_three_pointers(ptr, ptr, ptr)
+
 define goabiinternal i64 @morestack_statepoint(i64 %value) "go-stack-growth-statepoint" {
 entry:
   %buf = alloca [5000 x i8], align 8
   %slot = getelementptr inbounds [5000 x i8], ptr %buf, i64 0, i64 4999
   store volatile i8 1, ptr %slot, align 1
   ret i64 %value
+}
+
+define goabi0 void @abi0_pointer_arguments(ptr %first, ptr %second, ptr %third)
+    "frame-pointer"="non-leaf" "go-stack-growth-statepoint" {
+entry:
+  call goabiinternal void @use_three_pointers(
+      ptr %first, ptr %second, ptr %third)
+  ret void
 }
 
 define goabiinternal %many.results @initialized_pointer_result(ptr %pointer)
@@ -76,6 +86,23 @@ entry:
 ; The RSP offsets below include the 8-byte amd64 return address. The argument
 ; words themselves are numbered from the start of the Go ABI arg/result/home
 ; area, exactly as native Go ArgsPointerMaps numbers them.
+
+; GoABI0 fixed homes retain their logical argument-area offsets, while loads
+; and stack-map locations include the physical entry RSP return-address word.
+
+; CHECK-LABEL: name: abi0_pointer_arguments
+; CHECK: fixedStack:
+; CHECK: offset: 16, size: 8
+; CHECK: offset: 8, size: 8
+; CHECK: offset: 0, size: 8
+; CHECK: STATEPOINT 5147424658422983495, 0, 0, &runtime.morestack_noctxt,
+; CHECK-SAME: 2, 23, 2, 0, 2, 0, 2, 3,
+; CHECK-SAME: 1, 8, $rsp, 8, 1, 8, $rsp, 16, 1, 8, $rsp, 24,
+; CHECK-SAME: 2, 0, 2, 3, 0, 0, 1, 1, 2, 2,
+; CHECK-SAME: csr_64_go, implicit-def $rsp, implicit-def $ssp
+; CHECK: renamable $rax = MOV64rm $rbp, 1, $noreg, 16, $noreg
+; CHECK: renamable $rbx = MOV64rm $rbp, 1, $noreg, 24, $noreg
+; CHECK: renamable $rcx = MOV64rm $rbp, 1, $noreg, 32, $noreg
 
 ; CHECK-LABEL: name: initialized_pointer_result
 ; CHECK: MOV64mr $rsp, 1, $noreg, 72, $noreg, $rax
