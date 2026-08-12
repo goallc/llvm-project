@@ -400,6 +400,8 @@ SDValue X86SelectionDAGInfo::EmitTargetCodeForMemcpy(
     MachinePointerInfo SrcPtrInfo) const {
   const X86Subtarget &Subtarget =
       DAG.getMachineFunction().getSubtarget<X86Subtarget>();
+  const bool IsGo = goabi::isGoCallingConv(
+      DAG.getMachineFunction().getFunction().getCallingConv());
 
   // If to a segment-relative address space, use the default lowering.
   if (DstPtrInfo.getAddrSpace() >= 256 || SrcPtrInfo.getAddrSpace() >= 256)
@@ -427,7 +429,7 @@ SDValue X86SelectionDAGInfo::EmitTargetCodeForMemcpy(
     return emitConstantSizeRepmov(DAG, Subtarget, dl, Chain, Dst, Src,
                                   ConstantSize->getZExtValue(),
                                   Size.getValueType(), Alignment, isVolatile,
-                                  AlwaysInline, DstPtrInfo, SrcPtrInfo);
+                                  AlwaysInline || IsGo, DstPtrInfo, SrcPtrInfo);
   }
 
   return SDValue();

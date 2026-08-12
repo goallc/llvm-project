@@ -11770,6 +11770,13 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
           MemAlign = *MA;
         else
           MemAlign = getByValTypeAlignment(Args[i].IndirectType, DL);
+      } else if (Args[i].IsByRef) {
+        unsigned FrameSize = DL.getTypeAllocSize(Args[i].IndirectType);
+        Flags.setByRefSize(FrameSize);
+        if (auto MA = Args[i].Alignment)
+          MemAlign = *MA;
+        else
+          MemAlign = getByValTypeAlignment(Args[i].IndirectType, DL);
       } else if (auto MA = Args[i].Alignment) {
         MemAlign = *MA;
       } else {

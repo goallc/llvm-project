@@ -265,12 +265,15 @@ static uint32_t getGoObjArgSize(const Function &F, const DataLayout &DL,
   }
 
   SmallVector<Type *, 8> ArgTys;
+  SmallVector<Type *, 4> MemoryResultTys;
   for (const Argument &Arg : F.args())
-    if (!Arg.hasNestAttr())
-      ArgTys.push_back(Arg.getType());
+    if (Arg.hasAttribute(Attribute::ByRef))
+      MemoryResultTys.push_back(Arg.getParamByRefType());
+    else if (!Arg.hasNestAttr())
+      ArgTys.push_back(goabi::getParameterType(Arg));
 
   SmallVector<Type *, 8> ResultTys;
-  goabi::getReturnTypes(F.getReturnType(), goabi::hasTupleResultsAttr(F),
+  goabi::getReturnTypes(F.getReturnType(), F.getAttributes(), MemoryResultTys,
                         ResultTys);
   uint64_t Size =
       goabi::computeCallLayout(ArgTys, ResultTys, DL, Config).ArgSize;

@@ -53,13 +53,16 @@ entry:
   ret { i64, %go.empty.carrier, i64 } %r1
 }
 
-define goabi0 i64 @abi0_second_int(i64 %a, i64 %b) {
+define goabi0 i64 @abi0_second_int(
+    ptr byval(i64) align 8 %a.home,
+    ptr byval(i64) align 8 %b.home) {
 ; A64-LABEL: abi0_second_int:
 ; Go's arm64 stack ABI reserves 0(SP) for the return PC.
 ; A64: ldr x[[REG:[0-9]+]], [sp, #16]
 ; A64: str x[[REG]], [sp, #24]
 ; A64: ret
 entry:
+  %b = load i64, ptr %b.home, align 8
   ret i64 %b
 }
 
@@ -71,10 +74,16 @@ define goabi0 i64 @abi0_call_second_int() {
 ; A64: bl abi0_second_int
 ; A64: mov x[[BASE_RELOAD:[0-9]+]], sp
 ; A64: ldr x[[RET:[0-9]+]], [x[[BASE_RELOAD]], #24]
-; The 48-byte caller frame leaves this function's ABI0 result at entry SP+8.
-; A64: str x[[RET]], [sp, #56]
+; The 64-byte caller frame leaves this function's ABI0 result at entry SP+8.
+; A64: str x[[RET]], [sp, #72]
 entry:
-  %ret = call goabi0 i64 @abi0_second_int(i64 11, i64 22)
+  %a.home = alloca i64, align 8
+  %b.home = alloca i64, align 8
+  store i64 11, ptr %a.home, align 8
+  store i64 22, ptr %b.home, align 8
+  %ret = call goabi0 i64 @abi0_second_int(
+      ptr byval(i64) align 8 %a.home,
+      ptr byval(i64) align 8 %b.home)
   ret i64 %ret
 }
 
@@ -111,30 +120,35 @@ define goabiinternal i64 @stack_pair(
     i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4,
     i64 %a5, i64 %a6, i64 %a7, i64 %a8, i64 %a9,
     i64 %a10, i64 %a11, i64 %a12, i64 %a13, i64 %a14,
-    %pair %value) {
+    ptr byval(%pair) align 8 %value.home) {
 ; A64-LABEL: stack_pair:
 ; A64: ldr x0, [sp, #16]
 ; A64: ret
 entry:
+  %value = load %pair, ptr %value.home, align 8
   %right = extractvalue %pair %value, 1
   ret i64 %right
 }
 
 define goabiinternal i64 @call_stack_pair() {
 ; A64-LABEL: call_stack_pair:
-; A64-DAG: str x{{[0-9]+}}, [x{{[0-9]+}}, #8]
-; A64-DAG: str x{{[0-9]+}}, [x{{[0-9]+}}, #16]
+; A64: ldr q[[VALUE:[0-9]+]], [sp, #{{[0-9]+}}]
+; A64: mov x[[BASE:[0-9]+]], sp
+; A64: stur q[[VALUE]], [x[[BASE]], #8]
 ; A64: bl stack_pair
 entry:
+  %value.home = alloca %pair, align 8
+  store %pair { i64 13, i64 17 }, ptr %value.home, align 8
   %result = call goabiinternal i64 @stack_pair(
       i64 0, i64 1, i64 2, i64 3, i64 4,
       i64 5, i64 6, i64 7, i64 8, i64 9,
       i64 10, i64 11, i64 12, i64 13, i64 14,
-      %pair { i64 13, i64 17 })
+      ptr byval(%pair) align 8 %value.home)
   ret i64 %result
 }
 
-define goabiinternal [8 x i8] @stack_bytes([8 x i8] %value) {
+define goabiinternal [8 x i8] @stack_bytes(
+    ptr byval([8 x i8]) align 1 %value.home) {
 ; A64-LABEL: stack_bytes:
 ; A64-DAG: ldrb w{{[0-9]+}}, [sp, #8]
 ; A64-DAG: ldrb w{{[0-9]+}}, [sp, #15]
@@ -142,13 +156,15 @@ define goabiinternal [8 x i8] @stack_bytes([8 x i8] %value) {
 ; A64-DAG: strb w{{[0-9]+}}, [sp, #23]
 ; A64: ret
 entry:
+  %value = load [8 x i8], ptr %value.home, align 1
   ret [8 x i8] %value
 }
 
 define goabiinternal i16 @call_stack_bytes() {
 ; A64-LABEL: call_stack_bytes:
-; A64-DAG: strb w{{[0-9]+}}, [x{{[0-9]+}}, #8]
-; A64-DAG: strb w{{[0-9]+}}, [x{{[0-9]+}}, #15]
+; A64: ldr x[[VALUE:[0-9]+]], [sp, #{{[0-9]+}}]
+; A64: mov x[[BASE:[0-9]+]], sp
+; A64: str x[[VALUE]], [x[[BASE]], #8]
 ; A64: bl stack_bytes
 ; A64-DAG: ldrb w{{[0-9]+}}, [x{{[0-9]+}}, #16]
 ; A64-DAG: ldrb w{{[0-9]+}}, [x{{[0-9]+}}, #23]
@@ -158,8 +174,11 @@ define goabiinternal i16 @call_stack_bytes() {
 ; A64-O2:       ldrb w{{[0-9]+}}, [sp, #16]
 ; A64-O2:       add sp, sp, #{{[0-9]+}}
 entry:
+  %value.home = alloca [8 x i8], align 1
+  store [8 x i8] [i8 1, i8 2, i8 3, i8 4, i8 5, i8 6, i8 7, i8 8],
+      ptr %value.home, align 1
   %result = call goabiinternal [8 x i8] @stack_bytes(
-      [8 x i8] [i8 1, i8 2, i8 3, i8 4, i8 5, i8 6, i8 7, i8 8])
+      ptr byval([8 x i8]) align 1 %value.home)
   %first = extractvalue [8 x i8] %result, 0
   %last = extractvalue [8 x i8] %result, 7
   %first.ext = zext i8 %first to i16

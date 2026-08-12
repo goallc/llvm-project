@@ -61,25 +61,39 @@ entry:
   ret { i64, %go.empty.carrier, i64 } %r1
 }
 
-define goabi0 i64 @"abi0_second_int<ABI0>"(i64 %a, i64 %b) {
+define goabi0 i64 @"abi0_second_int<ABI0>"(
+    ptr byval(i64) align 8 %a.home,
+    ptr byval(i64) align 8 %b.home) {
 ; X86-LABEL: "abi0_second_int<ABI0>":
-; X86: movq 16(%rsp), %rax
-; X86: movq %rax, 24(%rsp)
+; X86: leaq 16(%rsp), %[[BHOME:r[a-z0-9]+]]
+; X86: movq (%[[BHOME]]), %[[B:r[a-z0-9]+]]
+; X86: movq %[[B]], 24(%rsp)
 ; X86: retq
 entry:
+  %b = load i64, ptr %b.home, align 8
   ret i64 %b
 }
 
 define goabi0 i64 @"abi0_call_second_int<ABI0>"() {
 ; X86-LABEL: "abi0_call_second_int<ABI0>":
+; X86-DAG: movq $11, [[ASRC:[0-9]+]](%rsp)
+; X86-DAG: movq $22, [[BSRC:[0-9]+]](%rsp)
+; X86: movq [[BSRC]](%rsp), %[[B:r[a-z0-9]+]]
 ; X86: movq %rsp, %[[BASE:r[a-z0-9]+]]
-; X86: movq $22, 8(%[[BASE]])
-; X86: movq $11, (%[[BASE]])
+; X86: movq %[[B]], 8(%[[BASE]])
+; X86: movq [[ASRC]](%rsp), %[[A:r[a-z0-9]+]]
+; X86: movq %[[A]], (%[[BASE]])
 ; X86: callq "abi0_second_int<ABI0>"
 ; X86: movq %rsp, %[[RELOAD:r[a-z0-9]+]]
 ; X86: movq 16(%[[RELOAD]]), %rax
 entry:
-  %ret = call goabi0 i64 @"abi0_second_int<ABI0>"(i64 11, i64 22)
+  %a.home = alloca i64, align 8
+  %b.home = alloca i64, align 8
+  store i64 11, ptr %a.home, align 8
+  store i64 22, ptr %b.home, align 8
+  %ret = call goabi0 i64 @"abi0_second_int<ABI0>"(
+      ptr byval(i64) align 8 %a.home,
+      ptr byval(i64) align 8 %b.home)
   ret i64 %ret
 }
 
@@ -125,9 +139,16 @@ define goabiinternal i64 @call_method_results(ptr %callee, ptr %recv,
 ; X86-O2:       addq 56(%rsp), %rax
 ; X86-O2:       addq ${{[0-9]+}}, %rsp
 entry:
+  %integers.home = alloca [2 x i64], align 8
+  %floats.home = alloca [2 x double], align 8
+  store [2 x i64] [i64 456, i64 789], ptr %integers.home, align 8
+  store [2 x double] [double 3.4, double 5.6], ptr %floats.home, align 8
   %result = call goabiinternal %method.results %callee(
-      ptr %recv, i64 123, [2 x i64] [i64 456, i64 789],
-      double 1.2, [2 x double] [double 3.4, double 5.6], ptr nest %ctxt) #0
+      ptr %recv, i64 123,
+      ptr byval([2 x i64]) align 8 %integers.home,
+      double 1.2,
+      ptr byval([2 x double]) align 8 %floats.home,
+      ptr nest %ctxt) #0
   %s = extractvalue %method.results %result, 0
   %a = extractvalue %method.results %result, 1
   %x = extractvalue %method.results %result, 2
@@ -148,13 +169,16 @@ entry:
 
 define goabiinternal i64 @stack_pair(
     i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4,
-    i64 %a5, i64 %a6, i64 %a7, i64 %a8, %pair %value) {
+    i64 %a5, i64 %a6, i64 %a7, i64 %a8,
+    ptr byval(%pair) align 8 %value.home) {
 ; X86-LABEL: stack_pair:
-; X86-DAG: movq 8(%rsp), %[[LEFT:r[a-z0-9]+]]
-; X86-DAG: movq 16(%rsp), %[[RIGHT:r[a-z0-9]+]]
+; X86: leaq 8(%rsp), %[[HOME:r[a-z0-9]+]]
+; X86-DAG: movq (%[[HOME]]), %[[LEFT:r[a-z0-9]+]]
+; X86-DAG: movq 8(%[[HOME]]), %[[RIGHT:r[a-z0-9]+]]
 ; X86: addq %[[RIGHT]], %[[LEFT]]
 ; X86: retq
 entry:
+  %value = load %pair, ptr %value.home, align 8
   %left = extractvalue %pair %value, 0
   %right = extractvalue %pair %value, 1
   %sum = add i64 %left, %right
@@ -163,39 +187,55 @@ entry:
 
 define goabiinternal i64 @call_stack_pair() {
 ; X86-LABEL: call_stack_pair:
-; X86-DAG: movq $13, (%[[BASE:r[a-z0-9]+]])
-; X86-DAG: movq $17, 8(%[[BASE]])
+; X86-DAG: movq $13, [[LEFTSRC:[0-9]+]](%rsp)
+; X86-DAG: movq $17, [[RIGHTSRC:[0-9]+]](%rsp)
+; X86-DAG: movq [[LEFTSRC]](%rsp), %[[LEFT:r[a-z0-9]+]]
+; X86-DAG: movq [[RIGHTSRC]](%rsp), %[[RIGHT:r[a-z0-9]+]]
+; X86: movq %rsp, %[[BASE:r[a-z0-9]+]]
+; X86-DAG: movq %[[LEFT]], (%[[BASE]])
+; X86-DAG: movq %[[RIGHT]], 8(%[[BASE]])
 ; X86: callq stack_pair
 entry:
+  %value.home = alloca %pair, align 8
+  store %pair { i64 13, i64 17 }, ptr %value.home, align 8
   %result = call goabiinternal i64 @stack_pair(
       i64 0, i64 1, i64 2, i64 3, i64 4,
       i64 5, i64 6, i64 7, i64 8,
-      %pair { i64 13, i64 17 })
+      ptr byval(%pair) align 8 %value.home)
   ret i64 %result
 }
 
-define goabiinternal [8 x i8] @stack_bytes([8 x i8] %value) {
+define goabiinternal [8 x i8] @stack_bytes(
+    ptr byval([8 x i8]) align 1 %value.home) {
 ; X86-LABEL: stack_bytes:
-; X86-DAG: movb 8(%rsp), %{{[a-z0-9]+}}
-; X86-DAG: movb 15(%rsp), %{{[a-z0-9]+}}
+; X86: leaq 8(%rsp), %[[HOME:r[a-z0-9]+]]
+; X86-DAG: movb (%[[HOME]]), %{{[a-z0-9]+}}
+; X86-DAG: movb 7(%[[HOME]]), %{{[a-z0-9]+}}
 ; X86-DAG: movb %{{[a-z0-9]+}}, 16(%rsp)
 ; X86-DAG: movb %{{[a-z0-9]+}}, 23(%rsp)
 ; X86: retq
 entry:
+  %value = load [8 x i8], ptr %value.home, align 1
   ret [8 x i8] %value
 }
 
 define goabiinternal i16 @call_stack_bytes() {
 ; X86-LABEL: call_stack_bytes:
-; X86-DAG: movb $1, (%[[BASE:r[a-z0-9]+]])
-; X86-DAG: movb $8, 7(%[[BASE]])
+; X86-DAG: movb $1, [[SRC:[0-9]+]](%rsp)
+; X86-DAG: movb $8, [[SRCEND:[0-9]+]](%rsp)
+; X86: movq [[SRC]](%rsp), %[[VALUE:r[a-z0-9]+]]
+; X86: movq %rsp, %[[BASE:r[a-z0-9]+]]
+; X86: movq %[[VALUE]], (%[[BASE]])
 ; X86: callq stack_bytes
 ; X86: movq %rsp, %[[RESULT_BASE:r[a-z0-9]+]]
 ; X86-DAG: movzbl 8(%[[RESULT_BASE]]), %{{[a-z0-9]+}}
 ; X86-DAG: movzbl 15(%[[RESULT_BASE]]), %{{[a-z0-9]+}}
 entry:
+  %value.home = alloca [8 x i8], align 1
+  store [8 x i8] [i8 1, i8 2, i8 3, i8 4, i8 5, i8 6, i8 7, i8 8],
+      ptr %value.home, align 1
   %result = call goabiinternal [8 x i8] @stack_bytes(
-      [8 x i8] [i8 1, i8 2, i8 3, i8 4, i8 5, i8 6, i8 7, i8 8])
+      ptr byval([8 x i8]) align 1 %value.home)
   %first = extractvalue [8 x i8] %result, 0
   %last = extractvalue [8 x i8] %result, 7
   %first.ext = zext i8 %first to i16

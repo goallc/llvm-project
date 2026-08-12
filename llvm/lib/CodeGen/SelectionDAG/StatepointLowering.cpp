@@ -358,9 +358,17 @@ static void reservePreviousStackSlotForValue(const Value *IncomingValue,
 /// call node. Also update NodeMap so that getValue(statepoint) will
 /// reference lowered call result
 static SDNode *peelCallResultChain(SDNode *Node) {
-  while (Node->getOpcode() == ISD::LOAD ||
-         Node->getOpcode() == ISD::CopyFromReg)
-    Node = Node->getOperand(0).getNode();
+  while (true) {
+    if (Node->getOpcode() == ISD::CopyFromReg) {
+      Node = Node->getOperand(0).getNode();
+      continue;
+    }
+    if (auto *Mem = dyn_cast<MemSDNode>(Node)) {
+      Node = Mem->getChain().getNode();
+      continue;
+    }
+    break;
+  }
 
   if (Node->getOpcode() != ISD::TokenFactor)
     return Node;
@@ -368,8 +376,7 @@ static SDNode *peelCallResultChain(SDNode *Node) {
   SDNode *CommonCallEnd = nullptr;
   for (SDValue Operand : Node->ops()) {
     SDNode *CallEnd = peelCallResultChain(Operand.getNode());
-    if (CallEnd->getOpcode() != ISD::CALLSEQ_END ||
-        (CommonCallEnd && CommonCallEnd != CallEnd))
+    if (CommonCallEnd && CommonCallEnd != CallEnd)
       return Node;
     CommonCallEnd = CallEnd;
   }
@@ -1008,7 +1015,13 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
       }
     } else if (goabi::isGoCallingConv(
                    DAG.getMachineFunction().getFunction().getCallingConv()) &&
-               isa<AllocaInst>(V) && isa<FrameIndexSDNode>(SDV)) {
+               isa<FrameIndexSDNode>(SDV) &&
+               (isa<AllocaInst>(V) ||
+                (isa<Argument>(V) &&
+                 (cast<Argument>(V)->hasByValAttr() ||
+                  cast<Argument>(V)->hasAttribute(Attribute::ByRef)) &&
+                 FuncInfo.getArgumentFrameIndex(cast<Argument>(V)) ==
+                     cast<FrameIndexSDNode>(SDV)->getIndex()))) {
       Record.type = RecordType::FrameIndexRemat;
       Record.payload.FI = cast<FrameIndexSDNode>(SDV)->getIndex();
     } else if (Loc.getNode()) {

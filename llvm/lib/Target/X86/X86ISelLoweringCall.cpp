@@ -153,10 +153,10 @@ getX86GoArgTypes(const Function &F, SmallVectorImpl<int> &LayoutMap) {
   LayoutMap.assign(F.arg_size(), -1);
   for (const Argument &Arg : F.args()) {
     unsigned Index = Arg.getArgNo();
-    if (Arg.hasNestAttr())
+    if (Arg.hasNestAttr() || Arg.hasAttribute(Attribute::ByRef))
       continue;
     LayoutMap[Index] = ArgTys.size();
-    ArgTys.push_back(Arg.getType());
+    ArgTys.push_back(goabi::getParameterType(Arg));
   }
   return ArgTys;
 }
@@ -167,19 +167,63 @@ getX86GoCallArgTypes(const TargetLowering::ArgListTy &Args,
   SmallVector<Type *, 8> ArgTys;
   LayoutMap.assign(Args.size(), -1);
   for (unsigned I = 0; I != Args.size(); ++I) {
-    if (Args[I].IsNest)
+    if (Args[I].IsNest || Args[I].IsByRef)
       continue;
     LayoutMap[I] = ArgTys.size();
-    ArgTys.push_back(Args[I].OrigTy);
+    ArgTys.push_back(Args[I].IsByVal ? Args[I].IndirectType : Args[I].OrigTy);
   }
   return ArgTys;
 }
 
-static SmallVector<Type *, 8> getX86GoReturnTypes(Type *RetTy,
-                                                  const AttributeList &Attrs) {
+static SmallVector<Type *, 8> getX86GoReturnTypes(const Function &F) {
+  SmallVector<Type *, 4> MemoryResultTys;
+  for (const Argument &Arg : F.args())
+    if (Arg.hasAttribute(Attribute::ByRef))
+      MemoryResultTys.push_back(Arg.getParamByRefType());
   SmallVector<Type *, 8> ResultTys;
-  goabi::getReturnTypes(RetTy, goabi::hasTupleResultsAttr(Attrs), ResultTys);
+  goabi::getReturnTypes(F.getReturnType(), F.getAttributes(), MemoryResultTys,
+                        ResultTys);
   return ResultTys;
+}
+
+static SmallVector<Type *, 8>
+getX86GoCallReturnTypes(Type *RetTy, const AttributeList &Attrs,
+                        const TargetLowering::ArgListTy &Args) {
+  SmallVector<Type *, 4> MemoryResultTys;
+  for (const TargetLowering::ArgListEntry &Arg : Args)
+    if (Arg.IsByRef)
+      MemoryResultTys.push_back(Arg.IndirectType);
+  SmallVector<Type *, 8> ResultTys;
+  goabi::getReturnTypes(RetTy, Attrs, MemoryResultTys, ResultTys);
+  return ResultTys;
+}
+
+static SmallVector<unsigned, 8>
+getX86GoDirectResultIndices(const AttributeList &Attrs,
+                            unsigned DirectResultCount,
+                            unsigned MemoryResultCount) {
+  SmallVector<unsigned, 4> MemoryIndices = goabi::getMemoryResultIndices(
+      Attrs, DirectResultCount, MemoryResultCount);
+  SmallVector<unsigned, 8> DirectIndices;
+  for (unsigned I = 0, E = DirectResultCount + MemoryResultCount; I != E; ++I)
+    if (!llvm::is_contained(MemoryIndices, I))
+      DirectIndices.push_back(I);
+  return DirectIndices;
+}
+
+static SmallVector<int, 8> getX86GoMemoryResultMap(const AttributeList &Attrs,
+                                                   unsigned ParamCount,
+                                                   ArrayRef<bool> IsByRef,
+                                                   unsigned DirectResultCount) {
+  unsigned MemoryResultCount = llvm::count(IsByRef, true);
+  SmallVector<unsigned, 4> MemoryIndices = goabi::getMemoryResultIndices(
+      Attrs, DirectResultCount, MemoryResultCount);
+  SmallVector<int, 8> Map(ParamCount, -1);
+  unsigned Next = 0;
+  for (unsigned I = 0; I != ParamCount; ++I)
+    if (IsByRef[I])
+      Map[I] = MemoryIndices[Next++];
+  return Map;
 }
 
 static SDValue lowerX86GoFormalArguments(
@@ -202,8 +246,7 @@ static SDValue lowerX86GoFormalArguments(
   goabi::ABIConfig ABIConfig =
       getX86GoABIConfig(Subtarget, F.getCallingConv());
   goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgTys, getX86GoReturnTypes(F.getReturnType(), F.getAttributes()),
-      DAG.getDataLayout(), ABIConfig);
+      ArgTys, getX86GoReturnTypes(F), DAG.getDataLayout(), ABIConfig);
 
   goabi::EntryArgsInfo EntryArgs = goabi::computeEntryArgsInfo(
       ArgTys, Layout, DAG.getDataLayout(), ABIConfig);
@@ -225,6 +268,15 @@ static SDValue lowerX86GoFormalArguments(
   FuncInfo->setRegSaveFrameIndex(0xAAAAAAA);
   FuncInfo->clearGoArgHomes();
   FuncInfo->clearGoArgPointerSlots();
+
+  SmallVector<Type *, 8> DirectResultTys;
+  goabi::getReturnTypes(F.getReturnType(), goabi::hasTupleResultsAttr(F),
+                        DirectResultTys);
+  SmallVector<bool, 8> IsByRef;
+  for (const Argument &Arg : F.args())
+    IsByRef.push_back(Arg.hasAttribute(Attribute::ByRef));
+  SmallVector<int, 8> MemoryResultMap = getX86GoMemoryResultMap(
+      F.getAttributes(), F.arg_size(), IsByRef, DirectResultTys.size());
 
   auto RecordPointerSlots = [&](int FI, uint64_t ArgOffset, uint64_t Size,
                                 bool IsLiveAtEntry) {
@@ -264,6 +316,23 @@ static SDValue lowerX86GoFormalArguments(
       continue;
 
     const Argument *Arg = F.getArg(Group.Index);
+    if (Arg->hasAttribute(Attribute::ByRef)) {
+      int ResultIndex = MemoryResultMap[Group.Index];
+      if (ResultIndex < 0 || Group.End != Group.Start + 1 ||
+          !Ins[Group.Start].Flags.isByRef())
+        report_fatal_error("invalid X86 Go memory result carrier");
+      const goabi::ValueLayout &ResultLayout = Layout.Results[ResultIndex];
+      if (ResultLayout.InRegs || ResultLayout.Size == 0 ||
+          Ins[Group.Start].Flags.getByRefSize() != ResultLayout.Size)
+        report_fatal_error(
+            "X86 Go memory result carrier disagrees with Go ABI layout");
+      int FI =
+          MFI.CreateFixedObject(ResultLayout.Size, ResultLayout.StackOffset,
+                                /*IsImmutable=*/false,
+                                /*isAliased=*/true);
+      InVals.push_back(DAG.getFrameIndex(FI, PtrVT));
+      continue;
+    }
     if (Arg->hasNestAttr()) {
       assert(Group.End == Group.Start + 1 && "unexpected split nest arg");
       Register VReg =
@@ -279,15 +348,25 @@ static SDValue lowerX86GoFormalArguments(
 
     unsigned LayoutIndex = LayoutMap[Group.Index];
     const goabi::ValueLayout &ArgLayout = Layout.Args[LayoutIndex];
+    bool IsByVal = Ins[Group.Start].Flags.isByVal();
+    bool MustBeByVal = !ArgLayout.InRegs && ArgLayout.Size != 0;
+    if (Arg->hasByValAttr() != IsByVal || IsByVal != MustBeByVal)
+      report_fatal_error(
+          "X86 Go formal argument carrier disagrees with Go ABI layout");
     uint64_t LogicalHomeOffset =
         ArgLayout.InRegs ? ArgSpillOffsets[LayoutIndex] : ArgLayout.StackOffset;
     int64_t FixedHomeOffset = LogicalHomeOffset;
-    int HomeFI =
-        ArgLayout.InRegs
-            ? MFI.CreateFixedSpillStackObject(ArgLayout.Size, FixedHomeOffset,
-                                              /*IsImmutable=*/false)
-            : MFI.CreateFixedObject(ArgLayout.Size, FixedHomeOffset,
-                                    /*IsImmutable=*/true);
+    int HomeFI;
+    if (ArgLayout.InRegs)
+      HomeFI = MFI.CreateFixedSpillStackObject(ArgLayout.Size, FixedHomeOffset,
+                                               /*IsImmutable=*/false);
+    else if (IsByVal)
+      HomeFI = MFI.CreateFixedObject(ArgLayout.Size, FixedHomeOffset,
+                                     /*IsImmutable=*/false,
+                                     /*isAliased=*/true);
+    else
+      HomeFI = MFI.CreateFixedObject(ArgLayout.Size, FixedHomeOffset,
+                                     /*IsImmutable=*/true);
     X86MachineFunctionInfo::GoArgHome &Home =
         FuncInfo->addGoArgHome(Group.Index, HomeFI);
     // LLVM may replace an unused incoming pointer with poison at every call
@@ -298,6 +377,14 @@ static SDValue lowerX86GoFormalArguments(
         [](const ISD::InputArg &In) { return In.Used; });
     RecordPointerSlots(HomeFI, LogicalHomeOffset, ArgLayout.Size,
                        IsLiveAtEntry);
+
+    if (IsByVal) {
+      if (Group.End != Group.Start + 1 ||
+          Ins[Group.Start].Flags.getByValSize() != ArgLayout.Size)
+        report_fatal_error("invalid X86 Go byval formal argument");
+      InVals.push_back(DAG.getFrameIndex(HomeFI, PtrVT));
+      continue;
+    }
 
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
@@ -355,17 +442,25 @@ static SDValue lowerX86GoReturn(const X86TargetLowering &TLI, SDValue Chain,
   MachineFrameInfo &MFI = MF.getFrameInfo();
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys = getX86GoArgTypes(MF.getFunction(), LayoutMap);
-  SmallVector<Type *, 8> ResultTys =
-      getX86GoReturnTypes(MF.getFunction().getReturnType(),
-                          MF.getFunction().getAttributes());
+  SmallVector<Type *, 8> ResultTys = getX86GoReturnTypes(MF.getFunction());
   goabi::CallLayout Layout = goabi::computeCallLayout(
       ArgTys, ResultTys, DAG.getDataLayout(),
       getX86GoABIConfig(Subtarget, MF.getFunction().getCallingConv()));
+  unsigned MemoryResultCount =
+      llvm::count_if(Layout.Results, [](const auto &Result) {
+        return !Result.InRegs && Result.Size != 0;
+      });
+  SmallVector<unsigned, 8> DirectResultIndices = getX86GoDirectResultIndices(
+      MF.getFunction().getAttributes(),
+      Layout.Results.size() - MemoryResultCount, MemoryResultCount);
 
   SmallVector<SDValue, 8> MemOps;
   SmallVector<std::pair<Register, SDValue>, 8> RetRegs;
   for (const GoArgGroup<ISD::OutputArg> &Group : groupGoArgs(ArrayRef(Outs))) {
-    const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
+    if (Group.Index >= DirectResultIndices.size())
+      report_fatal_error("invalid X86 Go direct result index");
+    const goabi::ValueLayout &ResultLayout =
+        Layout.Results[DirectResultIndices[Group.Index]];
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
     for (unsigned I = Group.Start; I != Group.End; ++I) {
@@ -440,15 +535,27 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
     report_fatal_error("Go calling convention does not support varargs");
 
   SmallVector<int, 8> ArgLayoutMap;
-  SmallVector<Type *, 8> ArgTys = getX86GoCallArgTypes(CLI.getArgs(), ArgLayoutMap);
-  SmallVector<Type *, 8> ResultTys;
+  SmallVector<Type *, 8> ArgTys =
+      getX86GoCallArgTypes(CLI.getArgs(), ArgLayoutMap);
+  AttributeList CallAttrs = CLI.CB ? CLI.CB->getAttributes() : AttributeList();
+  SmallVector<Type *, 8> ResultTys =
+      getX86GoCallReturnTypes(CLI.RetTy, CallAttrs, CLI.getArgs());
+  goabi::CallLayout Layout =
+      goabi::computeCallLayout(ArgTys, ResultTys, DAG.getDataLayout(),
+                               getX86GoABIConfig(Subtarget, CLI.CallConv));
+  SmallVector<Type *, 8> DirectResultTys;
   goabi::getReturnTypes(CLI.RetTy,
-                        goabi::isGoCallingConv(CLI.CallConv) && CLI.CB &&
-                            goabi::hasTupleResultsAttr(*CLI.CB),
-                        ResultTys);
-  goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgTys, ResultTys, DAG.getDataLayout(),
-      getX86GoABIConfig(Subtarget, CLI.CallConv));
+                        CLI.CB && goabi::hasTupleResultsAttr(*CLI.CB),
+                        DirectResultTys);
+  SmallVector<bool, 8> IsByRef;
+  for (const TargetLowering::ArgListEntry &Arg : CLI.getArgs())
+    IsByRef.push_back(Arg.IsByRef);
+  SmallVector<int, 8> MemoryResultMap = getX86GoMemoryResultMap(
+      CallAttrs, CLI.getArgs().size(), IsByRef, DirectResultTys.size());
+  unsigned MemoryResultCount = llvm::count_if(
+      CLI.getArgs(), [](const auto &Arg) { return Arg.IsByRef; });
+  SmallVector<unsigned, 8> DirectResultIndices = getX86GoDirectResultIndices(
+      CallAttrs, DirectResultTys.size(), MemoryResultCount);
 
   unsigned NumBytes = Layout.TotalStackSize;
   Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, DL);
@@ -459,11 +566,26 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
 
   SmallVector<SDValue, 8> MemOpChains;
   SmallVector<std::pair<Register, SDValue>, 8> RegsToPass;
+  SmallVector<SDValue, 4> MemoryResultDests(Layout.Results.size());
   MachineFunction::CallSiteInfo CSInfo;
 
   for (const GoArgGroup<ISD::OutputArg> &Group : groupGoArgs(ArrayRef(Outs))) {
     if (Group.Index >= CLI.getArgs().size())
       continue;
+
+    if (CLI.getArgs()[Group.Index].IsByRef) {
+      int ResultIndex = MemoryResultMap[Group.Index];
+      if (ResultIndex < 0 || Group.End != Group.Start + 1 ||
+          !Outs[Group.Start].Flags.isByRef())
+        report_fatal_error("invalid X86 Go memory result call carrier");
+      const goabi::ValueLayout &ResultLayout = Layout.Results[ResultIndex];
+      if (ResultLayout.InRegs || ResultLayout.Size == 0 ||
+          Outs[Group.Start].Flags.getByRefSize() != ResultLayout.Size)
+        report_fatal_error(
+            "X86 Go memory result call carrier disagrees with Go ABI layout");
+      MemoryResultDests[ResultIndex] = OutVals[Group.Start];
+      continue;
+    }
 
     if (CLI.getArgs()[Group.Index].IsNest) {
       assert(Group.End == Group.Start + 1 && "unexpected split nest arg");
@@ -471,7 +593,31 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
       continue;
     }
 
-    const goabi::ValueLayout &ArgLayout = Layout.Args[ArgLayoutMap[Group.Index]];
+    const goabi::ValueLayout &ArgLayout =
+        Layout.Args[ArgLayoutMap[Group.Index]];
+    bool IsByVal = CLI.getArgs()[Group.Index].IsByVal;
+    bool MustBeByVal = !ArgLayout.InRegs && ArgLayout.Size != 0;
+    if (Outs[Group.Start].Flags.isByVal() != IsByVal || IsByVal != MustBeByVal)
+      report_fatal_error(
+          "X86 Go call argument carrier disagrees with Go ABI layout");
+    if (IsByVal) {
+      if (Group.End != Group.Start + 1 ||
+          Outs[Group.Start].Flags.getByValSize() != ArgLayout.Size)
+        report_fatal_error("invalid X86 Go byval call argument");
+      assert(StackPtr && "missing Go call stack pointer");
+      SDValue Addr =
+          DAG.getNode(ISD::ADD, DL, PtrVT, StackPtr,
+                      DAG.getIntPtrConstant(ArgLayout.StackOffset, DL));
+      Align Alignment = Outs[Group.Start].Flags.getNonZeroByValAlign();
+      MemOpChains.push_back(DAG.getMemcpy(
+          Chain, DL, Addr, OutVals[Group.Start],
+          DAG.getConstant(ArgLayout.Size, DL, PtrVT), Alignment, Alignment,
+          /*isVol=*/false, /*AlwaysInline=*/false, /*CI=*/nullptr, std::nullopt,
+          MachinePointerInfo::getStack(MF, ArgLayout.StackOffset),
+          MachinePointerInfo()));
+      continue;
+    }
+
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
     for (unsigned I = Group.Start; I != Group.End; ++I) {
@@ -541,7 +687,10 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
 
   SmallVector<SDValue, 8> ResultVals(Ins.size());
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
-    const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
+    if (Group.Index >= DirectResultIndices.size())
+      report_fatal_error("invalid X86 Go direct call result index");
+    const goabi::ValueLayout &ResultLayout =
+        Layout.Results[DirectResultIndices[Group.Index]];
     if (!ResultLayout.InRegs)
       continue;
     unsigned IntPiece = 0;
@@ -575,10 +724,8 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
   // Keep the call sequence active while reading stack results. The load chain
   // is after the call, so the physical SP is the current post-growth Go stack;
   // CALLSEQ_END cannot release the outgoing frame until every result is read.
-  bool HasStackResults =
-      llvm::any_of(groupGoArgs(ArrayRef(Ins)), [&](const auto &Group) {
-        return !Layout.Results[Group.Index].InRegs;
-      });
+  bool HasStackResults = llvm::any_of(
+      Layout.Results, [](const auto &Result) { return !Result.InRegs; });
   SDValue ResultStackPtr;
   if (HasStackResults) {
     ResultStackPtr = DAG.getCopyFromReg(Chain, DL, RegInfo->getStackRegister(),
@@ -587,7 +734,8 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
     InGlue = ResultStackPtr.getValue(2);
   }
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
-    const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
+    const goabi::ValueLayout &ResultLayout =
+        Layout.Results[DirectResultIndices[Group.Index]];
     if (ResultLayout.InRegs)
       continue;
     for (unsigned I = Group.Start; I != Group.End; ++I) {
@@ -604,6 +752,24 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
       ResultVals[I] = Load;
     }
   }
+
+  SmallVector<SDValue, 4> MemoryResultCopies;
+  for (unsigned I = 0; I != MemoryResultDests.size(); ++I) {
+    if (!MemoryResultDests[I].getNode())
+      continue;
+    const goabi::ValueLayout &ResultLayout = Layout.Results[I];
+    SDValue Src =
+        DAG.getNode(ISD::ADD, DL, PtrVT, ResultStackPtr,
+                    DAG.getIntPtrConstant(ResultLayout.StackOffset, DL));
+    MemoryResultCopies.push_back(DAG.getMemcpy(
+        Chain, DL, MemoryResultDests[I], Src,
+        DAG.getConstant(ResultLayout.Size, DL, PtrVT), ResultLayout.Alignment,
+        ResultLayout.Alignment, /*isVol=*/false, /*AlwaysInline=*/false,
+        /*CI=*/nullptr, std::nullopt, MachinePointerInfo(),
+        MachinePointerInfo::getStack(MF, ResultLayout.StackOffset)));
+  }
+  if (!MemoryResultCopies.empty())
+    Chain = DAG.getNode(ISD::TokenFactor, DL, MVT::Other, MemoryResultCopies);
 
   Chain = DAG.getCALLSEQ_END(Chain, NumBytes, 0,
                              HasStackResults ? SDValue() : InGlue, DL);
@@ -623,10 +789,13 @@ X86TargetLowering::getArgumentCopyElisionFrameInfo(const Argument &Arg,
   uint64_t ArgSize = MF.getDataLayout().getTypeAllocSize(Arg.getType());
   for (const X86MachineFunctionInfo::GoArgHome &Home :
        FuncInfo->getGoArgHomes())
-    if (Home.ArgNo == Arg.getArgNo() &&
+    if (!Home.valueAlreadyInFrame() && Home.ArgNo == Arg.getArgNo() &&
         MF.getFrameInfo().getObjectSize(Home.FrameIndex) == int64_t(ArgSize))
+      // Stack-assigned values use typed byval and are already bound directly
+      // to their fixed incoming objects. Only register parameters still need
+      // their frontend store redirected into the canonical spill home.
       return ArgumentCopyElisionFrameInfo{Home.FrameIndex,
-                                          Home.valueAlreadyInFrame()};
+                                          /*ValueAlreadyInFrame=*/false};
   return std::nullopt;
 }
 
@@ -641,8 +810,7 @@ int X86TargetLowering::getGoABI0FrameIndex(MachineFunction &MF) const {
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys = getX86GoArgTypes(F, LayoutMap);
   goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgTys, getX86GoReturnTypes(F.getReturnType(), F.getAttributes()),
-      MF.getDataLayout(),
+      ArgTys, getX86GoReturnTypes(F), MF.getDataLayout(),
       getX86GoABIConfig(MF.getSubtarget<X86Subtarget>(), F.getCallingConv()));
   if (Layout.ArgSize == 0)
     report_fatal_error("llvm.go.abi0.frame requires a non-empty ABI0 frame");
