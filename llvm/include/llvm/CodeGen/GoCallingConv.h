@@ -32,23 +32,18 @@ namespace goabi {
 
 inline constexpr StringLiteral TupleResultsAttr = "go_results_tuple";
 inline constexpr StringLiteral PadTypeName = "go.abi.pad";
-// The Go statepoint pass uses this attribute to request that target frame
-// lowering represent the late morestack call with a root-free STATEPOINT.
-inline constexpr StringLiteral StackGrowthStatepointAttr =
-    "go-stack-growth-statepoint";
 // Target frame lowering must not synthesize a morestack edge for such a
-// function, even though StackGrowthStatepointAttr remains present to describe
-// the entry-argument map and statepoint form used when growth is permitted.
+// function. GoObj Go functions otherwise use the native Go default: emit a
+// stack check and represent its late morestack call as a root-free statepoint.
 inline constexpr StringLiteral NoSplitAttr = "go-nosplit";
 // A //go:systemstack function checks g.stackguard1 and traps through
 // runtime.morestackc if it is entered on an ordinary goroutine stack.
 inline constexpr StringLiteral SystemStackAttr = "go-systemstack";
 inline constexpr uint64_t StackGrowthStatepointID =
     GoObj::StackGrowthStatepointID;
-// A nosplit function has no morestack call at which to attach the entry
-// argument map. Targets use a zero-byte STACKMAP with this internal ID at PC
-// zero; the GoALLC stack-map bridge translates it to the ordinary entry map.
-inline constexpr uint64_t NoSplitEntryStackMapID = 0x476f4e6f53706c74ULL;
+// Every GoObj Go function carries its entry argument pointer map in a
+// zero-byte STACKMAP. It is function metadata, not a stack-growth callsite.
+inline constexpr uint64_t EntryArgsStackMapID = GoObj::EntryArgsStackMapID;
 
 inline bool isGoABIInternalCallingConv(CallingConv::ID CC) {
   return CC == CallingConv::GoABIInternal;

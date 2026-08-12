@@ -5,7 +5,7 @@
 declare goabiinternal void @"runtime.GC"()
 
 define goabiinternal void @subword_homes(i8 %a, i16 %b)
-    "frame-pointer"="non-leaf" "go-stack-growth-statepoint" {
+    "frame-pointer"="non-leaf" {
 entry:
   call goabiinternal void @"runtime.GC"()
   ret void
@@ -13,7 +13,7 @@ entry:
 
 define goabiinternal i64 @large_home_offset([4096 x i64] %stackarg,
                                              i64 %regarg)
-    "frame-pointer"="non-leaf" "go-stack-growth-statepoint" {
+    "frame-pointer"="non-leaf" {
 entry:
   call goabiinternal void @"runtime.GC"()
   ret i64 %regarg
@@ -21,7 +21,7 @@ entry:
 
 define goabiinternal i64 @large_home_boundary([4094 x i64] %stackarg,
                                                i64 %regarg)
-    "frame-pointer"="non-leaf" "go-stack-growth-statepoint" {
+    "frame-pointer"="non-leaf" {
 entry:
   call goabiinternal void @"runtime.GC"()
   ret i64 %regarg

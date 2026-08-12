@@ -3,12 +3,13 @@
 ; RUN:   -stop-after=prolog-epilog < %s | FileCheck %s --check-prefixes=CHECK,A64
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -verify-machineinstrs \
 ; RUN:   -stop-after=prolog-epilog < %s | FileCheck %s
+; RUN: llc -mtriple=aarch64-apple-darwin-goobj -filetype=obj -o %t.a64.o %s
+; RUN: llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.x86.o %s
 
 declare goabiinternal void @callee(ptr)
-declare goabi0 void @callee.abi0(ptr)
+declare goabi0 void @"callee.abi0<ABI0>"(ptr)
 
-define goabiinternal void @nosplit(ptr %pointer) "go-nosplit"
-    "go-stack-growth-statepoint" {
+define goabiinternal void @nosplit(ptr %pointer) "go-nosplit" {
 entry:
   %slot = alloca ptr, align 8
   store volatile ptr %pointer, ptr %slot, align 8
@@ -16,8 +17,7 @@ entry:
   ret void
 }
 
-define goabiinternal void @split(ptr %pointer)
-    "go-stack-growth-statepoint" {
+define goabiinternal void @split(ptr %pointer) {
 entry:
   %slot = alloca ptr, align 8
   store volatile ptr %pointer, ptr %slot, align 8
@@ -25,23 +25,25 @@ entry:
   ret void
 }
 
-define goabiinternal void @nosplit_abi0_call(ptr %pointer) "go-nosplit"
-    "go-stack-growth-statepoint" {
+define goabiinternal void @nosplit_abi0_call(ptr %pointer) "go-nosplit" {
 entry:
   %closure = alloca [3 x ptr], align 8
   %code = getelementptr [3 x ptr], ptr %closure, i64 0, i64 0
   %context = getelementptr [3 x ptr], ptr %closure, i64 0, i64 1
   store volatile ptr @callee, ptr %code, align 8
   store volatile ptr %pointer, ptr %context, align 8
-  call goabi0 void @callee.abi0(ptr %closure)
+  call goabi0 void @"callee.abi0<ABI0>"(ptr %closure)
   ret void
 }
 
 ; CHECK-LABEL: name: nosplit
-; CHECK: STACKMAP
+; CHECK: STACKMAP 5147419139155979380, 0
+; CHECK-NOT: STATEPOINT 5147424658422983495
 ; CHECK-NOT: runtime.morestack
 ; CHECK-LABEL: name: split
-; CHECK: runtime.morestack_noctxt
+; CHECK-DAG: STACKMAP 5147419139155979380, 0
+; CHECK-DAG: STATEPOINT 5147424658422983495, 0, 0,
+; CHECK-DAG: runtime.morestack_noctxt
 
 ; A64-LABEL: name: nosplit_abi0_call
 ; A64: stackSize: 48

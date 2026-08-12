@@ -9105,13 +9105,9 @@ static SDValue lowerAArch64GoFormalArguments(
       ArgTys, getAArch64GoReturnTypes(F.getReturnType(), F.getAttributes()),
       DAG.getDataLayout(), ABIConfig);
 
-  std::optional<goabi::EntryArgsInfo> EntryArgs;
-  SmallBitVector MatchedEntryArgWords;
-  if (F.hasFnAttribute(goabi::StackGrowthStatepointAttr)) {
-    EntryArgs = goabi::computeEntryArgsInfo(ArgTys, Layout, DAG.getDataLayout(),
-                                            ABIConfig);
-    MatchedEntryArgWords.resize(EntryArgs->NumBits);
-  }
+  goabi::EntryArgsInfo EntryArgs = goabi::computeEntryArgsInfo(
+      ArgTys, Layout, DAG.getDataLayout(), ABIConfig);
+  SmallBitVector MatchedEntryArgWords(EntryArgs.NumBits);
 
   SmallVector<uint64_t, 8> ArgSpillOffsets(ArgTys.size(), 0);
   uint64_t SpillOffset = Layout.SpillAreaOffset;
@@ -9130,10 +9126,8 @@ static SDValue lowerAArch64GoFormalArguments(
   unsigned StackBias = getAArch64GoStackBias(F.getCallingConv());
 
   auto RecordPointerSlots = [&](int FI, uint64_t ArgOffset, uint64_t Size) {
-    if (!EntryArgs)
-      return;
-    uint64_t PointerSize = EntryArgs->PointerSize;
-    for (uint32_t Word : EntryArgs->PointerWords) {
+    uint64_t PointerSize = EntryArgs.PointerSize;
+    for (uint32_t Word : EntryArgs.PointerWords) {
       uint64_t PointerOffset = static_cast<uint64_t>(Word) * PointerSize;
       if (PointerOffset < ArgOffset ||
           PointerOffset + PointerSize > ArgOffset + Size)
@@ -9222,12 +9216,10 @@ static SDValue lowerAArch64GoFormalArguments(
     }
   }
 
-  if (EntryArgs) {
-    for (uint32_t Word : EntryArgs->PointerWords)
-      if (!MatchedEntryArgWords.test(Word))
-        report_fatal_error(
-            "Go entry argument pointer word has no AArch64 fixed object");
-  }
+  for (uint32_t Word : EntryArgs.PointerWords)
+    if (!MatchedEntryArgWords.test(Word))
+      report_fatal_error(
+          "Go entry argument pointer word has no AArch64 fixed object");
 
   return Chain;
 }

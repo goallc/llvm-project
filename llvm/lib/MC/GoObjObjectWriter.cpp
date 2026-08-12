@@ -691,17 +691,18 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   SmallVector<FunctionAllocaRecord, 4> FunctionAllocaRecords;
   uint64_t OrdinaryEntryCount =
       llvm::count_if(ResolvedEntries, [](const ResolvedEntry &Resolved) {
-        return Resolved.Entry->ID != GoObj::StackGrowthStatepointID;
+        return Resolved.Entry->ID != GoObj::EntryArgsStackMapID &&
+               Resolved.Entry->ID != GoObj::StackGrowthStatepointID;
       });
   std::optional<GoObjOpenDeferRecord> FunctionOpenDefer;
   uint64_t OpenDeferEntryCount = 0;
   for (const ResolvedEntry &Resolved : ResolvedEntries) {
     std::optional<GoObjOpenDeferRecord> Record =
         parseOpenDeferRecord(*Resolved.Entry);
-    if (Resolved.Entry->ID == GoObj::StackGrowthStatepointID) {
+    if (Resolved.Entry->ID == GoObj::EntryArgsStackMapID ||
+        Resolved.Entry->ID == GoObj::StackGrowthStatepointID) {
       if (Record)
-        report_fatal_error(
-            "GoObj stack-growth statepoint contains open-defer state");
+        report_fatal_error("GoObj entry metadata contains open-defer state");
       continue;
     }
     if (!Record)
@@ -757,6 +758,7 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   }
 
   auto BuildPair = [&](const MCContext::GoObjStackMapEntry &Entry) {
+    bool IsEntryArgs = Entry.ID == GoObj::EntryArgsStackMapID;
     bool IsStackGrowth = Entry.ID == GoObj::StackGrowthStatepointID;
     GoObjStackMapPair Pair{SmallVector<uint8_t, 8>(ArgsBytesPerBitmap, 0),
                            SmallVector<uint8_t, 8>(LocalsBytesPerBitmap, 0)};
@@ -769,9 +771,8 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
         ArrayRef(Entry.Locations).drop_front(Entry.NumDeoptLocations);
     for (const GoObjAllocaPtrMapRecord &Record :
          parseAllocaPtrMapRecords(Entry)) {
-      if (IsStackGrowth)
-        report_fatal_error(
-            "GoObj stack-growth statepoint contains an alloca ptrmap");
+      if (IsEntryArgs || IsStackGrowth)
+        report_fatal_error("GoObj entry metadata contains an alloca ptrmap");
       MCContext::GoObjStackMapLocation RecordBase =
           NormalizeFrameLocation(Record.Base);
       if (RecordBase.Size != PointerSize ||
@@ -914,16 +915,18 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
             ", offset=" + Twine(Loc.Offset));
 
       for (int64_t WordOffset : *PointerWordOffsets) {
-        if (IsStackGrowth) {
+        if (IsEntryArgs) {
           std::optional<uint32_t> Bit = goobj::classifyStackGrowthStackMapSlot(
               WordOffset, PointerSize, FrameLayout.EntryArgsStart, ArgSize);
           if (Loc.Type != MCContext::GoObjStackMapLocation::Indirect || !Bit)
             report_fatal_error(
-                "GoObj stack-growth statepoint contains an invalid argument "
+                "GoObj entry argument stack map contains an invalid argument "
                 "pointer slot");
           Pair.Args[*Bit / 8] |= uint8_t(1u << (*Bit % 8));
           continue;
         }
+        if (IsStackGrowth)
+          report_fatal_error("GoObj stack-growth statepoint is not root-free");
 
         goobj::StackMapSlot Slot = goobj::classifyOrdinaryStackMapSlot(
             WordOffset, Loc.Type == MCContext::GoObjStackMapLocation::Indirect,
@@ -958,24 +961,45 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
     return Pair;
   };
 
+  const ResolvedEntry *EntryArgsEntry = nullptr;
   const ResolvedEntry *StackGrowthEntry = nullptr;
   for (const ResolvedEntry &Resolved : ResolvedEntries) {
-    if (Resolved.Entry->ID != GoObj::StackGrowthStatepointID)
+    if (Resolved.Entry->ID == GoObj::EntryArgsStackMapID) {
+      if (EntryArgsEntry)
+        report_fatal_error(
+            "GoObj function contains multiple entry argument stack maps");
+      EntryArgsEntry = &Resolved;
       continue;
-    if (StackGrowthEntry)
-      report_fatal_error(
-          "GoObj function contains multiple stack-growth statepoints");
-    StackGrowthEntry = &Resolved;
+    }
+    if (Resolved.Entry->ID == GoObj::StackGrowthStatepointID) {
+      if (StackGrowthEntry)
+        report_fatal_error(
+            "GoObj function contains multiple stack-growth statepoints");
+      StackGrowthEntry = &Resolved;
+    }
   }
-  if (!StackGrowthEntry)
-    report_fatal_error("GoObj function has no stack-growth statepoint");
+  if (!EntryArgsEntry)
+    report_fatal_error("GoObj function has no entry argument stack map");
+  if (EntryArgsEntry->Entry->IsIndirectCall)
+    report_fatal_error("GoObj entry argument stack map is a callsite");
+
+  bool IsNoSplit = (Function.Flag & GoObj::SymFlagNoSplit) != 0;
+  if (IsNoSplit && StackGrowthEntry)
+    report_fatal_error("GoObj nosplit function has a stack-growth statepoint");
+  if (!IsNoSplit && !StackGrowthEntry)
+    report_fatal_error("GoObj split function has no stack-growth statepoint");
+  if (StackGrowthEntry && (StackGrowthEntry->Entry->NumDeoptLocations != 0 ||
+                           !StackGrowthEntry->Entry->Locations.empty()))
+    report_fatal_error("GoObj stack-growth statepoint is not root-free");
 
   SmallVector<GoObjStackMapPair, 8> Pairs;
-  Pairs.push_back(BuildPair(*StackGrowthEntry->Entry));
+  Pairs.push_back(BuildPair(*EntryArgsEntry->Entry));
   SmallVector<GoObjPCTabEntry, 16> PCDataEntries;
   std::optional<uint64_t> PreviousCallsitePC;
   SmallVector<uint32_t, 4> IndirectCallOffsets;
   for (const ResolvedEntry &Resolved : ResolvedEntries) {
+    if (Resolved.Entry->ID == GoObj::EntryArgsStackMapID)
+      continue;
     if (PreviousCallsitePC && *PreviousCallsitePC == Resolved.CallsitePC)
       report_fatal_error("GoObj statepoint callsites have duplicate PCs");
     PreviousCallsitePC = Resolved.CallsitePC;

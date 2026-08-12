@@ -66,10 +66,10 @@ join:
 ; CHECK: nonpkgref {{[0-9]+}}: runtime.morestack_noctxt abi=0 type=0 size=0
 ; CHECK: nonpkgref {{[0-9]+}}: runtime.morestack abi=0 type=0 size=0
 ; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=funcinfo target= args={{[1-9][0-9]*}} locals={{[1-9][0-9][0-9][0-9][0-9]*}}
-; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000
-; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000
+; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data={{[0-9a-f]+}}
+; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data={{[0-9a-f]+}}
 ; CHECK: aux 0.{{[0-9]+}}: type=pcdata target= pc=[0-{{[0-9]+}}:-1]
-; CHECK-NEXT: aux 0.{{[0-9]+}}: type=pcdata target= pc=[0-{{[0-9]+}}:0]
+; CHECK-NEXT: aux 0.{{[0-9]+}}: type=pcdata target= pc=[0-{{[0-9]+}}:-1,{{[0-9]+}}-{{[0-9]+}}:0]
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.morestack_noctxt
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.morestack
 ; The outgoing frame is 72 bytes of alignment/register-argument space plus 23
@@ -112,11 +112,12 @@ join:
 ; PEI: fixedStack:
 ; PEI-NEXT: - { id: 0, type: spill-slot, offset: 0, size: 8
 ; PEI: MOV64mr {{.*rsp}}, 1, {{.*noreg}}, 8, {{.*noreg}}, {{.*rax}}
-; PEI: CALL64pcrel32 &"runtime.morestack_noctxt<ABI0>"
+; PEI: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack_noctxt<ABI0>"
 ; PEI: {{.*rax}} = MOV64rm {{.*rsp}}, 1, {{.*noreg}}, 8, {{.*noreg}}
 
 ; PEI-LABEL: name: big_closure_frame
-; PEI: CALL64pcrel32 &"runtime.morestack<ABI0>", {{.*}}implicit $rdx
+; PEI: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack<ABI0>",
+; PEI-SAME: implicit $rdx
 
 ; PEI-LABEL: name: large_outgoing_frame
 ; PEI: stackSize: 0

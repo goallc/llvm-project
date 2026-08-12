@@ -55,17 +55,20 @@ done:
 
 ; COMMON: file-count: 1
 ; COMMON-NEXT: file 0: {{.*}}cdebug.c
-; COMMON: hasheddef-count: 4
+; COMMON: hasheddef-count: 6
 ; COMMON: nonpkgdef-count: 0
-; X86: hash 0: a21821a940f91b1a89b53461b092269e
-; X86-NEXT: hash 1: f9ced9dca799cb1833bd530443fd1f9e
-; X86-NEXT: hash 2: 2677aa574f61b902c15de55332c2c2ea
-; ARM64: hash 0: 105a58e8d53963b571ff833d8449eeda
-; ARM64-NEXT: hash 1: 3bef6118e9cf260f78533cdf1a6375ec
-; ARM64-NEXT: hash 2: 3a577c7591ae76fd8b51f8e7ea4ac9d8
-; COMMON-NEXT: hash 3: 4b0e7a681c0340c9a97ef4802a3af2f8
-; COMMON: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000 pkg=hashed sym=3
-; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000 pkg=hashed sym=3
+; X86: hash 0: b3ea8d63c732dc89ddc1accf4206a7bb
+; X86-NEXT: hash 1: 2f05713252bb1b9673be7cf4f639e025
+; X86-NEXT: hash 2: 2d9a46e763fb2afa2f6bf504aef97634
+; ARM64: hash 0: f933ff4cb32d167004d69c3934a4e464
+; ARM64-NEXT: hash 1: cbf5923fb1da07cca3254ffa87009bcc
+; ARM64-NEXT: hash 2: ba4d2125291d2de2a0592dd4bdc679e7
+; COMMON-NEXT: hash 3: 90eb4206729e98003d69bb53d855ecb0
+; COMMON-NEXT: hash 4: 4b0e7a681c0340c9a97ef4802a3af2f8
+; X86-NEXT: hash 5: e612ab846d7727f8f5dc337465ae0fd2
+; ARM64-NEXT: hash 5: b0262f452ad49f58880d4f82680e3f08
+; COMMON: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=010000000100000000 pkg=hashed sym=3
+; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=0100000000000000 pkg=hashed sym=4
 ; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcsp target= pc={{.*}} pkg=hashed sym=0
 ; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcfile target= pc={{.*}}:0{{.*}} pkg=hashed sym=0
 ; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcline target= pc=[
@@ -74,4 +77,4 @@ done:
 ; COMMON-SAME: :5
 ; COMMON-SAME: pkg=hashed sym=1
 ; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc={{.*}} pkg=hashed sym=2
-; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc={{.*}} pkg=hashed sym=0
+; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc={{.*}} pkg=hashed sym=5

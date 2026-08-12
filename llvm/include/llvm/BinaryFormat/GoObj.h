@@ -23,8 +23,14 @@ namespace GoObj {
 // Go function. GoObj serialization strips it and records ABI0 separately.
 inline constexpr char ABI0SymbolSuffix[] = "<ABI0>";
 
+// "GoNoSplt" encoded as the stable STACKMAP identifier for the function-level
+// entry argument pointer map. This record is metadata-only: it is present for
+// both split and nosplit functions and never denotes a callsite.
+inline constexpr uint64_t EntryArgsStackMapID = 0x476f4e6f53706c74ULL;
+
 // "GoStackG" encoded as the stable statepoint identifier for the pre-frame
-// runtime.morestack slow path.
+// runtime.morestack slow path. Unlike EntryArgsStackMapID, this record denotes
+// a real callsite and is absent from nosplit functions.
 inline constexpr uint64_t StackGrowthStatepointID = 0x476f537461636b47ULL;
 
 // GoALLC encodes pointer maps for fixed allocas as a self-describing suffix of

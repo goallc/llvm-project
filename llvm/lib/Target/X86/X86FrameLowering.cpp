@@ -218,32 +218,16 @@ static void emitGoRegSpills(MachineFunction &MF, MachineBasicBlock &MBB,
     }
 }
 
+static bool isGoObjGoFunction(const MachineFunction &MF) {
+  const Function &F = MF.getFunction();
+  return MF.getTarget().getTargetTriple().isOSBinFormatGoObj() &&
+         MF.getTarget().getTargetTriple().getArch() == Triple::x86_64 &&
+         goabi::isGoCallingConv(F.getCallingConv()) && !F.isVarArg();
+}
+
 static bool shouldEmitGoStackCheck(const MachineFunction &MF) {
-  const Function &F = MF.getFunction();
-  return MF.getTarget().getTargetTriple().isOSBinFormatGoObj() &&
-         MF.getTarget().getTargetTriple().getArch() == Triple::x86_64 &&
-         goabi::isGoCallingConv(F.getCallingConv()) && !F.isVarArg() &&
-         !F.hasFnAttribute(goabi::NoSplitAttr);
-}
-
-static bool isGoNoSplitFunction(const MachineFunction &MF) {
-  const Function &F = MF.getFunction();
-  return MF.getTarget().getTargetTriple().isOSBinFormatGoObj() &&
-         MF.getTarget().getTargetTriple().getArch() == Triple::x86_64 &&
-         goabi::isGoCallingConv(F.getCallingConv()) && !F.isVarArg() &&
-         F.hasFnAttribute(goabi::NoSplitAttr);
-}
-
-static void checkGoStackGrowthStatepointContract(const MachineFunction &MF) {
-  if (!shouldEmitGoStackCheck(MF) ||
-      MF.getFunction().hasFnAttribute(goabi::StackGrowthStatepointAttr))
-    return;
-  for (const MachineBasicBlock &MBB : MF)
-    for (const MachineInstr &MI : MBB)
-      if (MI.getOpcode() == TargetOpcode::STATEPOINT)
-        report_fatal_error(
-            "GoObj statepoints require the go-stack-growth-statepoint "
-            "function attribute");
+  return isGoObjGoFunction(MF) &&
+         !MF.getFunction().hasFnAttribute(goabi::NoSplitAttr);
 }
 
 static bool hasGoClosureContext(const Function &F) {
@@ -267,37 +251,12 @@ static MachineInstrBuilder buildGoStackGrowthStatepoint(MachineFunction &MF,
   auto AddConstant = [&](uint64_t Value) {
     Statepoint.addImm(StackMaps::ConstantOp).addImm(Value);
   };
-  const MachineFrameInfo &MFI = MF.getFrameInfo();
-  ArrayRef<X86MachineFunctionInfo::GoArgPointerSlot> PointerSlots =
-      MF.getInfo<X86MachineFunctionInfo>()->getGoArgPointerSlots();
-  uint64_t PointerSize = MF.getDataLayout().getPointerSize();
-  // X86 entry RSP points at the return address for both Go calling
-  // conventions. GoArgPointerSlot::EntryOffset is a physical stack-map
-  // location even though the corresponding fixed home uses a logical Go
-  // argument-area offset.
-  int64_t StackMapBias = static_cast<int64_t>(PointerSize);
   AddConstant(MF.getFunction().getCallingConv());
-  AddConstant(0);                   // Statepoint flags.
-  AddConstant(0);                   // Deopt arguments.
-  AddConstant(PointerSlots.size()); // GC pointers.
-  for (const X86MachineFunctionInfo::GoArgPointerSlot &Slot : PointerSlots) {
-    if (!MFI.isFixedObjectIndex(Slot.FrameIndex))
-      report_fatal_error(
-          "X86 Go entry argument pointer slot is not a fixed object");
-    int64_t ExpectedOffset =
-        StackMapBias + static_cast<int64_t>(Slot.ArgWord) * PointerSize;
-    if (PointerSize == 0 || Slot.EntryOffset != ExpectedOffset)
-      report_fatal_error(
-          "X86 Go entry argument pointer slot has invalid RSP offset");
-    Statepoint.addImm(StackMaps::IndirectMemRefOp)
-        .addImm(PointerSize)
-        .addReg(X86::RSP)
-        .addImm(Slot.EntryOffset);
-  }
-  AddConstant(0);                   // GC allocas.
-  AddConstant(PointerSlots.size()); // GC base/derived map entries.
-  for (uint64_t I = 0; I != PointerSlots.size(); ++I)
-    Statepoint.addImm(I).addImm(I);
+  AddConstant(0); // Statepoint flags.
+  AddConstant(0); // Deopt arguments.
+  AddConstant(0); // GC pointers. Entry args live in EntryArgsStackMapID.
+  AddConstant(0); // GC allocas.
+  AddConstant(0); // GC base/derived map entries.
   Statepoint
       .addRegMask(
           MF.getSubtarget<X86Subtarget>()
@@ -320,24 +279,23 @@ getGoStackCheckEntryMBB(MachineFunction &MF, MachineBasicBlock &FallbackMBB) {
   return FallbackMBB;
 }
 
-static void emitGoNoSplitEntryStackMap(MachineFunction &MF,
-                                       MachineBasicBlock &FallbackMBB) {
-  if (!isGoNoSplitFunction(MF) ||
-      !MF.getFunction().hasFnAttribute(goabi::StackGrowthStatepointAttr))
+static void emitGoEntryArgsStackMap(MachineFunction &MF,
+                                    MachineBasicBlock &FallbackMBB) {
+  if (!isGoObjGoFunction(MF))
     return;
   for (const MachineBasicBlock &MBB : MF)
     for (const MachineInstr &MI : MBB)
       if (MI.getOpcode() == TargetOpcode::STACKMAP &&
           MI.getOperand(0).isImm() &&
           static_cast<uint64_t>(MI.getOperand(0).getImm()) ==
-              goabi::NoSplitEntryStackMapID)
+              goabi::EntryArgsStackMapID)
         return;
 
   MachineBasicBlock &EntryMBB = getGoStackCheckEntryMBB(MF, FallbackMBB);
   const X86InstrInfo &TII = *MF.getSubtarget<X86Subtarget>().getInstrInfo();
   MachineInstrBuilder StackMap = BuildMI(EntryMBB, EntryMBB.begin(), DebugLoc(),
                                          TII.get(TargetOpcode::STACKMAP))
-                                     .addImm(goabi::NoSplitEntryStackMapID)
+                                     .addImm(goabi::EntryArgsStackMapID)
                                      .addImm(0);
   const MachineFrameInfo &MFI = MF.getFrameInfo();
   uint64_t PointerSize = MF.getDataLayout().getPointerSize();
@@ -426,10 +384,7 @@ static void emitGoStackCheck(MachineFunction &MF,
   MF.push_front(CheckMBB);
   MF.push_front(StartMBB);
 
-  bool UseStackGrowthStatepoint =
-      MF.getFunction().hasFnAttribute(goabi::StackGrowthStatepointAttr);
   bool IsSystemStack = MF.getFunction().hasFnAttribute(goabi::SystemStackAttr);
-  checkGoStackGrowthStatepointContract(MF);
 
   unsigned ScratchReg = X86::R12;
   if (StackSize <= GoStackSmall) {
@@ -468,12 +423,7 @@ static void emitGoStackCheck(MachineFunction &MF,
                               : HasClosureContext ? "runtime.morestack"
                                                   : "runtime.morestack_noctxt";
   MachineInstrBuilder Morestack =
-      UseStackGrowthStatepoint
-          ? buildGoStackGrowthStatepoint(MF, *MorestackMBB, DL, TII,
-                                         MorestackName)
-          : BuildMI(MorestackMBB, DL, TII.get(X86::CALL64pcrel32));
-  if (!UseStackGrowthStatepoint)
-    goabi::addGoObjABI0Callee(Morestack, MF, MorestackName);
+      buildGoStackGrowthStatepoint(MF, *MorestackMBB, DL, TII, MorestackName);
   if (HasClosureContext && !IsSystemStack)
     Morestack.addReg(X86::RDX, RegState::Implicit);
   emitGoRegSpills(MF, *MorestackMBB, Homes, /*Reload=*/true);
@@ -2017,7 +1967,9 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF,
   DebugLoc DL;
   Register ArgBaseReg;
 
-  emitGoNoSplitEntryStackMap(MF, MBB);
+  if (isGoObjGoFunction(MF) && MF.getFrameInfo().hasVarSizedObjects())
+    report_fatal_error("GoObj stack growth does not support dynamic allocas");
+  emitGoEntryArgsStackMap(MF, MBB);
   emitGoStackCheck(MF, MBB);
 
   // Emit extra prolog for argument stack slot reference.
@@ -3718,11 +3670,6 @@ bool X86FrameLowering::restoreCalleeSavedRegisters(
 void X86FrameLowering::determineCalleeSaves(MachineFunction &MF,
                                             BitVector &SavedRegs,
                                             RegScavenger *RS) const {
-  // Reject an incomplete Go statepoint contract before callee-save spill
-  // placement. On X86, statepoints can otherwise require an aligned vector
-  // spill and trip MachineFrameInfo's non-realignment assertion before the
-  // morestack prologue gets a chance to report the actionable error.
-  checkGoStackGrowthStatepointContract(MF);
   TargetFrameLowering::determineCalleeSaves(MF, SavedRegs, RS);
 
   // Spill the BasePtr if it's used.
