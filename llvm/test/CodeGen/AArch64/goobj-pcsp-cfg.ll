@@ -34,17 +34,17 @@ attributes #0 = { "frame-pointer"="non-leaf" }
 !0 = !{!"branch_weights", i32 1, i32 1000}
 
 ; MachineBlockPlacement puts the cold then block after the epilogue and return,
-; but the block is reached while the frame is still active. The later
+; but the block is reached while the frame is still active. The pre-frame
 ; morestack block has no frame.
 ;
 ; ASM-LABEL: pcsp_cfg:
+; ASM: bl "runtime.morestack_noctxt<ABI0>"
 ; ASM: bl runtime.panicmem
 ; ASM: ldr x30, [sp], #32
 ; ASM: ret
 ; ASM: bl runtime.GC
-; ASM: bl "runtime.morestack_noctxt<ABI0>"
 
-; The return occupies PC quanta 18-19. The out-of-line then block at 19-23
-; restores the 32-byte frame depth before morestack restores the entry depth.
-; OBJ: aux 0.3: type=pcsp target= pc=[0-4:0,4-18:32,18-19:0,19-23:32,23-30:0]
-; OBJ: reloc 0.2: off=76 size=4 type=9 add=0 target=runtime.GC
+; The stack check and morestack path occupy PC quanta 0-11. The return occupies
+; 25-26; the out-of-line then block at 26-30 executes with the frame active.
+; OBJ: aux 0.3: type=pcsp target= pc=[0-11:0,11-25:32,25-26:0,26-30:32]
+; OBJ: reloc 0.3: off=104 size=4 type=9 add=0 target=runtime.GC

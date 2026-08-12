@@ -25,5 +25,5 @@ attributes #0 = { "go-async-unsafe" }
 
 ; OBJ: symdef 0: main.safe
 ; OBJ: symdef 1: main.async_unsafe
-; OBJ: aux 0.6: type=pcdata target= pc=[0-32:-1]
-; OBJ: aux 1.14: type=pcdata target= pc=[0-29:-2]
+; OBJ: aux 0.6: type=pcdata target= pc=[0-48:-1]
+; OBJ: aux 1.14: type=pcdata target= pc=[0-33:-2]

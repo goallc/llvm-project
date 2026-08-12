@@ -205,13 +205,9 @@ static SDValue lowerX86GoFormalArguments(
       ArgTys, getX86GoReturnTypes(F.getReturnType(), F.getAttributes()),
       DAG.getDataLayout(), ABIConfig);
 
-  std::optional<goabi::EntryArgsInfo> EntryArgs;
-  SmallBitVector MatchedEntryArgWords;
-  if (F.hasFnAttribute(goabi::StackGrowthStatepointAttr)) {
-    EntryArgs = goabi::computeEntryArgsInfo(ArgTys, Layout, DAG.getDataLayout(),
-                                            ABIConfig);
-    MatchedEntryArgWords.resize(EntryArgs->NumBits);
-  }
+  goabi::EntryArgsInfo EntryArgs = goabi::computeEntryArgsInfo(
+      ArgTys, Layout, DAG.getDataLayout(), ABIConfig);
+  SmallBitVector MatchedEntryArgWords(EntryArgs.NumBits);
 
   SmallVector<uint64_t, 8> ArgSpillOffsets(ArgTys.size(), 0);
   uint64_t SpillOffset = Layout.SpillAreaOffset;
@@ -230,11 +226,10 @@ static SDValue lowerX86GoFormalArguments(
   FuncInfo->clearGoArgHomes();
   FuncInfo->clearGoArgPointerSlots();
 
-  auto RecordPointerSlots = [&](int FI, uint64_t ArgOffset, uint64_t Size) {
-    if (!EntryArgs)
-      return;
-    uint64_t PointerSize = EntryArgs->PointerSize;
-    for (uint32_t Word : EntryArgs->PointerWords) {
+  auto RecordPointerSlots = [&](int FI, uint64_t ArgOffset, uint64_t Size,
+                                bool IsLiveAtEntry) {
+    uint64_t PointerSize = EntryArgs.PointerSize;
+    for (uint32_t Word : EntryArgs.PointerWords) {
       uint64_t PointerOffset = static_cast<uint64_t>(Word) * PointerSize;
       if (PointerOffset < ArgOffset ||
           PointerOffset + PointerSize > ArgOffset + Size)
@@ -256,9 +251,10 @@ static SDValue lowerX86GoFormalArguments(
           !isInt<32>(EntryOffset))
         report_fatal_error(
             "Go entry argument pointer word has an invalid X86 fixed object");
-      FuncInfo->addGoArgPointerSlot(
-          FI, static_cast<uint32_t>(WithinObject),
-          static_cast<int32_t>(EntryOffset), Word);
+      if (IsLiveAtEntry)
+        FuncInfo->addGoArgPointerSlot(
+            FI, static_cast<uint32_t>(WithinObject),
+            static_cast<int32_t>(EntryOffset), Word);
       MatchedEntryArgWords.set(Word);
     }
   };
@@ -294,7 +290,14 @@ static SDValue lowerX86GoFormalArguments(
                                     /*IsImmutable=*/true);
     X86MachineFunctionInfo::GoArgHome &Home =
         FuncInfo->addGoArgHome(Group.Index, HomeFI);
-    RecordPointerSlots(HomeFI, LogicalHomeOffset, ArgLayout.Size);
+    // LLVM may replace an unused incoming pointer with poison at every call
+    // edge. Keep its ABI home so morestack can preserve the complete register
+    // assignment, but do not expose that uninitialized word as a GC root.
+    bool IsLiveAtEntry = llvm::any_of(
+        ArrayRef(Ins).slice(Group.Start, Group.End - Group.Start),
+        [](const ISD::InputArg &In) { return In.Used; });
+    RecordPointerSlots(HomeFI, LogicalHomeOffset, ArgLayout.Size,
+                       IsLiveAtEntry);
 
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
@@ -335,12 +338,10 @@ static SDValue lowerX86GoFormalArguments(
     }
   }
 
-  if (EntryArgs) {
-    for (uint32_t Word : EntryArgs->PointerWords)
-      if (!MatchedEntryArgWords.test(Word))
-        report_fatal_error(
-            "Go entry argument pointer word has no X86 fixed object");
-  }
+  for (uint32_t Word : EntryArgs.PointerWords)
+    if (!MatchedEntryArgWords.test(Word))
+      report_fatal_error(
+          "Go entry argument pointer word has no X86 fixed object");
 
   return Chain;
 }

@@ -45,5 +45,5 @@ attributes #0 = { "frame-pointer"="non-leaf" }
 
 ; The return occupies PC quanta 57-58. The out-of-line then block at 59-66
 ; restores the 24-byte frame depth before morestack restores the entry depth.
-; OBJ: aux 0.3: type=pcsp target= pc=[0-7:0,7-14:8,14-57:24,57-58:8,58-59:0,59-66:24,66-92:0]
+; OBJ: aux 0.3: type=pcsp target= pc=[0-7:0,7-14:8,14-57:24,57-58:8,58-59:0,59-66:24,66-98:0]
 ; OBJ: reloc 0.2: off=60 size=4 type=7 add=0 target=runtime.GC
