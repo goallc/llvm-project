@@ -21,15 +21,17 @@ jobs:
     if: github.repository == 'goallc/llvm-project'
     name: linux-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 180
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
             runner: ubuntu-22.04
+            build_jobs: 2
           - arch: arm64
             runner: ubuntu-22.04-arm
+            build_jobs: auto
     env:
       LLVM_SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       LLVM_ARTIFACT_PREFIX: ${{ github.event_name == 'pull_request' && format('goallc-llvm-pr{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) || format('goallc-llvm-commit-{0}', github.sha) }}
@@ -64,16 +66,30 @@ jobs:
           restore-keys: |
             goallc-llvm23-ci-linux-${{ matrix.arch }}-
 
+      - name: Report runner resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "architecture=$(uname -m)"
+          echo "logical_cpus=$(nproc)"
+          free -h
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+
       - name: Build installed LLVM payload
         shell: bash
         run: |
           set -euo pipefail
           asset_base="$LLVM_ARTIFACT_PREFIX-linux-${{ matrix.arch }}"
+          build_jobs='${{ matrix.build_jobs }}'
+          if [[ "$build_jobs" == auto ]]; then
+            build_jobs="$(nproc)"
+          fi
+          echo "Building LLVM with $build_jobs parallel jobs"
           GOALLC_LLVM_BUILD="$RUNNER_TEMP/goallc-llvm-build" \
           GOALLC_LLVM_INSTALL="$RUNNER_TEMP/$asset_base" \
           GOALLC_BUILD_TYPE=Release \
           GOALLC_LLVM_TARGETS='X86;AArch64' \
-          GOALLC_BUILD_JOBS="$(nproc)" \
+          GOALLC_BUILD_JOBS="$build_jobs" \
           GOALLC_CCACHE=/usr/bin/ccache \
             ./llvm/utils/goallc/build-payload.bash
 
