@@ -984,6 +984,8 @@ static uint64_t getAttrKindEncoding(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_NOUNDEF;
   case Attribute::ByRef:
     return bitc::ATTR_KIND_BYREF;
+  case Attribute::GoRet:
+    return bitc::ATTR_KIND_GORET;
   case Attribute::MustProgress:
     return bitc::ATTR_KIND_MUSTPROGRESS;
   case Attribute::PresplitCoroutine:

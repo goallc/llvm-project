@@ -332,6 +332,7 @@ public:
     bool IsNest : 1;
     bool IsByVal : 1;
     bool IsByRef : 1;
+    bool IsGoRet : 1;
     bool IsInAlloca : 1;
     bool IsPreallocated : 1;
     bool IsReturned : 1;
@@ -341,13 +342,15 @@ public:
     bool IsCFGuardTarget : 1;
     MaybeAlign Alignment = std::nullopt;
     Type *IndirectType = nullptr;
+    unsigned GoRetIndex = 0;
 
     ArgListEntry(Value *Val, SDValue Node, Type *Ty)
         : Val(Val), Node(Node), OrigTy(Ty), Ty(Ty), IsSExt(false),
           IsZExt(false), IsNoExt(false), IsInReg(false), IsSRet(false),
-          IsNest(false), IsByVal(false), IsByRef(false), IsInAlloca(false),
-          IsPreallocated(false), IsReturned(false), IsSwiftSelf(false),
-          IsSwiftAsync(false), IsSwiftError(false), IsCFGuardTarget(false) {}
+          IsNest(false), IsByVal(false), IsByRef(false), IsGoRet(false),
+          IsInAlloca(false), IsPreallocated(false), IsReturned(false),
+          IsSwiftSelf(false), IsSwiftAsync(false), IsSwiftError(false),
+          IsCFGuardTarget(false) {}
 
     explicit ArgListEntry(Value *Val, SDValue Node = SDValue())
         : ArgListEntry(Val, Node, Val->getType()) {}
@@ -1689,8 +1692,8 @@ public:
   /// extending
   virtual bool shouldExtendGSIndex(EVT VT, EVT &EltTy) const { return false; }
 
-  // Returns true if Extend can be folded into the index of a masked gathers/scatters
-  // on this target.
+  // Returns true if Extend can be folded into the index of a masked
+  // gathers/scatters on this target.
   virtual bool shouldRemoveExtendFromGSIndex(SDValue Extend, EVT DataVT) const {
     return false;
   }

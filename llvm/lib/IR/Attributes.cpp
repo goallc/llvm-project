@@ -265,6 +265,10 @@ Attribute Attribute::getWithByRefType(LLVMContext &Context, Type *Ty) {
   return get(Context, ByRef, Ty);
 }
 
+Attribute Attribute::getWithGoRetType(LLVMContext &Context, Type *Ty) {
+  return get(Context, GoRet, Ty);
+}
+
 Attribute Attribute::getWithPreallocatedType(LLVMContext &Context, Type *Ty) {
   return get(Context, Preallocated, Ty);
 }
@@ -1216,6 +1220,10 @@ Type *AttributeSet::getByRefType() const {
   return SetNode ? SetNode->getAttributeType(Attribute::ByRef) : nullptr;
 }
 
+Type *AttributeSet::getGoRetType() const {
+  return SetNode ? SetNode->getAttributeType(Attribute::GoRet) : nullptr;
+}
+
 Type *AttributeSet::getByValType() const {
   return SetNode ? SetNode->getAttributeType(Attribute::ByVal) : nullptr;
 }
@@ -1489,9 +1497,7 @@ std::string AttributeSetNode::getAsString(bool InAttrGrp) const {
 
 /// Map from AttributeList index to the internal array index. Adding one happens
 /// to work, because -1 wraps around to 0.
-static unsigned attrIdxToArrayIdx(unsigned Index) {
-  return Index + 1;
-}
+static unsigned attrIdxToArrayIdx(unsigned Index) { return Index + 1; }
 
 AttributeListImpl::AttributeListImpl(ArrayRef<AttributeSet> Sets)
     : NumAttrSets(Sets.size()) {
@@ -1538,7 +1544,6 @@ bool AttributeListImpl::hasAttrSomewhere(Attribute::AttrKind Kind,
 
   return true;
 }
-
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
 LLVM_DUMP_METHOD void AttributeListImpl::dump() const {
@@ -1596,7 +1601,8 @@ AttributeList::get(LLVMContext &C,
   // list.
   SmallVector<std::pair<unsigned, AttributeSet>, 8> AttrPairVec;
   for (ArrayRef<std::pair<unsigned, Attribute>>::iterator I = Attrs.begin(),
-         E = Attrs.end(); I != E; ) {
+                                                          E = Attrs.end();
+       I != E;) {
     unsigned Index = I->first;
     SmallVector<Attribute, 4> AttrVec;
     while (I != E && I->first == Index) {
@@ -2003,6 +2009,10 @@ Type *AttributeList::getParamByRefType(unsigned Index) const {
   return getAttributes(Index + FirstArgIndex).getByRefType();
 }
 
+Type *AttributeList::getParamGoRetType(unsigned Index) const {
+  return getAttributes(Index + FirstArgIndex).getGoRetType();
+}
+
 Type *AttributeList::getParamPreallocatedType(unsigned Index) const {
   return getAttributes(Index + FirstArgIndex).getPreallocatedType();
 }
@@ -2256,7 +2266,8 @@ AttrBuilder &AttrBuilder::addStackAlignmentAttr(MaybeAlign Align) {
 }
 
 AttrBuilder &AttrBuilder::addDereferenceableAttr(uint64_t Bytes) {
-  if (Bytes == 0) return *this;
+  if (Bytes == 0)
+    return *this;
 
   return addRawIntAttr(Attribute::Dereferenceable, Bytes);
 }
@@ -2680,8 +2691,8 @@ static void adjustCallerStackProbes(Function &Caller, const Function &Callee) {
 /// If the inlined function defines the size of guard region
 /// on the stack, then ensure that the calling function defines a guard region
 /// that is no larger.
-static void
-adjustCallerStackProbeSize(Function &Caller, const Function &Callee) {
+static void adjustCallerStackProbeSize(Function &Caller,
+                                       const Function &Callee) {
   Attribute CalleeAttr = Callee.getFnAttribute("stack-probe-size");
   if (CalleeAttr.isValid()) {
     Attribute CallerAttr = Caller.getFnAttribute("stack-probe-size");
@@ -2708,8 +2719,8 @@ adjustCallerStackProbeSize(Function &Caller, const Function &Callee) {
 /// to merge the attribute this way. Heuristics that would use
 /// min-legal-vector-width to determine inline compatibility would need to be
 /// handled as part of inline cost analysis.
-static void
-adjustMinLegalVectorWidth(Function &Caller, const Function &Callee) {
+static void adjustMinLegalVectorWidth(Function &Caller,
+                                      const Function &Callee) {
   Attribute CallerAttr = Caller.getFnAttribute("min-legal-vector-width");
   if (CallerAttr.isValid()) {
     Attribute CalleeAttr = Callee.getFnAttribute("min-legal-vector-width");
@@ -2729,21 +2740,19 @@ adjustMinLegalVectorWidth(Function &Caller, const Function &Callee) {
 
 /// If the inlined function has null_pointer_is_valid attribute,
 /// set this attribute in the caller post inlining.
-static void
-adjustNullPointerValidAttr(Function &Caller, const Function &Callee) {
+static void adjustNullPointerValidAttr(Function &Caller,
+                                       const Function &Callee) {
   if (Callee.nullPointerIsDefined() && !Caller.nullPointerIsDefined()) {
     Caller.addFnAttr(Attribute::NullPointerIsValid);
   }
 }
 
 struct EnumAttr {
-  static bool isSet(const Function &Fn,
-                    Attribute::AttrKind Kind) {
+  static bool isSet(const Function &Fn, Attribute::AttrKind Kind) {
     return Fn.hasFnAttribute(Kind);
   }
 
-  static void set(Function &Fn,
-                  Attribute::AttrKind Kind, bool Val) {
+  static void set(Function &Fn, Attribute::AttrKind Kind, bool Val) {
     if (Val)
       Fn.addFnAttr(Kind);
     else
@@ -2752,14 +2761,12 @@ struct EnumAttr {
 };
 
 struct StrBoolAttr {
-  static bool isSet(const Function &Fn,
-                    StringRef Kind) {
+  static bool isSet(const Function &Fn, StringRef Kind) {
     auto A = Fn.getFnAttribute(Kind);
     return A.getValueAsString() == "true";
   }
 
-  static void set(Function &Fn,
-                  StringRef Kind, bool Val) {
+  static void set(Function &Fn, StringRef Kind, bool Val) {
     Fn.addFnAttr(Kind, Val ? "true" : "false");
   }
 };

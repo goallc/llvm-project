@@ -25,7 +25,7 @@ entry:
 }
 
 define goabiinternal void @write_memory_result(
-    ptr byref(%large) align 8 %result) #0 {
+    ptr goret(%large) "goretindex"="0" align 8 %result) {
 ; CHECK-LABEL: write_memory_result:
 ; CHECK: movq $42, 8(%rsp)
 ; CHECK-NEXT: retq
@@ -42,9 +42,7 @@ define goabiinternal i64 @copy_large_memory_result() {
 entry:
   %result = alloca %large, align 8
   call goabiinternal void @write_memory_result(
-      ptr byref(%large) align 8 %result) #0
+      ptr goret(%large) "goretindex"="0" align 8 %result)
   %value = load i64, ptr %result, align 8
   ret i64 %value
 }
-
-attributes #0 = { "go_memory_results"="0" }

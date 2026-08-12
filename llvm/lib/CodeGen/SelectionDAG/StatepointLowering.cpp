@@ -1019,7 +1019,7 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
                (isa<AllocaInst>(V) ||
                 (isa<Argument>(V) &&
                  (cast<Argument>(V)->hasByValAttr() ||
-                  cast<Argument>(V)->hasAttribute(Attribute::ByRef)) &&
+                  cast<Argument>(V)->hasGoRetAttr()) &&
                  FuncInfo.getArgumentFrameIndex(cast<Argument>(V)) ==
                      cast<FrameIndexSDNode>(SDV)->getIndex()))) {
       Record.type = RecordType::FrameIndexRemat;

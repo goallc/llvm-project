@@ -415,13 +415,19 @@ static bool isUnsupportedFunction(Function *F) {
   // behavior may be undefined.
   // We don't call those functions for now to prevent UB from happening.
   auto IsABIAttribute = [](AttributeSet A) {
-    static const Attribute::AttrKind ABIAttrs[] = {
-        Attribute::StructRet,      Attribute::ByVal,
-        Attribute::InAlloca,       Attribute::InReg,
-        Attribute::StackAlignment, Attribute::SwiftSelf,
-        Attribute::SwiftAsync,     Attribute::SwiftError,
-        Attribute::Preallocated,   Attribute::ByRef,
-        Attribute::ZExt,           Attribute::SExt};
+    static const Attribute::AttrKind ABIAttrs[] = {Attribute::StructRet,
+                                                   Attribute::ByVal,
+                                                   Attribute::InAlloca,
+                                                   Attribute::InReg,
+                                                   Attribute::StackAlignment,
+                                                   Attribute::SwiftSelf,
+                                                   Attribute::SwiftAsync,
+                                                   Attribute::SwiftError,
+                                                   Attribute::Preallocated,
+                                                   Attribute::ByRef,
+                                                   Attribute::GoRet,
+                                                   Attribute::ZExt,
+                                                   Attribute::SExt};
 
     return llvm::any_of(ABIAttrs, [&](Attribute::AttrKind kind) {
       return A.hasAttribute(kind);

@@ -84,6 +84,9 @@ public:
   /// Return true if this argument has the byref attribute.
   LLVM_ABI bool hasByRefAttr() const;
 
+  /// Return true if this argument has the goret attribute.
+  LLVM_ABI bool hasGoRetAttr() const;
+
   /// Return true if this argument has the swiftself attribute.
   LLVM_ABI bool hasSwiftSelfAttr() const;
 
@@ -100,8 +103,8 @@ public:
   LLVM_ABI uint64_t getPassPointeeByValueCopySize(const DataLayout &DL) const;
 
   /// Return true if this argument has the byval, sret, inalloca, preallocated,
-  /// or byref attribute. These attributes represent arguments being passed by
-  /// value (which may or may not involve a stack copy)
+  /// byref, or goret attribute. These attributes represent values with an
+  /// associated in-memory ABI type.
   LLVM_ABI bool hasPointeeInMemoryValueAttr() const;
 
   /// If hasPointeeInMemoryValueAttr returns true, the in-memory ABI type is
@@ -121,6 +124,9 @@ public:
 
   /// If this is a byref argument, return its type.
   LLVM_ABI Type *getParamByRefType() const;
+
+  /// If this is a goret argument, return its logical result type.
+  LLVM_ABI Type *getParamGoRetType() const;
 
   /// If this is an inalloca argument, return its type.
   LLVM_ABI Type *getParamInAllocaType() const;
@@ -188,6 +194,6 @@ public:
   }
 };
 
-} // End llvm namespace
+} // namespace llvm
 
 #endif

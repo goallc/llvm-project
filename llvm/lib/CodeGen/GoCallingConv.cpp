@@ -222,6 +222,22 @@ bool hasTupleResultsAttr(const Function &F) {
   return F.hasFnAttribute(TupleResultsAttr);
 }
 
+static unsigned getGoRetIndex(Attribute Attr) {
+  unsigned Index;
+  if (!Attr.isStringAttribute() ||
+      Attr.getValueAsString().getAsInteger(10, Index))
+    report_fatal_error("invalid or missing goretindex parameter attribute");
+  return Index;
+}
+
+unsigned getGoRetIndex(const Argument &Arg) {
+  return getGoRetIndex(Arg.getAttributes().getAttribute(GoRetIndexAttr));
+}
+
+unsigned getGoRetIndex(const CallBase &CB, unsigned ArgNo) {
+  return getGoRetIndex(CB.getParamAttr(ArgNo, GoRetIndexAttr));
+}
+
 bool hasTupleResultsAttr(const CallBase &CB) {
   if (CB.hasFnAttr(TupleResultsAttr))
     return true;
@@ -249,52 +265,26 @@ void getReturnTypes(Type *ReturnType, bool TupleResults,
   ResultTys.push_back(ReturnType);
 }
 
-SmallVector<unsigned, 4> getMemoryResultIndices(const AttributeList &Attrs,
-                                                unsigned DirectResultCount,
-                                                unsigned MemoryResultCount) {
-  Attribute Attr = Attrs.getFnAttr(MemoryResultsAttr);
-  if (!Attr.isValid()) {
-    if (MemoryResultCount != 0)
-      report_fatal_error("Go memory result carriers have no index attribute");
-    return {};
-  }
-  if (!Attr.isStringAttribute() || Attr.getValueAsString().empty())
-    report_fatal_error("invalid Go memory result index attribute");
-
-  unsigned TotalResultCount = DirectResultCount + MemoryResultCount;
-  SmallVector<unsigned, 4> Indices;
-  SmallVector<StringRef, 4> Fields;
-  Attr.getValueAsString().split(Fields, ',', /*MaxSplit=*/-1,
-                                /*KeepEmpty=*/true);
-  for (StringRef Field : Fields) {
-    unsigned Index;
-    if (Field.empty() || Field.getAsInteger(10, Index) ||
-        Index >= TotalResultCount ||
-        (!Indices.empty() && Index <= Indices.back()))
-      report_fatal_error("invalid Go memory result index attribute");
-    Indices.push_back(Index);
-  }
-  if (Indices.size() != MemoryResultCount)
-    report_fatal_error("Go memory result index count mismatch");
-  return Indices;
-}
-
-void getReturnTypes(Type *ReturnType, const AttributeList &Attrs,
-                    ArrayRef<Type *> MemoryResultTys,
+void getReturnTypes(Type *ReturnType, bool TupleResults,
+                    ArrayRef<MemoryResult> MemoryResults,
                     SmallVectorImpl<Type *> &ResultTys) {
   SmallVector<Type *, 8> DirectResultTys;
-  getReturnTypes(ReturnType, hasTupleResultsAttr(Attrs), DirectResultTys);
-  SmallVector<unsigned, 4> MemoryIndices = getMemoryResultIndices(
-      Attrs, DirectResultTys.size(), MemoryResultTys.size());
-  if (MemoryIndices.empty()) {
+  getReturnTypes(ReturnType, TupleResults, DirectResultTys);
+  if (MemoryResults.empty()) {
     ResultTys.append(DirectResultTys.begin(), DirectResultTys.end());
     return;
   }
 
-  unsigned TotalResultCount = DirectResultTys.size() + MemoryResultTys.size();
+  unsigned TotalResultCount = DirectResultTys.size() + MemoryResults.size();
   ResultTys.assign(TotalResultCount, nullptr);
-  for (auto [Index, Ty] : llvm::zip_equal(MemoryIndices, MemoryResultTys))
-    ResultTys[Index] = Ty;
+  std::optional<unsigned> Previous;
+  for (const MemoryResult &Result : MemoryResults) {
+    if (!Result.Ty || Result.Index >= TotalResultCount ||
+        ResultTys[Result.Index] || (Previous && *Previous >= Result.Index))
+      report_fatal_error("invalid Go memory result carrier");
+    ResultTys[Result.Index] = Result.Ty;
+    Previous = Result.Index;
+  }
   auto Direct = DirectResultTys.begin();
   for (Type *&Ty : ResultTys)
     if (!Ty)

@@ -32,7 +32,7 @@ class Type;
 namespace goabi {
 
 inline constexpr StringLiteral TupleResultsAttr = "go_results_tuple";
-inline constexpr StringLiteral MemoryResultsAttr = "go_memory_results";
+inline constexpr StringLiteral GoRetIndexAttr = "goretindex";
 inline constexpr StringLiteral PadTypeName = "go.abi.pad";
 // Target frame lowering must not synthesize a morestack edge for such a
 // function. GoObj Go functions otherwise use the native Go default: emit a
@@ -91,6 +91,11 @@ struct CallLayout {
   uint64_t TotalStackSize = 0;
 };
 
+struct MemoryResult {
+  unsigned Index = 0;
+  Type *Ty = nullptr;
+};
+
 struct EntryArgsInfo {
   uint32_t PointerSize = 0;
   uint64_t ArgSize = 0;
@@ -101,6 +106,8 @@ struct EntryArgsInfo {
 bool hasTupleResultsAttr(const AttributeList &Attrs);
 bool hasTupleResultsAttr(const Function &F);
 bool hasTupleResultsAttr(const CallBase &CB);
+unsigned getGoRetIndex(const Argument &Arg);
+unsigned getGoRetIndex(const CallBase &CB, unsigned ArgNo);
 /// Return the logical Go ABI type of an IR parameter. Non-empty values that
 /// the Go frontend assigned wholly to memory use a typed byval pointer as the
 /// LLVM carrier; direct parameters retain their logical type.
@@ -110,11 +117,8 @@ SmallBitVector getPaddingPieces(Type *Ty);
 
 void getReturnTypes(Type *ReturnType, bool TupleResults,
                     SmallVectorImpl<Type *> &ResultTys);
-SmallVector<unsigned, 4> getMemoryResultIndices(const AttributeList &Attrs,
-                                                unsigned DirectResultCount,
-                                                unsigned MemoryResultCount);
-void getReturnTypes(Type *ReturnType, const AttributeList &Attrs,
-                    ArrayRef<Type *> MemoryResultTys,
+void getReturnTypes(Type *ReturnType, bool TupleResults,
+                    ArrayRef<MemoryResult> MemoryResults,
                     SmallVectorImpl<Type *> &ResultTys);
 
 CallLayout computeCallLayout(ArrayRef<Type *> ArgTys,

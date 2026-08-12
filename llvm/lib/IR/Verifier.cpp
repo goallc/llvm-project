@@ -55,6 +55,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
@@ -459,6 +460,8 @@ private:
   bool verifyAttributeCount(AttributeList Attrs, unsigned Params);
   void verifyAttributeTypes(AttributeSet Attrs, const Value *V);
   void verifyParameterAttrs(AttributeSet Attrs, Type *Ty, const Value *V);
+  void verifyGoRetAttrs(FunctionType *FT, AttributeList Attrs,
+                        CallingConv::ID CC, const Value *V);
   void checkUnsignedBaseTenFuncAttr(AttributeList Attrs, StringRef Attr,
                                     const Value *V);
   void verifyFunctionAttrs(FunctionType *FT, AttributeList Attrs,
@@ -548,7 +551,8 @@ void Verifier::visit(Instruction &I) {
   InstVisitor<Verifier>::visit(I);
 }
 
-// Helper to iterate over indirect users. By returning false, the callback can ask to stop traversing further.
+// Helper to iterate over indirect users. By returning false, the callback can
+// ask to stop traversing further.
 static void forEachUser(const Value *User,
                         SmallPtrSet<const Value *, 32> &Visited,
                         llvm::function_ref<bool(const Value *)> Callback) {
@@ -764,8 +768,8 @@ void Verifier::visitGlobalVariable(const GlobalVariable &GV) {
     }
   }
 
-  if (GV.hasName() && (GV.getName() == "llvm.used" ||
-                       GV.getName() == "llvm.compiler.used")) {
+  if (GV.hasName() &&
+      (GV.getName() == "llvm.used" || GV.getName() == "llvm.compiler.used")) {
     Check(!GV.hasInitializer() || GV.hasAppendingLinkage(),
           "invalid linkage for intrinsic global variable", &GV);
     Check(GV.materialized_use_empty(),
@@ -2098,6 +2102,16 @@ void Verifier::verifyParameterAttrs(AttributeSet Attrs, Type *Ty,
         "'byref', and 'sret' are incompatible!",
         V);
 
+  if (Attrs.hasAttribute(Attribute::GoRet))
+    Check(AttrCount == 0,
+          "Attribute 'goret' is incompatible with other ABI parameter "
+          "attributes!",
+          V);
+
+  Check(Attrs.hasAttribute(Attribute::GoRet) ==
+            Attrs.hasAttribute("goretindex"),
+        "Attributes 'goret' and 'goretindex' must be used together!", V);
+
   Check(!(Attrs.hasAttribute(Attribute::InAlloca) &&
           Attrs.hasAttribute(Attribute::ReadOnly)),
         "Attributes "
@@ -2184,6 +2198,16 @@ void Verifier::verifyParameterAttrs(AttributeSet Attrs, Type *Ty,
                 (1ULL << 32),
             "huge 'byref' arguments are unsupported", V);
     }
+    if (Attrs.hasAttribute(Attribute::GoRet)) {
+      Type *GoRetTy = Attrs.getAttribute(Attribute::GoRet).getValueAsType();
+      SmallPtrSet<Type *, 4> Visited;
+      Check(GoRetTy->isSized(&Visited),
+            "Attribute 'goret' does not support unsized types!", V);
+      Check(!GoRetTy->containsNonLocalTargetExtType(),
+            "'goret' argument has illegal target extension type", V);
+      Check(DL.getTypeAllocSize(GoRetTy).getKnownMinValue() < (1ULL << 32),
+            "huge 'goret' arguments are unsupported", V);
+    }
     if (Attrs.hasAttribute(Attribute::InAlloca)) {
       SmallPtrSet<Type *, 4> Visited;
       Check(Attrs.getInAllocaType()->isSized(&Visited),
@@ -2223,6 +2247,55 @@ void Verifier::verifyParameterAttrs(AttributeSet Attrs, Type *Ty,
         Attrs.getAttribute(Attribute::Range).getValueAsConstantRange();
     Check(Ty->isIntOrIntVectorTy(CR.getBitWidth()),
           "Range bit width must match type bit width!", V);
+  }
+}
+
+void Verifier::verifyGoRetAttrs(FunctionType *FT, AttributeList Attrs,
+                                CallingConv::ID CC, const Value *V) {
+  unsigned MemoryResultCount = 0;
+  for (unsigned I = 0; I != FT->getNumParams(); ++I)
+    MemoryResultCount += Attrs.hasParamAttr(I, Attribute::GoRet);
+  if (MemoryResultCount == 0)
+    return;
+
+  Check(CC == CallingConv::GoABIInternal || CC == CallingConv::GoABI0,
+        "'goret' is only valid with a Go calling convention", V);
+
+  unsigned DirectResultCount = 0;
+  if (!FT->getReturnType()->isVoidTy()) {
+    if (Attrs.hasFnAttr("go_results_tuple")) {
+      auto *ST = dyn_cast<StructType>(FT->getReturnType());
+      Check(ST, "'go_results_tuple' requires a struct return type", V);
+      if (!ST)
+        return;
+      DirectResultCount = ST->getNumElements();
+    } else {
+      DirectResultCount = 1;
+    }
+  }
+
+  unsigned TotalResultCount = DirectResultCount + MemoryResultCount;
+  SmallBitVector Seen(TotalResultCount);
+  std::optional<uint64_t> Previous;
+  for (unsigned I = 0; I != FT->getNumParams(); ++I) {
+    AttributeSet ParamAttrs = Attrs.getParamAttrs(I);
+    if (!ParamAttrs.hasAttribute(Attribute::GoRet))
+      continue;
+    StringRef IndexValue =
+        ParamAttrs.getAttribute("goretindex").getValueAsString();
+    uint64_t Index;
+    Check(!IndexValue.getAsInteger(10, Index),
+          "'goretindex' must be an unsigned decimal integer", V);
+    if (IndexValue.getAsInteger(10, Index))
+      continue;
+    Check(Index < TotalResultCount, "'goretindex' is out of range", V);
+    if (Index >= TotalResultCount)
+      continue;
+    Check(!Seen.test(Index), "duplicate 'goretindex'", V);
+    Check(!Previous || *Previous < Index,
+          "'goretindex' values must be in increasing parameter order", V);
+    Seen.set(Index);
+    Previous = Index;
   }
 }
 
@@ -3056,6 +3129,7 @@ void Verifier::visitFunction(const Function &F) {
 
   // Check function attributes.
   verifyFunctionAttrs(FT, Attrs, &F, IsIntrinsic, /* IsInlineAsm */ false);
+  verifyGoRetAttrs(FT, Attrs, F.getCallingConv(), &F);
 
   // On function declarations/definitions, we do not support the builtin
   // attribute. We do not check this in VerifyFunctionAttrs since that is
@@ -3413,8 +3487,7 @@ void Verifier::visitBasicBlock(BasicBlock &BB) {
   }
 
   // Check that all instructions have their parent pointers set up correctly.
-  for (auto &I : BB)
-  {
+  for (auto &I : BB) {
     Check(I.getParent() == &BB, "Instruction has bogus parent pointer!");
   }
 
@@ -3889,6 +3962,7 @@ void Verifier::visitCallBase(CallBase &Call) {
 
   // Verify call attributes.
   verifyFunctionAttrs(FTy, Attrs, &Call, IsIntrinsic, Call.isInlineAsm());
+  verifyGoRetAttrs(FTy, Attrs, Call.getCallingConv(), &Call);
 
   // Conservatively check the inalloca argument.
   // We have a bug if we can find that there is an underlying alloca without
@@ -3906,7 +3980,8 @@ void Verifier::visitCallBase(CallBase &Call) {
   for (unsigned i = 0, e = FTy->getNumParams(); i != e; ++i) {
     if (Call.paramHasAttr(i, Attribute::SwiftError)) {
       Value *SwiftErrorArg = Call.getArgOperand(i);
-      if (auto AI = dyn_cast<AllocaInst>(SwiftErrorArg->stripInBoundsOffsets())) {
+      if (auto AI =
+              dyn_cast<AllocaInst>(SwiftErrorArg->stripInBoundsOffsets())) {
         Check(AI->isSwiftError(),
               "swifterror argument for call has mismatched alloca", AI, Call);
         continue;
@@ -4137,25 +4212,34 @@ void Verifier::verifyTailCCMustTailAttrs(const AttrBuilder &Attrs,
         Twine("preallocated attribute not allowed in ") + Context);
   Check(!Attrs.contains(Attribute::ByRef),
         Twine("byref attribute not allowed in ") + Context);
+  Check(!Attrs.contains(Attribute::GoRet),
+        Twine("goret attribute not allowed in ") + Context);
+  Check(!Attrs.contains("goretindex"),
+        Twine("goretindex attribute not allowed in ") + Context);
 }
 
-static AttrBuilder getParameterABIAttributes(LLVMContext& C, unsigned I, AttributeList Attrs) {
+static AttrBuilder getParameterABIAttributes(LLVMContext &C, unsigned I,
+                                             AttributeList Attrs) {
   static const Attribute::AttrKind ABIAttrs[] = {
       Attribute::StructRet,  Attribute::ByVal,          Attribute::InAlloca,
       Attribute::InReg,      Attribute::StackAlignment, Attribute::SwiftSelf,
       Attribute::SwiftAsync, Attribute::SwiftError,     Attribute::Preallocated,
-      Attribute::ByRef};
+      Attribute::ByRef,      Attribute::GoRet};
   AttrBuilder Copy(C);
   for (auto AK : ABIAttrs) {
     Attribute Attr = Attrs.getParamAttrs(I).getAttribute(AK);
     if (Attr.isValid())
       Copy.addAttribute(Attr);
   }
+  Attribute GoRetIndex = Attrs.getParamAttrs(I).getAttribute("goretindex");
+  if (GoRetIndex.isValid())
+    Copy.addAttribute(GoRetIndex);
 
-  // `align` is ABI-affecting only in combination with `byval` or `byref`.
+  // `align` is ABI-affecting only in combination with an indirect ABI value.
   if (Attrs.hasParamAttr(I, Attribute::Alignment) &&
       (Attrs.hasParamAttr(I, Attribute::ByVal) ||
-       Attrs.hasParamAttr(I, Attribute::ByRef)))
+       Attrs.hasParamAttr(I, Attribute::ByRef) ||
+       Attrs.hasParamAttr(I, Attribute::GoRet)))
     Copy.addAlignmentAttr(Attrs.getParamAlignment(I));
   return Copy;
 }
@@ -4196,12 +4280,14 @@ void Verifier::verifyMustTailCall(CallInst &CI) {
     // - Only sret, byval, swiftself, and swiftasync ABI-impacting attributes
     //   are allowed in swifttailcc call
     for (unsigned I = 0, E = CallerTy->getNumParams(); I != E; ++I) {
-      AttrBuilder ABIAttrs = getParameterABIAttributes(F->getContext(), I, CallerAttrs);
+      AttrBuilder ABIAttrs =
+          getParameterABIAttributes(F->getContext(), I, CallerAttrs);
       SmallString<32> Context{CCName, StringRef(" musttail caller")};
       verifyTailCCMustTailAttrs(ABIAttrs, Context);
     }
     for (unsigned I = 0, E = CalleeTy->getNumParams(); I != E; ++I) {
-      AttrBuilder ABIAttrs = getParameterABIAttributes(F->getContext(), I, CalleeAttrs);
+      AttrBuilder ABIAttrs =
+          getParameterABIAttributes(F->getContext(), I, CalleeAttrs);
       SmallString<32> Context{CCName, StringRef(" musttail callee")};
       verifyTailCCMustTailAttrs(ABIAttrs, Context);
     }
@@ -4225,8 +4311,10 @@ void Verifier::verifyMustTailCall(CallInst &CI) {
   // - All ABI-impacting function attributes, such as sret, byval, inreg,
   //   returned, preallocated, and inalloca, must match.
   for (unsigned I = 0, E = CallerTy->getNumParams(); I != E; ++I) {
-    AttrBuilder CallerABIAttrs = getParameterABIAttributes(F->getContext(), I, CallerAttrs);
-    AttrBuilder CalleeABIAttrs = getParameterABIAttributes(F->getContext(), I, CalleeAttrs);
+    AttrBuilder CallerABIAttrs =
+        getParameterABIAttributes(F->getContext(), I, CallerAttrs);
+    AttrBuilder CalleeABIAttrs =
+        getParameterABIAttributes(F->getContext(), I, CalleeAttrs);
     Check(CallerABIAttrs == CalleeABIAttrs,
           "cannot guarantee tail call due to mismatched ABI impacting "
           "function attributes",

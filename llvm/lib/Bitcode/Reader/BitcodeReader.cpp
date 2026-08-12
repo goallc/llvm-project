@@ -2302,6 +2302,8 @@ static Attribute::AttrKind getAttrFromCode(uint64_t Code) {
     return Attribute::NoUndef;
   case bitc::ATTR_KIND_BYREF:
     return Attribute::ByRef;
+  case bitc::ATTR_KIND_GORET:
+    return Attribute::GoRet;
   case bitc::ATTR_KIND_MUSTPROGRESS:
     return Attribute::MustProgress;
   case bitc::ATTR_KIND_HOT:
@@ -3658,8 +3660,8 @@ Error BitcodeReader::parseConstants() {
           {(unsigned)Record[0], (unsigned)Record[1], (unsigned)Record[2]});
       break;
     }
-    case bitc::CST_CODE_CE_EXTRACTELT
-        : { // CE_EXTRACTELT: [opty, opval, opty, opval]
+    case bitc::CST_CODE_CE_EXTRACTELT: { // CE_EXTRACTELT: [opty, opval, opty,
+                                         // opval]
       if (Record.size() < 3)
         return error("Invalid extractelement constexpr record");
       unsigned OpTyID = Record[0];
@@ -3682,8 +3684,8 @@ Error BitcodeReader::parseConstants() {
                                   {(unsigned)Record[1], IdxRecord});
       break;
     }
-    case bitc::CST_CODE_CE_INSERTELT
-        : { // CE_INSERTELT: [opval, opval, opty, opval]
+    case bitc::CST_CODE_CE_INSERTELT: { // CE_INSERTELT: [opval, opval, opty,
+                                        // opval]
       VectorType *OpTy = dyn_cast<VectorType>(CurTy);
       if (Record.size() < 3 || !OpTy)
         return error("Invalid insertelement constexpr record");
@@ -5566,7 +5568,8 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
       break;
     }
 
-    case bitc::FUNC_CODE_INST_VSELECT: {// VSELECT: [ty,opval,opval,predty,pred]
+    case bitc::FUNC_CODE_INST_VSELECT: { // VSELECT:
+                                         // [ty,opval,opval,predty,pred]
       // new form of select
       // handles select i1 or select [N x i1]
       unsigned OpNum = 0;
@@ -5636,7 +5639,8 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
       break;
     }
 
-    case bitc::FUNC_CODE_INST_SHUFFLEVEC: {// SHUFFLEVEC: [opval,ty,opval,opval]
+    case bitc::FUNC_CODE_INST_SHUFFLEVEC: { // SHUFFLEVEC:
+                                            // [opval,ty,opval,opval]
       unsigned OpNum = 0;
       Value *Vec1, *Vec2, *Mask;
       unsigned Vec1TypeID;
@@ -5659,10 +5663,11 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
       break;
     }
 
-    case bitc::FUNC_CODE_INST_CMP:   // CMP: [opty, opval, opval, pred]
-      // Old form of ICmp/FCmp returning bool
-      // Existed to differentiate between icmp/fcmp and vicmp/vfcmp which were
-      // both legal on vectors but had different behaviour.
+    case bitc::FUNC_CODE_INST_CMP: // CMP: [opty, opval, opval, pred]
+                                   // Old form of ICmp/FCmp returning bool
+                                   // Existed to differentiate between icmp/fcmp
+                                   // and vicmp/vfcmp which were both legal on
+                                   // vectors but had different behaviour.
     case bitc::FUNC_CODE_INST_CMP2: { // CMP2: [opty, opval, opval, pred]
       // FCmp/ICmp returning bool or vector of bool
 
@@ -6499,7 +6504,8 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
       break;
     }
     case bitc::FUNC_CODE_INST_STORE:
-    case bitc::FUNC_CODE_INST_STORE_OLD: { // STORE2:[ptrty, ptr, val, align, vol]
+    case bitc::FUNC_CODE_INST_STORE_OLD: { // STORE2:[ptrty, ptr, val, align,
+                                           // vol]
       unsigned OpNum = 0;
       Value *Val, *Ptr;
       unsigned PtrTypeID, ValTypeID;
