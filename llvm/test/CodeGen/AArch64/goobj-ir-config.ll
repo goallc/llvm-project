@@ -6,7 +6,7 @@
 ; settings in the IR. llc must not need a matching set of -goobj-* flags.
 target triple = "aarch64-apple-darwin-goobj"
 
-define void @main.main() {
+define goabiinternal void @main.main() {
 entry:
   ret void
 }

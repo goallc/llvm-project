@@ -21,7 +21,7 @@ entry:
   ret i64 %value
 }
 
-define goabi0 void @abi0_pointer_arguments(ptr %first, ptr %second, ptr %third)
+define goabi0 void @"abi0_pointer_arguments<ABI0>"(ptr %first, ptr %second, ptr %third)
     "frame-pointer"="non-leaf" "go-stack-growth-statepoint" {
 entry:
   call goabiinternal void @use_three_pointers(
@@ -78,7 +78,7 @@ entry:
 
 ; CHECK-LABEL: name: morestack_statepoint
 ; CHECK-NOT: ANNOTATION_LABEL
-; CHECK: STATEPOINT 5147424658422983495, 0, 0, &runtime.morestack_noctxt,
+; CHECK: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack_noctxt<ABI0>",
 ; CHECK-SAME: 2, 22, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0,
 ; CHECK-SAME: csr_64_go, implicit-def $rsp, implicit-def $ssp
 ; CHECK-NOT: CALL64pcrel32
@@ -90,12 +90,12 @@ entry:
 ; GoABI0 fixed homes retain their logical argument-area offsets, while loads
 ; and stack-map locations include the physical entry RSP return-address word.
 
-; CHECK-LABEL: name: abi0_pointer_arguments
+; CHECK-LABEL: name: 'abi0_pointer_arguments<ABI0>'
 ; CHECK: fixedStack:
 ; CHECK: offset: 16, size: 8
 ; CHECK: offset: 8, size: 8
 ; CHECK: offset: 0, size: 8
-; CHECK: STATEPOINT 5147424658422983495, 0, 0, &runtime.morestack_noctxt,
+; CHECK: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack_noctxt<ABI0>",
 ; CHECK-SAME: 2, 23, 2, 0, 2, 0, 2, 3,
 ; CHECK-SAME: 1, 8, $rsp, 8, 1, 8, $rsp, 16, 1, 8, $rsp, 24,
 ; CHECK-SAME: 2, 0, 2, 3, 0, 0, 1, 1, 2, 2,
@@ -106,7 +106,7 @@ entry:
 
 ; CHECK-LABEL: name: initialized_pointer_result
 ; CHECK: MOV64mr $rsp, 1, $noreg, 72, $noreg, $rax
-; CHECK: STATEPOINT 5147424658422983495, 0, 0, &runtime.morestack_noctxt,
+; CHECK: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack_noctxt<ABI0>",
 ; CHECK-SAME: 2, 22, 2, 0, 2, 0, 2, 1,
 ; CHECK-SAME: 1, 8, $rsp, 72,
 ; CHECK-SAME: 2, 0, 2, 1, 0, 0,
@@ -115,21 +115,21 @@ entry:
 ; CHECK-LABEL: name: partial_aggregate_result
 ; CHECK: MOV64mr $rsp, 1, $noreg, 80, $noreg, $rax
 ; CHECK: MOV64mr $rsp, 1, $noreg, 88, $noreg, $rbx
-; CHECK: STATEPOINT 5147424658422983495, 0, 0, &runtime.morestack_noctxt,
+; CHECK: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack_noctxt<ABI0>",
 ; CHECK-SAME: 2, 22, 2, 0, 2, 0, 2, 2,
 ; CHECK-SAME: 1, 8, $rsp, 80, 1, 8, $rsp, 88,
 ; CHECK-SAME: 2, 0, 2, 2, 0, 0, 1, 1,
 ; CHECK-SAME: csr_64_go, implicit-def $rsp, implicit-def $ssp
 
 ; CHECK-LABEL: name: scalar_stack_argument
-; CHECK: STATEPOINT 5147424658422983495, 0, 0, &runtime.morestack_noctxt,
+; CHECK: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack_noctxt<ABI0>",
 ; CHECK-SAME: 2, 22, 2, 0, 2, 0, 2, 1,
 ; CHECK-SAME: 1, 8, $rsp, 64,
 ; CHECK-SAME: 2, 0, 2, 1, 0, 0,
 ; CHECK-SAME: csr_64_go, implicit-def $rsp, implicit-def $ssp
 
 ; CHECK-LABEL: name: aggregate_stack_argument
-; CHECK: STATEPOINT 5147424658422983495, 0, 0, &runtime.morestack_noctxt,
+; CHECK: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack_noctxt<ABI0>",
 ; CHECK-SAME: 2, 22, 2, 0, 2, 0, 2, 2,
 ; CHECK-SAME: 1, 8, $rsp, 48, 1, 8, $rsp, 64,
 ; CHECK-SAME: 2, 0, 2, 2, 0, 0, 1, 1,

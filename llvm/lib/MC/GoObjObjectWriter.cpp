@@ -1512,9 +1512,26 @@ void GoObjObjectWriter::recordRelocation(const MCFragment &F,
 uint64_t GoObjObjectWriter::writeObject() {
   const uint64_t StartOffset = OS.tell();
 
+  StringRef ABI0Suffix = GoObj::ABI0SymbolSuffix;
+  auto HasABI0Suffix = [&](const MCSymbol *Sym) {
+    return Sym && Sym->getName().ends_with(ABI0Suffix);
+  };
   auto GetSymbolName = [&](const MCSymbol *Sym) -> StringRef {
-    StringRef Name = Asm->getContext().getGoObjSymbolName(Sym);
-    return Name.empty() ? Sym->getName() : Name;
+    StringRef Name = Sym->getName();
+    if (!HasABI0Suffix(Sym))
+      return Name;
+    Name = Name.drop_back(ABI0Suffix.size());
+    if (Name.empty() || Name.ends_with(ABI0Suffix))
+      report_fatal_error("invalid Go ABI0 symbol name");
+    return Name;
+  };
+  auto GetSymbolABI = [&](const MCSymbol *Sym, bool IsFunction) {
+    if (HasABI0Suffix(Sym)) {
+      if (!IsFunction)
+        report_fatal_error("Go ABI0 suffix requires a function symbol");
+      return GoObj::SymABI0;
+    }
+    return IsFunction ? GoObj::SymABIInternal : GoObj::SymABI0;
   };
 
   std::vector<GoObjSymbol> Symbols;
@@ -1530,6 +1547,8 @@ uint64_t GoObjObjectWriter::writeObject() {
   for (const MCSymbol &Symbol : Asm->symbols()) {
     if (!Symbol.isCommon())
       continue;
+    if (HasABI0Suffix(&Symbol))
+      report_fatal_error("Go ABI0 suffix requires a function symbol");
     GoObjSymbol GoSym;
     GoSym.Name = GetSymbolName(&Symbol).str();
     GoSym.Symbol = &Symbol;
@@ -1591,10 +1610,8 @@ uint64_t GoObjObjectWriter::writeObject() {
         Data = ArrayRef<char>(Contents.data() + Begin, Size);
       }
       uint8_t Type = getGoObjSymbolType(&Section);
-      uint16_t ABI = MCSym
-                         ? Asm->getContext().getGoObjSymbolABI(MCSym).value_or(
-                               GoObj::SymABI0)
-                         : GoObj::SymABI0;
+      uint16_t ABI = GetSymbolABI(
+          MCSym, MCSym && Asm->getContext().isGoObjFunctionSymbol(MCSym));
       uint8_t Flag = 0;
       uint8_t Flag2 = 0;
       uint32_t Align = 0;
@@ -2169,13 +2186,12 @@ uint64_t GoObjObjectWriter::writeObject() {
 
   std::vector<GoObjSymbol> NonPkgRefs;
   StringMap<uint32_t> NonPkgRefIndexes;
-  auto GetNonPkgRefSymIdx = [&](const MCSymbol *Sym) {
+  auto GetNonPkgRefSymIdx = [&](const MCSymbol *Sym, bool IsFunction) {
     StringRef Name = GetSymbolName(Sym);
     if (Name.empty())
       report_fatal_error("GoObj relocation target has an empty name");
 
-    uint16_t ABI =
-        Asm->getContext().getGoObjSymbolABI(Sym).value_or(GoObj::SymABI0);
+    uint16_t ABI = GetSymbolABI(Sym, IsFunction);
     std::string Key = (Name + "#" + Twine(ABI)).str();
     auto It = NonPkgRefIndexes.find(Key);
     if (It != NonPkgRefIndexes.end())
@@ -2279,7 +2295,21 @@ uint64_t GoObjObjectWriter::writeObject() {
           return GoObjSymRef{GoObj::PkgIdxBuiltin, Metadata->SymIdx};
         }
       }
-      return GoObjSymRef{GoObj::PkgIdxNone, GetNonPkgRefSymIdx(Reloc.Symbol)};
+      bool IsFunction;
+      switch (Reloc.Type) {
+      case GoObj::R_CALL:
+      case GoObj::R_CALLARM:
+      case GoObj::R_CALLARM64:
+      case GoObj::R_CALLPOWER:
+      case GoObj::R_CALLMIPS:
+        IsFunction = true;
+        break;
+      default:
+        IsFunction = Asm->getContext().isGoObjFunctionSymbol(Reloc.Symbol);
+        break;
+      }
+      return GoObjSymRef{GoObj::PkgIdxNone,
+                         GetNonPkgRefSymIdx(Reloc.Symbol, IsFunction)};
     }
 
     report_fatal_error(

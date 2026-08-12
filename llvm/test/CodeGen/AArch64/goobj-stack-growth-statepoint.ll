@@ -39,7 +39,7 @@ entry:
 
 ; CHECK-LABEL: name: closure_morestack_statepoint
 ; CHECK-NOT: ANNOTATION_LABEL
-; CHECK: STATEPOINT 5147424658422983495, 0, 0, &runtime.morestack,
+; CHECK: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack<ABI0>",
 ; CHECK-SAME: 2, 22, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0,
 ; CHECK-SAME: csr_aarch64_go, implicit-def $sp,
 ; CHECK-SAME: implicit-def dead early-clobber $lr,
@@ -48,7 +48,7 @@ entry:
 
 ; CHECK-LABEL: name: pointer_morestack_statepoint
 ; CHECK: STRXui $x0, $sp, 1
-; CHECK: STATEPOINT 5147424658422983495, 0, 0, &runtime.morestack_noctxt,
+; CHECK: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack_noctxt<ABI0>",
 ; CHECK-SAME: 2, 22, 2, 0, 2, 0, 2, 1, 1, 8, $sp, 8,
 ; CHECK-SAME: 2, 0, 2, 1, 0, 0,
 ; CHECK-SAME: csr_aarch64_go, implicit-def $sp,
@@ -58,7 +58,7 @@ entry:
 ; CHECK-NOT: BL
 
 ; CHECK-LABEL: name: mixed_register_and_stack_pointer_args
-; CHECK: STATEPOINT 5147424658422983495, 0, 0, &runtime.morestack_noctxt,
+; CHECK: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack_noctxt<ABI0>",
 ; CHECK-SAME: 2, 22, 2, 0, 2, 0, 2, 2,
 ; CHECK-SAME: 1, 8, $sp, 16, 1, 8, $sp, 8,
 ; CHECK-SAME: 2, 0, 2, 2, 0, 0, 1, 1,

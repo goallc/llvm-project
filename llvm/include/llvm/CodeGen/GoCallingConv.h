@@ -24,6 +24,8 @@
 namespace llvm {
 
 class CallBase;
+class MachineFunction;
+class MachineInstrBuilder;
 class Type;
 
 namespace goabi {
@@ -110,6 +112,12 @@ EntryArgsInfo computeEntryArgsInfo(ArrayRef<Type *> ArgTys,
 
 bool isIntegerPiece(Type *Ty);
 bool isFloatingPiece(Type *Ty);
+
+/// Add a late target-inserted call operand for the ABI0 form of \p SymbolName.
+/// ABI0 identity is encoded directly in the MC symbol name; the GoObj writer
+/// strips the reserved suffix and records ABI0 in the object symbol.
+void addGoObjABI0Callee(MachineInstrBuilder &MIB, MachineFunction &MF,
+                        StringRef SymbolName);
 
 } // namespace goabi
 } // namespace llvm

@@ -19,7 +19,7 @@
   i32 ptrtoint (ptr @method_type to i32)
 }>, section ".rodata", align 4, !goobj.relocs !2
 
-declare void @method_text()
+declare goabiinternal void @method_text()
 
 !0 = !{!3}
 !1 = !{i32 0}

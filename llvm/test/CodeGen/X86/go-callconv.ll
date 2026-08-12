@@ -61,8 +61,8 @@ entry:
   ret { i64, %go.empty.carrier, i64 } %r1
 }
 
-define goabi0 i64 @abi0_second_int(i64 %a, i64 %b) {
-; X86-LABEL: abi0_second_int:
+define goabi0 i64 @"abi0_second_int<ABI0>"(i64 %a, i64 %b) {
+; X86-LABEL: "abi0_second_int<ABI0>":
 ; X86: movq 16(%rsp), %rax
 ; X86: movq %rax, 24(%rsp)
 ; X86: retq
@@ -70,16 +70,16 @@ entry:
   ret i64 %b
 }
 
-define goabi0 i64 @abi0_call_second_int() {
-; X86-LABEL: abi0_call_second_int:
+define goabi0 i64 @"abi0_call_second_int<ABI0>"() {
+; X86-LABEL: "abi0_call_second_int<ABI0>":
 ; X86: movq %rsp, %[[BASE:r[a-z0-9]+]]
 ; X86: movq $22, 8(%[[BASE]])
 ; X86: movq $11, (%[[BASE]])
-; X86: callq abi0_second_int
+; X86: callq "abi0_second_int<ABI0>"
 ; X86: movq %rsp, %[[RELOAD:r[a-z0-9]+]]
 ; X86: movq 16(%[[RELOAD]]), %rax
 entry:
-  %ret = call goabi0 i64 @abi0_second_int(i64 11, i64 22)
+  %ret = call goabi0 i64 @"abi0_second_int<ABI0>"(i64 11, i64 22)
   ret i64 %ret
 }
 
