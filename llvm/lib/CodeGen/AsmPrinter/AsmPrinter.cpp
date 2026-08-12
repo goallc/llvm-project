@@ -698,7 +698,13 @@ bool AsmPrinter::doInitialization(Module &M) {
     if ((Target.isOSWindows() || (Target.isUEFI() && EmitCodeView)) &&
         M.getNamedMetadata("llvm.dbg.cu"))
       Handlers.push_back(std::make_unique<CodeViewDebug>(this));
-    if (!EmitCodeView || M.getDwarfVersion()) {
+    // GoObj consumes source locations through GoObjDebug to build pcfile,
+    // pcline, and pcinline after final machine layout. Generic monolithic
+    // DWARF sections are not Go linker carriers: their relocations can point
+    // at functions removed by Go dead-code elimination. Keep target-object
+    // DWARF disabled until it is represented by Go's per-function carriers.
+    if (!Target.isOSBinFormatGoObj() &&
+        (!EmitCodeView || M.getDwarfVersion())) {
       if (hasDebugInfo()) {
         DD = createDwarfDebug();
         Handlers.push_back(std::unique_ptr<DwarfDebug>(DD));
@@ -1081,12 +1087,12 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
     const MDNode *MD = GO.getMetadata("goobj.symbol.nonpackage");
     if (!MD)
       continue;
-    const auto *Marker = MD->getNumOperands() == 1
-                             ? mdconst::dyn_extract<ConstantInt>(
-                                   MD->getOperand(0))
-                             : nullptr;
-    if (!Marker || !Marker->getType()->isIntegerTy(1) ||
-        !Marker->isOne() || GO.isDeclaration())
+    const auto *Marker =
+        MD->getNumOperands() == 1
+            ? mdconst::dyn_extract<ConstantInt>(MD->getOperand(0))
+            : nullptr;
+    if (!Marker || !Marker->getType()->isIntegerTy(1) || !Marker->isOne() ||
+        GO.isDeclaration())
       report_fatal_error("invalid !goobj.symbol.nonpackage attachment");
     AP.OutContext.setGoObjSymbolNonPackage(AP.getSymbol(&GO));
   }
@@ -1165,8 +1171,7 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
     }
   }
 
-  if (const NamedMDNode *Markers =
-          M.getNamedMetadata("goobj.marker_relocs")) {
+  if (const NamedMDNode *Markers = M.getNamedMetadata("goobj.marker_relocs")) {
     DenseMap<const GlobalValue *, std::vector<MCContext::GoObjMarkerReloc>>
         Relocs;
     for (const MDNode *Entry : Markers->operands()) {
@@ -1174,11 +1179,9 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
         report_fatal_error(
             "expected !goobj.marker_relocs entries to have four operands");
       const GlobalValue *Source =
-          getGoObjMetadataGlobal(Entry->getOperand(0),
-                                 "goobj.marker_relocs");
+          getGoObjMetadataGlobal(Entry->getOperand(0), "goobj.marker_relocs");
       const GlobalValue *Target =
-          getGoObjMetadataGlobal(Entry->getOperand(1),
-                                 "goobj.marker_relocs");
+          getGoObjMetadataGlobal(Entry->getOperand(1), "goobj.marker_relocs");
       const auto *Type =
           mdconst::dyn_extract<ConstantInt>(Entry->getOperand(2));
       const auto *Addend =
@@ -1195,9 +1198,9 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
       default:
         report_fatal_error("unsupported !goobj.marker_relocs type");
       }
-      Relocs[Source].push_back(
-          {AP.getSymbol(Target), static_cast<uint16_t>(Type->getZExtValue()),
-           Addend->getSExtValue()});
+      Relocs[Source].push_back({AP.getSymbol(Target),
+                                static_cast<uint16_t>(Type->getZExtValue()),
+                                Addend->getSExtValue()});
     }
     for (auto &[Source, SourceRelocs] : Relocs)
       AP.OutContext.setGoObjMarkerRelocs(AP.getSymbol(Source),
@@ -3746,8 +3749,7 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
   if (TM.getTargetTriple().isOSBinFormatGoObj()) {
     if (std::optional<std::pair<uint8_t, uint8_t>> Flags =
             getGoObjSymbolFlags(&F))
-      OutContext.setGoObjSymbolFlags(CurrentFnSym, Flags->first,
-                                     Flags->second);
+      OutContext.setGoObjSymbolFlags(CurrentFnSym, Flags->first, Flags->second);
     if (std::optional<std::pair<uint8_t, uint8_t>> Info =
             getGoObjFunctionInfo(F))
       OutContext.setGoObjFunctionInfo(CurrentFnSym, Info->first, Info->second);

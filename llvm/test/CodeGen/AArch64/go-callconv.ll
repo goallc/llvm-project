@@ -71,7 +71,8 @@ define goabi0 i64 @abi0_call_second_int() {
 ; A64: bl abi0_second_int
 ; A64: mov x[[BASE_RELOAD:[0-9]+]], sp
 ; A64: ldr x[[RET:[0-9]+]], [x[[BASE_RELOAD]], #24]
-; A64: str x[[RET]], [sp, #72]
+; The 48-byte caller frame leaves this function's ABI0 result at entry SP+8.
+; A64: str x[[RET]], [sp, #56]
 entry:
   %ret = call goabi0 i64 @abi0_second_int(i64 11, i64 22)
   ret i64 %ret

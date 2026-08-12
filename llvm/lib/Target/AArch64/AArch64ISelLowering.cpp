@@ -9337,7 +9337,13 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
       getAArch64GoABIConfig(TLI, Subtarget, CLI.CallConv));
 
   unsigned StackBias = getAArch64GoStackBias(CLI.CallConv);
-  unsigned NumBytes = Layout.TotalStackSize + StackBias;
+  // Layout.TotalStackSize rounds the logical Go argument area to the target
+  // stack alignment before the physical entry-SP bias is applied. Adding the
+  // bias after that rounding reserves an extra word for one-word calls (the
+  // common ABI0 funcval case) and inflates every containing nosplit frame.
+  // The caller frame itself remains stack-aligned; reserve only the bytes
+  // through the last physical argument home here.
+  unsigned NumBytes = Layout.ArgSize + StackBias;
   Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, DL);
 
   SDValue StackPtr;

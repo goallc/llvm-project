@@ -12,6 +12,8 @@
 }
 
 declare goabiinternal void @use_three_pointers(ptr, ptr, ptr)
+declare !goobj.symbol.name !0 goabi0 void @runtime.morestack_noctxt.goallc.abi0()
+declare !goobj.symbol.name !1 goabi0 void @runtime.morestackc.goallc.abi0()
 
 define goabiinternal i64 @morestack_statepoint(i64 %value) "go-stack-growth-statepoint" {
 entry:
@@ -76,6 +78,15 @@ entry:
   ret { ptr, ptr } %r1
 }
 
+define goabiinternal void @systemstack_growth()
+    "go-stack-growth-statepoint" "go-systemstack" {
+entry:
+  %buf = alloca [5000 x i8], align 8
+  %slot = getelementptr inbounds [5000 x i8], ptr %buf, i64 0, i64 4999
+  store volatile i8 1, ptr %slot, align 1
+  ret void
+}
+
 ; CHECK-LABEL: name: morestack_statepoint
 ; CHECK-NOT: ANNOTATION_LABEL
 ; CHECK: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack_noctxt<ABI0>",
@@ -134,3 +145,11 @@ entry:
 ; CHECK-SAME: 1, 8, $rsp, 48, 1, 8, $rsp, 64,
 ; CHECK-SAME: 2, 0, 2, 2, 0, 0, 1, 1,
 ; CHECK-SAME: csr_64_go, implicit-def $rsp, implicit-def $ssp
+
+; CHECK-LABEL: name: systemstack_growth
+; CHECK: CMP64rm $r12, $r14, 1, $noreg, 24, $noreg
+; CHECK: STATEPOINT 5147424658422983495, 0, 0, @runtime.morestackc.goallc.abi0,
+; CHECK-SAME: csr_64_go, implicit-def $rsp, implicit-def $ssp
+
+!0 = !{!"runtime.morestack_noctxt"}
+!1 = !{!"runtime.morestackc"}

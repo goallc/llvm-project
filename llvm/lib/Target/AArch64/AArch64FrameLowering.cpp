@@ -1248,9 +1248,16 @@ namespace {
 constexpr uint64_t GoStackSmall = 128;
 constexpr uint64_t GoStackBig = 4096;
 constexpr int64_t GoGStackGuard0Offset = 16;
+constexpr int64_t GoGStackGuard1Offset = 24;
 
 static bool shouldEmitAArch64GoStackCheck(const MachineFunction &MF) {
-  return AArch64FrameLowering::usesGoFrameLayout(MF);
+  return AArch64FrameLowering::usesGoFrameLayout(MF) &&
+         !MF.getFunction().hasFnAttribute(goabi::NoSplitAttr);
+}
+
+static bool isAArch64GoNoSplitFunction(const MachineFunction &MF) {
+  return AArch64FrameLowering::usesGoFrameLayout(MF) &&
+         MF.getFunction().hasFnAttribute(goabi::NoSplitAttr);
 }
 
 static bool hasAArch64GoClosureContext(const Function &F) {
@@ -1334,6 +1341,47 @@ getAArch64GoStackCheckEntryMBB(MachineFunction &MF,
   if (MachineBasicBlock *MBB = MF.getBlockNumbered(0))
     return *MBB;
   return FallbackMBB;
+}
+
+static void emitAArch64GoNoSplitEntryStackMap(MachineFunction &MF,
+                                              MachineBasicBlock &FallbackMBB) {
+  if (!isAArch64GoNoSplitFunction(MF) ||
+      !MF.getFunction().hasFnAttribute(goabi::StackGrowthStatepointAttr))
+    return;
+  for (const MachineBasicBlock &MBB : MF)
+    for (const MachineInstr &MI : MBB)
+      if (MI.getOpcode() == TargetOpcode::STACKMAP &&
+          MI.getOperand(0).isImm() &&
+          static_cast<uint64_t>(MI.getOperand(0).getImm()) ==
+              goabi::NoSplitEntryStackMapID)
+        return;
+
+  MachineBasicBlock &EntryMBB = getAArch64GoStackCheckEntryMBB(MF, FallbackMBB);
+  const AArch64InstrInfo &TII =
+      *MF.getSubtarget<AArch64Subtarget>().getInstrInfo();
+  MachineInstrBuilder StackMap = BuildMI(EntryMBB, EntryMBB.begin(), DebugLoc(),
+                                         TII.get(TargetOpcode::STACKMAP))
+                                     .addImm(goabi::NoSplitEntryStackMapID)
+                                     .addImm(0);
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+  uint64_t PointerSize = MF.getDataLayout().getPointerSize();
+  for (const AArch64FunctionInfo::GoArgPointerSlot &Slot :
+       MF.getInfo<AArch64FunctionInfo>()->getGoArgPointerSlots()) {
+    if (!MFI.isFixedObjectIndex(Slot.FrameIndex))
+      report_fatal_error(
+          "AArch64 Go entry argument pointer slot is not a fixed object");
+    int64_t Offset = MFI.getObjectOffset(Slot.FrameIndex) +
+                     static_cast<int64_t>(Slot.OffsetWithinObject);
+    int64_t ExpectedOffset = static_cast<int64_t>(PointerSize) +
+                             static_cast<int64_t>(Slot.ArgWord) * PointerSize;
+    if (PointerSize == 0 || Offset != ExpectedOffset || !isInt<32>(Offset))
+      report_fatal_error(
+          "AArch64 Go entry argument pointer slot has invalid SP offset");
+    StackMap.addImm(StackMaps::IndirectMemRefOp)
+        .addImm(PointerSize)
+        .addReg(AArch64::SP)
+        .addImm(Offset);
+  }
 }
 
 static unsigned getAArch64GoSpillOpcode(unsigned Size, bool IsFP, bool Reload) {
@@ -1475,6 +1523,7 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
 
   bool UseStackGrowthStatepoint =
       MF.getFunction().hasFnAttribute(goabi::StackGrowthStatepointAttr);
+  bool IsSystemStack = MF.getFunction().hasFnAttribute(goabi::SystemStackAttr);
 
   Register ScratchReg = AArch64::SP;
   if (StackSize > GoStackBig) {
@@ -1502,7 +1551,8 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
 
   BuildMI(CompareMBB, DL, TII.get(AArch64::LDRXui), AArch64::X17)
       .addReg(AArch64::X28)
-      .addImm(GoGStackGuard0Offset / 8);
+      .addImm((IsSystemStack ? GoGStackGuard1Offset : GoGStackGuard0Offset) /
+              8);
   BuildMI(CompareMBB, DL, TII.get(AArch64::SUBSXrx64), AArch64::XZR)
       .addReg(ScratchReg)
       .addReg(AArch64::X17)
@@ -1516,16 +1566,18 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
   BuildMI(MorestackMBB, DL, TII.get(TargetOpcode::COPY), AArch64::X3)
       .addReg(AArch64::LR);
   bool HasClosureContext = hasAArch64GoClosureContext(MF.getFunction());
-  const char *MorestackName =
-      HasClosureContext ? "runtime.morestack" : "runtime.morestack_noctxt";
+  const char *MorestackName = IsSystemStack       ? "runtime.morestackc"
+                              : HasClosureContext ? "runtime.morestack"
+                                                  : "runtime.morestack_noctxt";
   MachineInstrBuilder Morestack =
-      UseStackGrowthStatepoint ? buildAArch64GoStackGrowthStatepoint(
-                                     MF, *MorestackMBB, DL, TII, MorestackName)
-                               : BuildMI(MorestackMBB, DL, TII.get(AArch64::BL));
+      UseStackGrowthStatepoint
+          ? buildAArch64GoStackGrowthStatepoint(MF, *MorestackMBB, DL, TII,
+                                                MorestackName)
+          : BuildMI(MorestackMBB, DL, TII.get(AArch64::BL));
   if (!UseStackGrowthStatepoint)
     goabi::addGoObjABI0Callee(Morestack, MF, MorestackName);
   Morestack.addReg(AArch64::X3, RegState::Implicit);
-  if (HasClosureContext)
+  if (HasClosureContext && !IsSystemStack)
     Morestack.addReg(AArch64::X26, RegState::Implicit);
   emitAArch64GoRegSpills(MF, *MorestackMBB, AFI->getGoArgHomes(),
                          /*Reload=*/true);
@@ -1559,6 +1611,7 @@ void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
     report_fatal_error("GoObj stack growth does not support dynamic allocas");
   AArch64PrologueEmitter PrologueEmitter(MF, MBB, *this);
   PrologueEmitter.emitPrologue();
+  emitAArch64GoNoSplitEntryStackMap(MF, MBB);
   emitAArch64GoStackCheck(MF, MBB);
 }
 
