@@ -7184,11 +7184,27 @@ static llvm::PHINode *GetInductionVariable(const Loop &L, ScalarEvolution &SE,
   return nullptr;
 }
 
+static bool loopContainsStatepoint(const Loop *L) {
+  return any_of(L->blocks(), [](const BasicBlock *BB) {
+    return any_of(*BB, [](const Instruction &I) {
+      const auto *CB = dyn_cast<CallBase>(&I);
+      return CB && CB->getIntrinsicID() ==
+                       Intrinsic::experimental_gc_statepoint;
+    });
+  });
+}
+
 static bool ReduceLoopStrength(Loop *L, IVUsers &IU, ScalarEvolution &SE,
                                DominatorTree &DT, LoopInfo &LI,
                                const TargetTransformInfo &TTI,
                                AssumptionCache &AC, TargetLibraryInfo &TLI,
                                MemorySSA *MSSA, bool PreserveLCSSA) {
+
+  // RewriteStatepointsForGC may run before code-generation LSR. Do not create
+  // loop-carried pointer induction variables after the statepoint has recorded
+  // the pointers that must be relocated across a safepoint.
+  if (loopContainsStatepoint(L))
+    return false;
 
   // Debug preservation - before we start removing anything identify which DVI
   // meet the salvageable criteria and store their DIExpression and SCEVs.
