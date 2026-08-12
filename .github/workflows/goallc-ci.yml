@@ -1,0 +1,188 @@
+name: GoALLC LLVM CI
+
+on:
+  push:
+    branches:
+      - llvm23.1.master
+  pull_request:
+    branches:
+      - llvm23.1.master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: goallc-llvm-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  payload:
+    if: github.repository == 'goallc/llvm-project'
+    name: linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+            build_jobs: 2
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+            build_jobs: auto
+    env:
+      LLVM_SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      LLVM_ARTIFACT_PREFIX: ${{ github.event_name == 'pull_request' && format('goallc-llvm-pr{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) || format('goallc-llvm-commit-{0}', github.sha) }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 5G
+
+    steps:
+      - name: Check out LLVM source revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ env.LLVM_SOURCE_REVISION }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ccache \
+            libedit-dev \
+            libxml2-dev \
+            libzstd-dev \
+            ninja-build \
+            zlib1g-dev
+
+      - name: Restore ccache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: goallc-llvm23-ci-linux-${{ matrix.arch }}-${{ env.LLVM_SOURCE_REVISION }}
+          restore-keys: |
+            goallc-llvm23-ci-linux-${{ matrix.arch }}-
+
+      - name: Report runner resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "architecture=$(uname -m)"
+          echo "logical_cpus=$(nproc)"
+          free -h
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+
+      - name: Build installed LLVM payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_base="$LLVM_ARTIFACT_PREFIX-linux-${{ matrix.arch }}"
+          build_jobs='${{ matrix.build_jobs }}'
+          if [[ "$build_jobs" == auto ]]; then
+            build_jobs="$(nproc)"
+          fi
+          echo "Building LLVM with $build_jobs parallel jobs"
+          GOALLC_LLVM_BUILD="$RUNNER_TEMP/goallc-llvm-build" \
+          GOALLC_LLVM_INSTALL="$RUNNER_TEMP/$asset_base" \
+          GOALLC_BUILD_TYPE=Release \
+          GOALLC_LLVM_TARGETS='X86;AArch64' \
+          GOALLC_BUILD_JOBS="$build_jobs" \
+          GOALLC_CCACHE=/usr/bin/ccache \
+            ./llvm/utils/goallc/build-payload.bash
+
+      - name: Test core Go and GoObj LLVM support
+        shell: bash
+        run: |
+          set -euo pipefail
+          build="$RUNNER_TEMP/goallc-llvm-build"
+          tests=(
+            "$build/test/CodeGen/AArch64/go-callconv.ll"
+            "$build/test/CodeGen/AArch64/go-statepoint-stack-args.ll"
+            "$build/test/CodeGen/AArch64/goobj-ir-config.ll"
+            "$build/test/CodeGen/AArch64/goobj-register-argument-homes.ll"
+            "$build/test/CodeGen/Generic/go-abi0-frame.ll"
+            "$build/test/CodeGen/Generic/go-argument-homes.ll"
+            "$build/test/CodeGen/Generic/goobj-data-kinds.ll"
+            "$build/test/CodeGen/X86/go-callconv.ll"
+            "$build/test/CodeGen/X86/go-gc-write-barrier.ll"
+            "$build/test/CodeGen/X86/go-statepoint-stack-results.ll"
+            "$build/test/CodeGen/X86/goobj-filetype.ll"
+            "$build/test/CodeGen/X86/goobj-import-references.ll"
+            "$build/test/MC/GoObj"
+          )
+          "$build/bin/llvm-lit" -sv "${tests[@]}"
+
+      - name: Validate relocatable payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_base="$LLVM_ARTIFACT_PREFIX-linux-${{ matrix.arch }}"
+          mkdir -p "$RUNNER_TEMP/relocated"
+          mv "$RUNNER_TEMP/$asset_base" "$RUNNER_TEMP/relocated/$asset_base"
+          payload="$RUNNER_TEMP/relocated/$asset_base"
+
+          test "$("$payload/bin/llvm-config" --prefix)" = "$payload"
+          test "$("$payload/bin/llvm-config" --version)" = 23.1.0git
+          test "$("$payload/bin/llvm-config" --build-mode)" = Release
+          grep -Fx "llvm_revision=$LLVM_SOURCE_REVISION" \
+            "$payload/share/goallc/build-manifest"
+          grep -Fx 'llvm_dirty=false' "$payload/share/goallc/build-manifest"
+          grep -Fx 'build_type=Release' "$payload/share/goallc/build-manifest"
+          for target in X86 AArch64; do
+            "$payload/bin/llvm-config" --targets-built \
+              | tr ' ' '\n' | grep -Fx "$target"
+          done
+          for path in \
+            bin/FileCheck \
+            bin/llc \
+            bin/llvm-ar \
+            bin/llvm-config \
+            bin/opt \
+            include/llvm-c/Core.h \
+            include/llvm/Config/llvm-config.h \
+            lib/cmake/llvm/AddLLVM.cmake \
+            lib/cmake/llvm/LLVMConfig.cmake \
+            lib/cmake/llvm/LLVMExports.cmake \
+            lib/libLLVMCore.a; do
+            test -e "$payload/$path"
+          done
+          find "$payload/lib" -maxdepth 1 \
+            -name 'libLLVM.so*' -print -quit | grep .
+          env -u LD_LIBRARY_PATH "$payload/bin/llc" --version
+          env -u LD_LIBRARY_PATH "$payload/bin/opt" --version
+          if ldd "$payload/bin/llc" | grep 'not found'; then
+            exit 1
+          fi
+
+      - name: Package payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_base="$LLVM_ARTIFACT_PREFIX-linux-${{ matrix.arch }}"
+          archive="$asset_base.tar.zst"
+          artifact_dir="$RUNNER_TEMP/artifact"
+          mkdir -p "$artifact_dir"
+          tar --zstd -cf "$artifact_dir/$archive" \
+            -C "$RUNNER_TEMP/relocated" "$asset_base"
+          (
+            cd "$artifact_dir"
+            sha256sum "$archive" >"$archive.sha256"
+            sha256sum --check --strict "$archive.sha256"
+          )
+          du -h "$artifact_dir/$archive"
+
+      - name: Upload payload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.LLVM_ARTIFACT_PREFIX }}-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/artifact/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Report ccache
+        if: always()
+        run: ccache -s
