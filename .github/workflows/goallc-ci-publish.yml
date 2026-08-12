@@ -1,0 +1,217 @@
+name: Publish GoALLC LLVM CI Payloads
+
+on:
+  workflow_run:
+    workflows:
+      - GoALLC LLVM CI
+    types:
+      - completed
+  pull_request_target:
+    branches:
+      - llvm23.1.master
+    types:
+      - closed
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: read
+
+env:
+  CI_RELEASE_TAG: goallc-llvm-ci
+
+concurrency:
+  group: goallc-llvm-ci-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.repository.full_name == 'goallc/llvm-project'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      LLVM_WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      # This privileged workflow only copies files produced by the unprivileged
+      # PR workflow. It never checks out or executes code from the PR.
+      - name: Resolve and validate artifact provenance
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$LLVM_WORKFLOW_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+
+          mapfile -t artifact_names < <(
+            gh api --paginate \
+              "repos/goallc/llvm-project/actions/runs/$LLVM_WORKFLOW_RUN_ID/artifacts?per_page=100" \
+              --jq '.artifacts[] | select(.expired == false) | .name'
+          )
+          matching=()
+          for name in "${artifact_names[@]}"; do
+            if [[ "$name" =~ ^goallc-llvm-pr([1-9][0-9]*)-([0-9a-f]{40})-linux-(amd64|arm64)$ ]]; then
+              matching+=("$name")
+              pr_number=${BASH_REMATCH[1]}
+              revision=${BASH_REMATCH[2]}
+            fi
+          done
+          test "${#matching[@]}" -eq 2
+          prefix="goallc-llvm-pr$pr_number-$revision"
+          printf '%s\n' "${matching[@]}" | sort -u \
+            | diff -u - <(printf '%s\n' \
+                "$prefix-linux-amd64" \
+                "$prefix-linux-arm64")
+
+          pull=$(gh api "repos/goallc/llvm-project/pulls/$pr_number")
+          test "$(jq -r .state <<<"$pull")" = open
+          test "$(jq -r .base.repo.full_name <<<"$pull")" = goallc/llvm-project
+          test "$(jq -r .base.ref <<<"$pull")" = llvm23.1.master
+          test "$(jq -r .head.sha <<<"$pull")" = "$revision"
+
+          run=$(gh api \
+            "repos/goallc/llvm-project/actions/runs/$LLVM_WORKFLOW_RUN_ID")
+          test "$(jq -r .path <<<"$run")" = .github/workflows/goallc-ci.yml
+          test "$(jq -r .event <<<"$run")" = pull_request
+          test "$(jq -r .conclusion <<<"$run")" = success
+          test "$(jq -r .head_repository.full_name <<<"$run")" \
+            = "$(jq -r .head.repo.full_name <<<"$pull")"
+          test "$(jq -r .head_branch <<<"$run")" \
+            = "$(jq -r .head.ref <<<"$pull")"
+          run_revision=$(jq -r .head_sha <<<"$run")
+          if [[ "$run_revision" != "$revision" ]]; then
+            gh api "repos/goallc/llvm-project/commits/$run_revision" \
+              --jq '.parents[].sha' | grep -Fx "$revision"
+          fi
+
+          echo "pr_number=$pr_number" >>"$GITHUB_OUTPUT"
+          echo "revision=$revision" >>"$GITHUB_OUTPUT"
+          echo "LLVM_PR_NUMBER=$pr_number" >>"$GITHUB_ENV"
+          echo "LLVM_SOURCE_REVISION=$revision" >>"$GITHUB_ENV"
+
+      - name: Download payload artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          repository: goallc/llvm-project
+          run-id: ${{ env.LLVM_WORKFLOW_RUN_ID }}
+          pattern: goallc-llvm-pr${{ steps.source.outputs.pr_number }}-${{ steps.source.outputs.revision }}-linux-*
+          path: ${{ runner.temp }}/payloads
+
+      - name: Validate payload artifacts without executing them
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="goallc-llvm-pr$LLVM_PR_NUMBER-$LLVM_SOURCE_REVISION"
+          upload_dir="$RUNNER_TEMP/upload"
+          mkdir -p "$upload_dir"
+          test -z "$(find "$RUNNER_TEMP/payloads" -type l -print -quit)"
+
+          for arch in amd64 arm64; do
+            artifact_dir="$RUNNER_TEMP/payloads/$prefix-linux-$arch"
+            archive="$prefix-linux-$arch.tar.zst"
+            test -d "$artifact_dir"
+            test "$(find "$artifact_dir" -mindepth 1 -maxdepth 1 | wc -l)" -eq 2
+            test -f "$artifact_dir/$archive"
+            test -f "$artifact_dir/$archive.sha256"
+            test "$(wc -l <"$artifact_dir/$archive.sha256")" -eq 1
+            checksum=$(<"$artifact_dir/$archive.sha256")
+            [[ "$checksum" =~ ^([0-9a-f]{64})\ \ $archive$ ]]
+            test "$(sha256sum "$artifact_dir/$archive" | cut -d' ' -f1)" \
+              = "${BASH_REMATCH[1]}"
+            cp "$artifact_dir/$archive" "$upload_dir/$archive"
+            cp "$artifact_dir/$archive.sha256" "$upload_dir/$archive.sha256"
+          done
+
+      - name: Create rolling CI prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$CI_RELEASE_TAG" \
+            --repo goallc/llvm-project >/dev/null 2>&1; then
+            if ! gh release create "$CI_RELEASE_TAG" \
+              --repo goallc/llvm-project \
+              --target llvm23.1.master \
+              --prerelease \
+              --title 'GoALLC LLVM pull request payloads' \
+              --notes 'Rolling cache of successful LLVM PR payloads for cross-repository Go CI. These assets are not stable releases.'; then
+              gh release view "$CI_RELEASE_TAG" \
+                --repo goallc/llvm-project >/dev/null
+            fi
+          fi
+
+      - name: Publish current payload and remove superseded revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="goallc-llvm-pr$LLVM_PR_NUMBER-$LLVM_SOURCE_REVISION"
+          # A close event can race this workflow. Do not recreate assets after
+          # the cleanup job has removed them.
+          pull=$(gh api "repos/goallc/llvm-project/pulls/$LLVM_PR_NUMBER")
+          test "$(jq -r .state <<<"$pull")" = open
+          test "$(jq -r .head.sha <<<"$pull")" = "$LLVM_SOURCE_REVISION"
+          gh release upload "$CI_RELEASE_TAG" \
+            --repo goallc/llvm-project \
+            "$RUNNER_TEMP"/upload/* \
+            --clobber
+
+          release_id=$(gh api \
+            "repos/goallc/llvm-project/releases/tags/$CI_RELEASE_TAG" \
+            --jq .id)
+          gh api --paginate \
+            "repos/goallc/llvm-project/releases/$release_id/assets?per_page=100" \
+            | jq -r --arg pr "$LLVM_PR_NUMBER" --arg keep "$prefix" '
+                .[]
+                | select(
+                    (.name | test(
+                      "^goallc-llvm-pr" + $pr
+                      + "-[0-9a-f]{40}-linux-(amd64|arm64)\\.tar\\.zst(\\.sha256)?$"
+                    ))
+                    and (.name | startswith($keep + "-linux-") | not)
+                  )
+                | .id
+              ' \
+            | while read -r asset_id; do
+                gh api --method DELETE \
+                  "repos/goallc/llvm-project/releases/assets/$asset_id"
+              done
+
+  clean-closed-pr:
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.base.repo.full_name == 'goallc/llvm-project'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      LLVM_PR_NUMBER: ${{ github.event.pull_request.number }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Remove closed PR payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$LLVM_PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          if ! release_id=$(gh api \
+            "repos/goallc/llvm-project/releases/tags/$CI_RELEASE_TAG" \
+            --jq .id 2>/dev/null); then
+            exit 0
+          fi
+          gh api --paginate \
+            "repos/goallc/llvm-project/releases/$release_id/assets?per_page=100" \
+            | jq -r --arg pr "$LLVM_PR_NUMBER" '
+                .[]
+                | select(.name | test(
+                    "^goallc-llvm-pr" + $pr
+                    + "-[0-9a-f]{40}-linux-(amd64|arm64)\\.tar\\.zst(\\.sha256)?$"
+                  ))
+                | .id
+              ' \
+            | while read -r asset_id; do
+                gh api --method DELETE \
+                  "repos/goallc/llvm-project/releases/assets/$asset_id"
+              done

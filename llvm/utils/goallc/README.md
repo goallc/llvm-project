@@ -30,3 +30,16 @@ relocatable Linux payload natively on both amd64 and arm64, and publishes each
 `.tar.zst` archive together with its SHA-256 file on the tag's GitHub Release.
 Consumers must select the asset matching the host architecture and pin both
 the tag and archive digest.
+
+Every pull request targeting `llvm23.1.master` also runs
+`.github/workflows/goallc-ci.yml`. It builds and tests native Linux amd64 and
+arm64 payloads from the pull request head revision. The unprivileged build
+uploads Actions artifacts; after the complete matrix succeeds,
+`.github/workflows/goallc-ci-publish.yml` copies the archives and checksums to
+the rolling `goallc-llvm-ci` prerelease without executing pull request code or
+payloads. Only the newest successful revision of each open pull request is
+retained, and closing the pull request removes its assets.
+
+The rolling prerelease is a CI transport, not a stable LLVM release. A Go pull
+request can opt in to a matching LLVM pull request payload, but merged Go code
+must continue to pin an immutable timestamped LLVM release.
