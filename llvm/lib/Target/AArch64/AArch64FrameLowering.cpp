@@ -1275,13 +1275,13 @@ checkAArch64GoStackGrowthStatepointContract(const MachineFunction &MF) {
 
 static MachineInstrBuilder buildAArch64GoStackGrowthStatepoint(
     MachineFunction &MF, MachineBasicBlock &MBB, const DebugLoc &DL,
-    const AArch64InstrInfo &TII, const char *Callee) {
+    const AArch64InstrInfo &TII, StringRef CalleeName) {
   MachineInstrBuilder Statepoint =
       BuildMI(&MBB, DL, TII.get(TargetOpcode::STATEPOINT))
           .addImm(goabi::StackGrowthStatepointID)
           .addImm(0)
-          .addImm(0)
-          .addExternalSymbol(Callee);
+          .addImm(0);
+  goabi::addGoObjABI0Callee(Statepoint, MF, CalleeName);
   auto AddConstant = [&](uint64_t Value) {
     Statepoint.addImm(StackMaps::ConstantOp).addImm(Value);
   };
@@ -1521,8 +1521,9 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
   MachineInstrBuilder Morestack =
       UseStackGrowthStatepoint ? buildAArch64GoStackGrowthStatepoint(
                                      MF, *MorestackMBB, DL, TII, MorestackName)
-                               : BuildMI(MorestackMBB, DL, TII.get(AArch64::BL))
-                                     .addExternalSymbol(MorestackName);
+                               : BuildMI(MorestackMBB, DL, TII.get(AArch64::BL));
+  if (!UseStackGrowthStatepoint)
+    goabi::addGoObjABI0Callee(Morestack, MF, MorestackName);
   Morestack.addReg(AArch64::X3, RegState::Implicit);
   if (HasClosureContext)
     Morestack.addReg(AArch64::X26, RegState::Implicit);

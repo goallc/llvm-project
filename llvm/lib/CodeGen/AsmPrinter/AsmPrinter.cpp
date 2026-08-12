@@ -601,14 +601,6 @@ bool AsmPrinter::doInitialization(Module &M) {
 
   if (Target.isOSBinFormatGoObj()) {
     collectGoObjModuleMetadata(*this, M);
-    for (const Function &F : M) {
-      if (!F.isDeclaration())
-        continue;
-      if (goabi::isGoABIInternalCallingConv(F.getCallingConv()))
-        OutContext.setGoObjSymbolABI(getSymbol(&F), GoObj::SymABIInternal);
-      else if (goabi::isGoABI0CallingConv(F.getCallingConv()))
-        OutContext.setGoObjSymbolABI(getSymbol(&F), GoObj::SymABI0);
-    }
   }
 
   // On AIX, we delay emitting any section information until
@@ -1051,15 +1043,38 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
 
   for (const GlobalObject &GO : M.global_objects()) {
     const MDNode *MD = GO.getMetadata("goobj.symbol.name");
-    if (!MD)
+    StringRef Name;
+    if (MD) {
+      if (MD->getNumOperands() != 1)
+        report_fatal_error("expected !goobj.symbol.name to have one operand");
+      Name = getGoObjMetadataString(MD->getOperand(0), "goobj.symbol.name");
+      if (Name.empty())
+        report_fatal_error("invalid !goobj.symbol.name attachment");
+    } else if (isa<Function>(GO) &&
+               GO.getName().ends_with(goabi::ABI0StorageSuffix)) {
+      Name = GO.getName().drop_back(goabi::ABI0StorageSuffix.size());
+      if (Name.empty())
+        report_fatal_error("invalid Go ABI0 function storage name");
+    } else {
       continue;
-    if (MD->getNumOperands() != 1)
-      report_fatal_error("expected !goobj.symbol.name to have one operand");
-    StringRef Name =
-        getGoObjMetadataString(MD->getOperand(0), "goobj.symbol.name");
-    if (Name.empty())
-      report_fatal_error("invalid !goobj.symbol.name attachment");
+    }
     AP.OutContext.setGoObjSymbolName(AP.getSymbol(&GO), Name);
+  }
+
+  // ABI0 and ABIInternal functions may have the same linker-visible GoObj
+  // name. The frontend keeps their IR identities distinct with
+  // ABI0StorageSuffix and goobj.symbol.name; validate that storage convention
+  // while recording the ABI once for both declarations and definitions.
+  for (const Function &F : M) {
+    bool HasABI0Suffix = F.getName().ends_with(goabi::ABI0StorageSuffix);
+    if (HasABI0Suffix && !goabi::isGoABI0CallingConv(F.getCallingConv()))
+      report_fatal_error(
+          "Go ABI0 function storage suffix requires the Go ABI0 calling "
+          "convention");
+    if (HasABI0Suffix || goabi::isGoABI0CallingConv(F.getCallingConv()))
+      AP.OutContext.setGoObjSymbolABI(AP.getSymbol(&F), GoObj::SymABI0);
+    else if (goabi::isGoABIInternalCallingConv(F.getCallingConv()))
+      AP.OutContext.setGoObjSymbolABI(AP.getSymbol(&F), GoObj::SymABIInternal);
   }
 
   for (const GlobalObject &GO : M.global_objects()) {
@@ -3750,11 +3765,6 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
     if (std::optional<std::pair<uint8_t, uint8_t>> Info =
             getGoObjFunctionInfo(F))
       OutContext.setGoObjFunctionInfo(CurrentFnSym, Info->first, Info->second);
-    if (goabi::isGoABIInternalCallingConv(F.getCallingConv()))
-      OutContext.setGoObjSymbolABI(CurrentFnSym, GoObj::SymABIInternal);
-    else if (goabi::isGoABI0CallingConv(F.getCallingConv()))
-      OutContext.setGoObjSymbolABI(CurrentFnSym, GoObj::SymABI0);
-
     const MachineFrameInfo &FrameInfo = MF.getFrameInfo();
     uint64_t StackSize =
         FrameInfo.getStackSize() + FrameInfo.getUnsafeStackSize();

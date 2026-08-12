@@ -24,12 +24,19 @@
 namespace llvm {
 
 class CallBase;
+class MachineFunction;
+class MachineInstrBuilder;
+class Module;
 class Type;
 
 namespace goabi {
 
 inline constexpr StringLiteral TupleResultsAttr = "go_results_tuple";
 inline constexpr StringLiteral PadTypeName = "go.abi.pad";
+// Go frontends use an ABI-specific IR storage name when ABI0 and ABIInternal
+// functions share the same linker-visible GoObj symbol name. The
+// goobj.symbol.name metadata restores the latter during object emission.
+inline constexpr StringLiteral ABI0StorageSuffix = ".goallc.abi0";
 // The Go statepoint pass uses this attribute to request that target frame
 // lowering represent the late morestack call with a root-free STATEPOINT.
 inline constexpr StringLiteral StackGrowthStatepointAttr =
@@ -110,6 +117,12 @@ EntryArgsInfo computeEntryArgsInfo(ArrayRef<Type *> ArgTys,
 
 bool isIntegerPiece(Type *Ty);
 bool isFloatingPiece(Type *Ty);
+
+/// Add a late target-inserted call operand for the ABI0 form of \p SymbolName.
+/// Prefer the ABI-specific IR declaration when one is present; otherwise use
+/// a name-only external symbol, whose default GoObj ABI is ABI0.
+void addGoObjABI0Callee(MachineInstrBuilder &MIB, MachineFunction &MF,
+                        StringRef SymbolName);
 
 } // namespace goabi
 } // namespace llvm

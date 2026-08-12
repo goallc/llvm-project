@@ -247,13 +247,13 @@ static MachineInstrBuilder buildGoStackGrowthStatepoint(MachineFunction &MF,
                                                         MachineBasicBlock &MBB,
                                                         const DebugLoc &DL,
                                                         const X86InstrInfo &TII,
-                                                        const char *Callee) {
+                                                        StringRef CalleeName) {
   MachineInstrBuilder Statepoint =
       BuildMI(&MBB, DL, TII.get(TargetOpcode::STATEPOINT))
           .addImm(goabi::StackGrowthStatepointID)
           .addImm(0)
-          .addImm(0)
-          .addExternalSymbol(Callee);
+          .addImm(0);
+  goabi::addGoObjABI0Callee(Statepoint, MF, CalleeName);
   auto AddConstant = [&](uint64_t Value) {
     Statepoint.addImm(StackMaps::ConstantOp).addImm(Value);
   };
@@ -421,8 +421,9 @@ static void emitGoStackCheck(MachineFunction &MF,
       UseStackGrowthStatepoint
           ? buildGoStackGrowthStatepoint(MF, *MorestackMBB, DL, TII,
                                          MorestackName)
-          : BuildMI(MorestackMBB, DL, TII.get(X86::CALL64pcrel32))
-                .addExternalSymbol(MorestackName);
+          : BuildMI(MorestackMBB, DL, TII.get(X86::CALL64pcrel32));
+  if (!UseStackGrowthStatepoint)
+    goabi::addGoObjABI0Callee(Morestack, MF, MorestackName);
   if (HasClosureContext)
     Morestack.addReg(X86::RDX, RegState::Implicit);
   emitGoRegSpills(MF, *MorestackMBB, Homes, /*Reload=*/true);

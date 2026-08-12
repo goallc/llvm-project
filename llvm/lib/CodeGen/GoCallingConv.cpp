@@ -8,14 +8,69 @@
 
 #include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <limits>
+#include <string>
 
 using namespace llvm;
 
 namespace llvm::goabi {
+
+static void checkGoObjSymbolName(const Function &F, StringRef SymbolName) {
+  const MDNode *MD = F.getMetadata("goobj.symbol.name");
+  if (!MD)
+    return;
+  if (MD->getNumOperands() != 1)
+    report_fatal_error("expected !goobj.symbol.name to have one operand");
+  const auto *Name = dyn_cast_or_null<MDString>(MD->getOperand(0).get());
+  if (!Name || Name->getString() != SymbolName)
+    report_fatal_error(Twine("Go ABI0 storage name and GoObj symbol name "
+                             "metadata disagree for ") +
+                       SymbolName);
+}
+
+static const Function *getGoObjABI0Function(const Module &M,
+                                            StringRef SymbolName) {
+  std::string StorageName = (SymbolName + ABI0StorageSuffix).str();
+  const Function *StorageFunction = M.getFunction(StorageName);
+  const Function *LogicalFunction = M.getFunction(SymbolName);
+
+  if (StorageFunction &&
+      !isGoABI0CallingConv(StorageFunction->getCallingConv()))
+    report_fatal_error(Twine("Go ABI0 storage name has non-ABI0 calling "
+                             "convention: ") +
+                       StorageName);
+  if (StorageFunction)
+    checkGoObjSymbolName(*StorageFunction, SymbolName);
+  if (LogicalFunction &&
+      isGoABI0CallingConv(LogicalFunction->getCallingConv())) {
+    if (StorageFunction)
+      report_fatal_error(Twine("duplicate Go ABI0 function for ") + SymbolName);
+    checkGoObjSymbolName(*LogicalFunction, SymbolName);
+    return LogicalFunction;
+  }
+  if (StorageFunction)
+    return StorageFunction;
+  if (LogicalFunction)
+    report_fatal_error(Twine("GoObj call requires an ABI0 declaration for ") +
+                       SymbolName);
+  return nullptr;
+}
+
+void addGoObjABI0Callee(MachineInstrBuilder &MIB, MachineFunction &MF,
+                        StringRef SymbolName) {
+  if (const Function *Callee =
+          getGoObjABI0Function(*MF.getFunction().getParent(), SymbolName)) {
+    MIB.addGlobalAddress(Callee);
+    return;
+  }
+  MIB.addExternalSymbol(MF.createExternalSymbolName(SymbolName));
+}
 
 static bool isPaddingType(Type *Ty) {
   auto *ST = dyn_cast<StructType>(Ty);
