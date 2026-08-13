@@ -355,9 +355,9 @@ GoObjGCFrameLayout getGoObjGCFrameLayout(const Triple &TT, uint32_t StackSize,
                                          uint32_t PointerSize,
                                          bool HasFramePointer) {
   // At an amd64 function entry, RSP points at the return address. Entry
-  // argument pointer locations in the stack-growth statepoint are relative to
-  // that pre-frame RSP, so the caller's argument area begins one word above it.
-  // The same bias applies after subtracting StackSize for ordinary statepoints.
+  // argument pointer locations in the entry stack map are relative to that
+  // pre-frame RSP, so the caller's argument area begins one word above it. The
+  // same bias applies after subtracting StackSize for ordinary statepoints.
   if (TT.getArch() == Triple::x86_64) {
     if (StackSize == 0)
       return {0, 0, 0, 0, 0, PointerSize};
@@ -612,7 +612,8 @@ parseAllocaPtrMapRecords(const MCContext::GoObjStackMapEntry &Entry) {
 GoObjStatepointStackMaps makeStatepointStackMaps(
     const MCAssembler &Asm, const GoObjSymbol &Function, uint32_t StackSize,
     uint32_t ArgSize, uint32_t PCQuantum,
-    ArrayRef<MCContext::GoObjStackMapEntry> StackMapEntries) {
+    ArrayRef<MCContext::GoObjStackMapEntry> StackMapEntries,
+    ArrayRef<GoObjPCTabEntry> PCSPEntries) {
   struct ResolvedEntry {
     uint64_t CallsitePC;
     const MCContext::GoObjStackMapEntry *Entry;
@@ -691,17 +692,16 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   SmallVector<FunctionAllocaRecord, 4> FunctionAllocaRecords;
   uint64_t OrdinaryEntryCount =
       llvm::count_if(ResolvedEntries, [](const ResolvedEntry &Resolved) {
-        return Resolved.Entry->ID != GoObj::StackGrowthStatepointID;
+        return Resolved.Entry->ID != GoObj::EntryArgsStackMapID;
       });
   std::optional<GoObjOpenDeferRecord> FunctionOpenDefer;
   uint64_t OpenDeferEntryCount = 0;
   for (const ResolvedEntry &Resolved : ResolvedEntries) {
     std::optional<GoObjOpenDeferRecord> Record =
         parseOpenDeferRecord(*Resolved.Entry);
-    if (Resolved.Entry->ID == GoObj::StackGrowthStatepointID) {
+    if (Resolved.Entry->ID == GoObj::EntryArgsStackMapID) {
       if (Record)
-        report_fatal_error(
-            "GoObj stack-growth statepoint contains open-defer state");
+        report_fatal_error("GoObj entry metadata contains open-defer state");
       continue;
     }
     if (!Record)
@@ -757,7 +757,7 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   }
 
   auto BuildPair = [&](const MCContext::GoObjStackMapEntry &Entry) {
-    bool IsStackGrowth = Entry.ID == GoObj::StackGrowthStatepointID;
+    bool IsEntryArgs = Entry.ID == GoObj::EntryArgsStackMapID;
     GoObjStackMapPair Pair{SmallVector<uint8_t, 8>(ArgsBytesPerBitmap, 0),
                            SmallVector<uint8_t, 8>(LocalsBytesPerBitmap, 0)};
     SmallVector<std::pair<int64_t, int64_t>, 4> AllocaRanges;
@@ -769,9 +769,8 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
         ArrayRef(Entry.Locations).drop_front(Entry.NumDeoptLocations);
     for (const GoObjAllocaPtrMapRecord &Record :
          parseAllocaPtrMapRecords(Entry)) {
-      if (IsStackGrowth)
-        report_fatal_error(
-            "GoObj stack-growth statepoint contains an alloca ptrmap");
+      if (IsEntryArgs)
+        report_fatal_error("GoObj entry metadata contains an alloca ptrmap");
       MCContext::GoObjStackMapLocation RecordBase =
           NormalizeFrameLocation(Record.Base);
       if (RecordBase.Size != PointerSize ||
@@ -914,17 +913,16 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
             ", offset=" + Twine(Loc.Offset));
 
       for (int64_t WordOffset : *PointerWordOffsets) {
-        if (IsStackGrowth) {
-          std::optional<uint32_t> Bit = goobj::classifyStackGrowthStackMapSlot(
+        if (IsEntryArgs) {
+          std::optional<uint32_t> Bit = goobj::classifyEntryArgsStackMapSlot(
               WordOffset, PointerSize, FrameLayout.EntryArgsStart, ArgSize);
           if (Loc.Type != MCContext::GoObjStackMapLocation::Indirect || !Bit)
             report_fatal_error(
-                "GoObj stack-growth statepoint contains an invalid argument "
+                "GoObj entry argument stack map contains an invalid argument "
                 "pointer slot");
           Pair.Args[*Bit / 8] |= uint8_t(1u << (*Bit % 8));
           continue;
         }
-
         goobj::StackMapSlot Slot = goobj::classifyOrdinaryStackMapSlot(
             WordOffset, Loc.Type == MCContext::GoObjStackMapLocation::Indirect,
             PointerSize, FrameLayout.GCLocalsStart, FrameLayout.GCLocalsSize,
@@ -958,30 +956,40 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
     return Pair;
   };
 
-  const ResolvedEntry *StackGrowthEntry = nullptr;
+  const ResolvedEntry *EntryArgsEntry = nullptr;
   for (const ResolvedEntry &Resolved : ResolvedEntries) {
-    if (Resolved.Entry->ID != GoObj::StackGrowthStatepointID)
+    if (Resolved.Entry->ID == GoObj::EntryArgsStackMapID) {
+      if (EntryArgsEntry)
+        report_fatal_error(
+            "GoObj function contains multiple entry argument stack maps");
+      EntryArgsEntry = &Resolved;
       continue;
-    if (StackGrowthEntry)
-      report_fatal_error(
-          "GoObj function contains multiple stack-growth statepoints");
-    StackGrowthEntry = &Resolved;
+    }
   }
-  if (!StackGrowthEntry)
-    report_fatal_error("GoObj function has no stack-growth statepoint");
+  if (!EntryArgsEntry)
+    report_fatal_error("GoObj function has no entry argument stack map");
+  if (EntryArgsEntry->Entry->IsIndirectCall)
+    report_fatal_error("GoObj entry argument stack map is a callsite");
 
   SmallVector<GoObjStackMapPair, 8> Pairs;
-  Pairs.push_back(BuildPair(*StackGrowthEntry->Entry));
+  Pairs.push_back(BuildPair(*EntryArgsEntry->Entry));
   SmallVector<GoObjPCTabEntry, 16> PCDataEntries;
+  // PCSP is derived from the Machine CFG. Whenever control flow returns to
+  // the entry stack depth, only the function-level entry argument map is
+  // valid. This covers the pre-frame morestack slow path without naming the
+  // helper or manufacturing a statepoint for its raw ABI0 call.
+  for (const GoObjPCTabEntry &Entry : PCSPEntries)
+    if (Entry.Value == 0 && Entry.PC < Function.Size)
+      PCDataEntries.push_back({Entry.PC, 0});
   std::optional<uint64_t> PreviousCallsitePC;
   SmallVector<uint32_t, 4> IndirectCallOffsets;
   for (const ResolvedEntry &Resolved : ResolvedEntries) {
+    if (Resolved.Entry->ID == GoObj::EntryArgsStackMapID)
+      continue;
     if (PreviousCallsitePC && *PreviousCallsitePC == Resolved.CallsitePC)
       report_fatal_error("GoObj statepoint callsites have duplicate PCs");
     PreviousCallsitePC = Resolved.CallsitePC;
     const MCContext::GoObjStackMapEntry &Entry = *Resolved.Entry;
-    if (Entry.ID == GoObj::StackGrowthStatepointID && Entry.IsIndirectCall)
-      report_fatal_error("GoObj stack-growth statepoint call is indirect");
     if (Entry.IsIndirectCall) {
       if (Resolved.CallsitePC >= Function.Size)
         report_fatal_error(
@@ -992,23 +1000,21 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
     if (Entry.PointerSize != PointerSize)
       report_fatal_error(
           "GoObj statepoint pointer size changes within a function");
-    uint32_t MapIndex = 0;
-    if (Entry.ID != GoObj::StackGrowthStatepointID) {
-      GoObjStackMapPair Pair = BuildPair(Entry);
-      auto It = llvm::find(Pairs, Pair);
-      if (It == Pairs.end()) {
-        MapIndex = checkedUint32(Pairs.size(), "GoObj stack map index");
-        Pairs.push_back(std::move(Pair));
-      } else {
-        MapIndex = checkedUint32(It - Pairs.begin(), "GoObj stack map index");
-      }
+    GoObjStackMapPair Pair = BuildPair(Entry);
+    auto It = llvm::find(Pairs, Pair);
+    uint32_t MapIndex;
+    if (It == Pairs.end()) {
+      MapIndex = checkedUint32(Pairs.size(), "GoObj stack map index");
+      Pairs.push_back(std::move(Pair));
+    } else {
+      MapIndex = checkedUint32(It - Pairs.begin(), "GoObj stack map index");
     }
     if (MapIndex > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))
       report_fatal_error("GoObj stack map index exceeds int32 limit");
 
     // GoObj records statepoint callsites at the beginning of the CALL. The
-    // live-out map remains in effect until another statepoint, including the
-    // stack-growth call, changes it.
+    // live-out map remains in effect until another statepoint or a CFG-derived
+    // return to the entry stack depth changes it.
     PCDataEntries.push_back(
         {Resolved.CallsitePC, static_cast<int32_t>(MapIndex)});
   }
@@ -1081,7 +1087,7 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   Result.Args = makeStackMap(ArgsNBits, ArgsBitmaps);
   Result.Locals = makeStackMap(NBits, LocalsBitmaps);
   Result.PCData =
-      makePCTab(-1, NormalizedPCDataEntries, Function.Size, PCQuantum);
+      makePCTab(0, NormalizedPCDataEntries, Function.Size, PCQuantum);
   Result.OpenDefer = std::move(OpenDeferData);
   Result.IndirectCallOffsets = std::move(IndirectCallOffsets);
   Result.StackObjects = std::move(FunctionStackObjects);
@@ -2006,7 +2012,8 @@ uint64_t GoObjObjectWriter::writeObject() {
               Symbols[I].Symbol)) {
         if (!Entries->empty()) {
           GoObjStatepointStackMaps Maps = makeStatepointStackMaps(
-              *Asm, Symbols[I], StackSize, ArgSize, PCQuantum, *Entries);
+              *Asm, Symbols[I], StackSize, ArgSize, PCQuantum, *Entries,
+              PCSPEntries);
           for (uint32_t Offset : Maps.IndirectCallOffsets)
             Symbols[I].Relocations.push_back({Offset, 0, GoObj::R_CALLIND, 0,
                                               GoObj::PkgIdxInvalid, 0,

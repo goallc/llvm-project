@@ -60,8 +60,8 @@ expandStackMapPointerWords(int64_t Offset, uint16_t Size, bool IsIndirect,
 }
 
 inline std::optional<uint32_t>
-classifyStackGrowthStackMapSlot(int64_t Offset, uint32_t PointerSize,
-                                uint64_t ArgsStart, uint64_t ArgsSize) {
+classifyEntryArgsStackMapSlot(int64_t Offset, uint32_t PointerSize,
+                              uint64_t ArgsStart, uint64_t ArgsSize) {
   if (Offset < 0 || !PointerSize)
     return std::nullopt;
   uint64_t UOffset = static_cast<uint64_t>(Offset);

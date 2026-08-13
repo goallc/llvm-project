@@ -13,7 +13,7 @@ declare void @llvm.lifetime.start.p0(i64 immarg, ptr captures(none))
 ; The alloca is the canonical home of a register argument. Its direct gc-live
 ; base makes its pointer contents active at the callsite, so bit zero belongs
 ; to ArgsPointerMaps rather than LocalsPointerMaps.
-define goabiinternal ptr @active_scalar(ptr %value) #0 gc "statepoint-example" {
+define goabiinternal ptr @active_scalar(ptr %value) gc "statepoint-example" {
 entry:
   %home = alloca ptr, align 8
   call void @llvm.lifetime.start.p0(i64 8, ptr %home)
@@ -46,7 +46,7 @@ entry:
 ; Its alloca base is not directly live at the ordinary statepoint, so the
 ; function needs one StackObject at non-negative offset zero relative to argp.
 define goabiinternal void @inactive_aggregate(%aggregate %value)
-    #0 gc "statepoint-example" {
+    gc "statepoint-example" {
 entry:
   %home = alloca %aggregate, align 8
   call void @llvm.lifetime.start.p0(i64 24, ptr %home)
@@ -74,7 +74,7 @@ entry:
 ; An aggregate assigned wholly to the stack reuses its caller-populated slot;
 ; the lifetime marker must not make SelectionDAG allocate and copy a local.
 define goabiinternal void @inactive_stack_aggregate(%stack_aggregate %value)
-    #0 gc "statepoint-example" {
+    gc "statepoint-example" {
 entry:
   %home = alloca %stack_aggregate, align 8
   call void @llvm.lifetime.start.p0(i64 16, ptr %home)
@@ -103,4 +103,3 @@ entry:
 
 declare token @llvm.experimental.gc.statepoint.p0(
     i64 immarg, i32 immarg, ptr, i32 immarg, i32 immarg, ...)
-attributes #0 = { "go-stack-growth-statepoint" }

@@ -32,12 +32,16 @@ namespace goabi {
 
 inline constexpr StringLiteral TupleResultsAttr = "go_results_tuple";
 inline constexpr StringLiteral PadTypeName = "go.abi.pad";
-// The Go statepoint pass uses this attribute to request that target frame
-// lowering represent the late morestack call with a root-free STATEPOINT.
-inline constexpr StringLiteral StackGrowthStatepointAttr =
-    "go-stack-growth-statepoint";
-inline constexpr uint64_t StackGrowthStatepointID =
-    GoObj::StackGrowthStatepointID;
+// Target frame lowering must not synthesize a morestack edge for such a
+// function. GoObj Go functions otherwise use the native Go default: emit a
+// stack check and call the ABI0 runtime.morestack helper on the slow path.
+inline constexpr StringLiteral NoSplitAttr = "go-nosplit";
+// A //go:systemstack function checks g.stackguard1 and traps through
+// runtime.morestackc if it is entered on an ordinary goroutine stack.
+inline constexpr StringLiteral SystemStackAttr = "go-systemstack";
+// Every GoObj Go function carries its entry argument pointer map in a
+// zero-byte STACKMAP. It is function metadata, not a stack-growth callsite.
+inline constexpr uint64_t EntryArgsStackMapID = GoObj::EntryArgsStackMapID;
 
 inline bool isGoABIInternalCallingConv(CallingConv::ID CC) {
   return CC == CallingConv::GoABIInternal;
