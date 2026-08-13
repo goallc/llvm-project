@@ -85,6 +85,16 @@ public:
 };
 
 FunctionPass *createX86InsertVZeroUpperLegacyPass();
+
+/// This pass restores x86-64 Go ABIInternal's reserved register state at ABI0
+/// boundaries after register allocation and frame lowering.
+class X86GoABIPass : public OptionalPassInfoMixin<X86GoABIPass> {
+public:
+  PreservedAnalyses run(MachineFunction &MF,
+                        MachineFunctionAnalysisManager &MFAM);
+};
+
+FunctionPass *createX86GoABILegacyPass();
 /// This pass inserts ENDBR instructions before indirect jump/call
 /// destinations as part of CET IBT mechanism.
 class X86IndirectBranchTrackingPass
@@ -487,6 +497,7 @@ void initializeCompressEVEXLegacyPass(PassRegistry &);
 void initializeX86FixupBWInstLegacyPass(PassRegistry &);
 void initializeFixupLEAsLegacyPass(PassRegistry &);
 void initializeX86ArgumentStackSlotLegacyPass(PassRegistry &);
+void initializeX86GoABILegacyPass(PassRegistry &);
 void initializeX86AsmPrinterPass(PassRegistry &);
 void initializeX86FixupInstTuningLegacyPass(PassRegistry &);
 void initializeX86FixupVectorConstantsLegacyPass(PassRegistry &);

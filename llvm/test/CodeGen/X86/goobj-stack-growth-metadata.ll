@@ -88,6 +88,8 @@ join:
 ; ASM: cmpq 16(%r14), %r12
 ; ASM: ja [[BIG_BODY:.LBB0_[0-9]+]]
 ; ASM: [[BIG_MORESTACK]]:
+; morestack resumes the function through runtime.gogo rather than returning as
+; an ordinary ABI0 callee, so there is no call-boundary repair sequence here.
 ; ASM: callq "runtime.morestack_noctxt<ABI0>"
 ; ASM-NEXT: movq 8(%rsp), %rax
 ; ASM-NEXT: jmp [[BIG_CHECK]]

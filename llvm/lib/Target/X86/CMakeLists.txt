@@ -37,6 +37,7 @@ set(sources
   X86CodeGenPassBuilder.cpp
   X86DomainReassignment.cpp
   X86GlobalBaseReg.cpp
+  X86GoABI.cpp
   X86LowerTileCopy.cpp
   X86LowerAMXType.cpp
   X86LowerAMXIntrinsics.cpp
