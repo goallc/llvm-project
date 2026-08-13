@@ -1346,7 +1346,6 @@ bool AArch64ExpandPseudoImpl::expandMI(MachineBasicBlock &MBB,
     if (MF.getTarget().getTargetTriple().isOSBinFormatGoObj()) {
       MCContext &Ctx = MF.getContext();
       MCSymbol *Callee = Ctx.getOrCreateSymbol(WriteBarrierName);
-      Ctx.setGoObjSymbolABI(Callee, GoObj::SymABIInternal);
       Call.addSym(Callee);
     } else {
       Call.addExternalSymbol(WriteBarrierName);

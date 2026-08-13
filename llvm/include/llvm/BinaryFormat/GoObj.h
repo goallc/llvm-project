@@ -19,6 +19,10 @@
 namespace llvm {
 namespace GoObj {
 
+// LLVM global names carry this suffix when they identify the ABI0 form of a
+// Go function. GoObj serialization strips it and records ABI0 separately.
+inline constexpr char ABI0SymbolSuffix[] = "<ABI0>";
+
 // "GoStackG" encoded as the stable statepoint identifier for the pre-frame
 // runtime.morestack slow path.
 inline constexpr uint64_t StackGrowthStatepointID = 0x476f537461636b47ULL;

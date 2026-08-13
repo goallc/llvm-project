@@ -33,7 +33,7 @@ entry:
 ; CHECK-NEXT: hasheddef 0:  abi=0 type=3
 ; CHECK: nonpkgdef-count: 0
 ; CHECK: nonpkgref-count: 1
-; CHECK-NEXT: nonpkgref 0: ext abi=0 type=0 size=0
+; CHECK-NEXT: nonpkgref 0: ext abi=1 type=0 size=0
 ; CHECK: aux 0.0: type=funcinfo target= args=0 locals=0
 ; CHECK-NEXT: aux 0.1: type=funcdata target= data=0100000000000000
 ; CHECK-NEXT: aux 0.2: type=funcdata target= data=0100000000000000

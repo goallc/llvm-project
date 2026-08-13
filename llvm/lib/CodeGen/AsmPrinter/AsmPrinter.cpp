@@ -601,14 +601,6 @@ bool AsmPrinter::doInitialization(Module &M) {
 
   if (Target.isOSBinFormatGoObj()) {
     collectGoObjModuleMetadata(*this, M);
-    for (const Function &F : M) {
-      if (!F.isDeclaration())
-        continue;
-      if (goabi::isGoABIInternalCallingConv(F.getCallingConv()))
-        OutContext.setGoObjSymbolABI(getSymbol(&F), GoObj::SymABIInternal);
-      else if (goabi::isGoABI0CallingConv(F.getCallingConv()))
-        OutContext.setGoObjSymbolABI(getSymbol(&F), GoObj::SymABI0);
-    }
   }
 
   // On AIX, we delay emitting any section information until
@@ -1049,17 +1041,26 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
     AP.OutContext.setGoObjImports(std::move(ParsedImports));
   }
 
-  for (const GlobalObject &GO : M.global_objects()) {
-    const MDNode *MD = GO.getMetadata("goobj.symbol.name");
-    if (!MD)
+  // The LLVM symbol name is the sole carrier of ABI0 object identity. Keep the
+  // calling convention as an independent lowering contract and reject stale
+  // metadata or mismatched names instead of trying to repair either one.
+  for (const GlobalObject &GO : M.global_objects())
+    if (GO.getMetadata("goobj.symbol.name"))
+      report_fatal_error(
+          "!goobj.symbol.name is obsolete; encode ABI0 in the symbol name");
+
+  for (const Function &F : M) {
+    if (F.isIntrinsic())
       continue;
-    if (MD->getNumOperands() != 1)
-      report_fatal_error("expected !goobj.symbol.name to have one operand");
-    StringRef Name =
-        getGoObjMetadataString(MD->getOperand(0), "goobj.symbol.name");
-    if (Name.empty())
-      report_fatal_error("invalid !goobj.symbol.name attachment");
-    AP.OutContext.setGoObjSymbolName(AP.getSymbol(&GO), Name);
+    bool HasABI0Suffix = F.getName().ends_with(GoObj::ABI0SymbolSuffix);
+    bool IsABI0 = goabi::isGoABI0CallingConv(F.getCallingConv());
+    bool IsABIInternal =
+        goabi::isGoABIInternalCallingConv(F.getCallingConv());
+    if (HasABI0Suffix != IsABI0)
+      report_fatal_error(
+          "Go ABI0 calling convention and <ABI0> symbol suffix disagree");
+    if (IsABI0 || IsABIInternal)
+      AP.OutContext.setGoObjFunctionSymbol(AP.getSymbol(&F));
   }
 
   for (const GlobalObject &GO : M.global_objects()) {
@@ -3750,11 +3751,6 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
     if (std::optional<std::pair<uint8_t, uint8_t>> Info =
             getGoObjFunctionInfo(F))
       OutContext.setGoObjFunctionInfo(CurrentFnSym, Info->first, Info->second);
-    if (goabi::isGoABIInternalCallingConv(F.getCallingConv()))
-      OutContext.setGoObjSymbolABI(CurrentFnSym, GoObj::SymABIInternal);
-    else if (goabi::isGoABI0CallingConv(F.getCallingConv()))
-      OutContext.setGoObjSymbolABI(CurrentFnSym, GoObj::SymABI0);
-
     const MachineFrameInfo &FrameInfo = MF.getFrameInfo();
     uint64_t StackSize =
         FrameInfo.getStackSize() + FrameInfo.getUnsafeStackSize();

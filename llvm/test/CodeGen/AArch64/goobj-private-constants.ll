@@ -5,7 +5,7 @@
 @.str = private unnamed_addr constant [24 x i8] c"bad data want %d, got %d"
 @after = internal constant i64 84, section ".rodata", align 8
 
-define ptr @private_string_address() {
+define goabiinternal ptr @private_string_address() {
 entry:
   ret ptr @.str
 }

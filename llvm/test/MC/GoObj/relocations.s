@@ -8,7 +8,7 @@
 # CHECK: nonpkgdef 2: ptr abi=0 type=7 size=16
 # CHECK: nonpkgdef 3: data abi=0 type=7 size=8
 # CHECK: nonpkgref-count: 2
-# CHECK: nonpkgref 0: external.func abi=0 type=0 size=0
+# CHECK: nonpkgref 0: external.func abi=1 type=0 size=0
 # CHECK: nonpkgref 1: external.data abi=0 type=0 size=0
 # CHECK: reloc 0.0: off=1 size=4 type=7 add=0 target=callee
 # CHECK: reloc 0.1: off=6 size=4 type=7 add=0 target=external.func

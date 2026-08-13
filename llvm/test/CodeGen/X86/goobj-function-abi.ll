@@ -1,7 +1,7 @@
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj < %s -o %t.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | FileCheck %s
 
-define goabi0 void @abi0_func() {
+define goabi0 void @"abi0_func<ABI0>"() {
 entry:
   ret void
 }

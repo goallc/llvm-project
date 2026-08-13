@@ -33,7 +33,7 @@ entry:
 ; CHECK-DAG: offset: 8, size: 1
 ; CHECK: STRBBui $w0, $sp, 8
 ; CHECK-NEXT: STRHHui $w1, $sp, 5
-; CHECK: STATEPOINT 5147424658422983495, 0, 0, &runtime.morestack_noctxt
+; CHECK: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack_noctxt<ABI0>"
 ; CHECK: $w0 = LDRBBui $sp, 8
 ; CHECK-NEXT: $w1 = LDRHHui $sp, 5
 
@@ -41,12 +41,12 @@ entry:
 ; CHECK: offset: 32776, size: 8
 ; CHECK: $x27 = ADDXri $sp, 16, 0
 ; CHECK-NEXT: STRXui $x0, $x27, 4095
-; CHECK: STATEPOINT 5147424658422983495, 0, 0, &runtime.morestack_noctxt
+; CHECK: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack_noctxt<ABI0>"
 ; CHECK: $x27 = ADDXri $sp, 16, 0
 ; CHECK-NEXT: $x0 = LDRXui $x27, 4095
 
 ; CHECK-LABEL: name: large_home_boundary
 ; CHECK: offset: 32760, size: 8
 ; CHECK: STRXui $x0, $sp, 4095
-; CHECK: STATEPOINT 5147424658422983495, 0, 0, &runtime.morestack_noctxt
+; CHECK: STATEPOINT 5147424658422983495, 0, 0, &"runtime.morestack_noctxt<ABI0>"
 ; CHECK: $x0 = LDRXui $sp, 4095

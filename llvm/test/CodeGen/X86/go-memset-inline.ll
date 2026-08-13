@@ -12,8 +12,8 @@ define goabiinternal void @constant_memset(ptr %dst) {
   ret void
 }
 
-define goabi0 void @dynamic_memset(ptr %dst, i64 %size) {
-; CHECK-LABEL: dynamic_memset:
+define goabi0 void @"dynamic_memset<ABI0>"(ptr %dst, i64 %size) {
+; CHECK-LABEL: "dynamic_memset<ABI0>":
 ; CHECK: rep
 ; CHECK-SAME: stosb
 ; CHECK-NOT: callq memset
