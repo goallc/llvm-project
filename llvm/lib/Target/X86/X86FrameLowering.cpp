@@ -248,6 +248,52 @@ static bool shouldEmitGoStackCheck(const MachineFunction &MF) {
          !MF.getFunction().hasFnAttribute(goabi::NoSplitAttr);
 }
 
+static StringRef getGoDirectCalleeName(const MachineInstr &MI,
+                                       const X86InstrInfo &TII) {
+  const MachineOperand &Callee = MI.getOpcode() == TargetOpcode::STATEPOINT
+                                     ? StatepointOpers(&MI).getCallTarget()
+                                     : TII.getCalleeOperand(MI);
+  if (Callee.isGlobal())
+    return Callee.getGlobal()->getName();
+  if (Callee.isSymbol())
+    return Callee.getSymbolName();
+  if (Callee.isMCSymbol())
+    return Callee.getMCSymbol()->getName();
+  return {};
+}
+
+static bool isGoLeafLikeRuntimeCall(const MachineInstr &MI,
+                                    const X86InstrInfo &TII) {
+  StringRef Name = getGoDirectCalleeName(MI, TII);
+  return Name == "runtime.panicdivide" || Name == "runtime.panicwrap" ||
+         Name == "runtime.panicshift" || Name == "runtime.panicBounds" ||
+         Name == "runtime.panicExtend";
+}
+
+static bool isGoSmallLeafLikeFunction(const MachineFunction &MF,
+                                      const X86InstrInfo &TII,
+                                      uint64_t StackSize) {
+  bool HasLeafLikeCall = false;
+  for (const MachineBasicBlock &MBB : MF)
+    for (const MachineInstr &MI : MBB) {
+      if (!MI.isCall())
+        continue;
+      // The entry argument STACKMAP is a zero-byte data marker. LLVM models
+      // the pseudo as call-like for register-mask purposes, but it is not a
+      // machine call and must not turn every Go function into a non-leaf.
+      if (MI.getOpcode() == TargetOpcode::STACKMAP)
+        continue;
+      if (!isGoLeafLikeRuntimeCall(MI, TII))
+        return false;
+      HasLeafLikeCall = true;
+    }
+
+  // CALL itself pushes an eight-byte return PC. Native x86 permits these
+  // leaf-like runtime calls only while frame+return-PC remains StackSmall.
+  uint64_t CallDepth = HasLeafLikeCall ? 8 : 0;
+  return StackSize < GoStackSmall - CallDepth;
+}
+
 static bool hasGoClosureContext(const Function &F) {
   for (const Argument &Arg : F.args())
     if (Arg.hasNestAttr())
@@ -322,8 +368,15 @@ static void emitGoStackCheck(MachineFunction &MF,
   if (!MF.getSubtarget<X86Subtarget>().getFrameLowering()->hasReservedCallFrame(
           MF))
     StackSize += MFI.getMaxCallFrameSize();
-  const DebugLoc DL;
   const X86InstrInfo &TII = *MF.getSubtarget<X86Subtarget>().getInstrInfo();
+  // Match the native Go assembler: a leaf function whose final frame is
+  // smaller than StackSmall is effectively NOSPLIT. X86 also treats its
+  // zero-argument panic helpers as leaf-like when their CALL return PC still
+  // fits in StackSmall. Keep entry argument-map emission independent from this
+  // decision.
+  if (isGoSmallLeafLikeFunction(MF, TII, StackSize))
+    return;
+  const DebugLoc DL;
   const X86MachineFunctionInfo *X86FI = MF.getInfo<X86MachineFunctionInfo>();
   ArrayRef<X86MachineFunctionInfo::GoArgHome> Homes = X86FI->getGoArgHomes();
   MachineBasicBlock &EntryMBB = getGoStackCheckEntryMBB(MF, PrologueMBB);

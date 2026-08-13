@@ -8,9 +8,11 @@
 
 ; A normal statepoint selects a live frame map. When physical block placement
 ; later reaches a CFG path at the entry SP depth, PCDATA_StackMapIndex must
-; return to the function-level entry map without identifying morestack by name.
+; return to Go's entry value (-1), which runtime getStackMap normalizes to
+; function-level ArgsPointerMaps bitmap 0, without identifying morestack by
+; name.
 
-; CHECK: type=pcdata target= pc=[0-{{[0-9]+}}:0,{{[0-9]+}}-{{[0-9]+}}:1,{{[0-9]+}}-{{[0-9]+}}:0]
+; CHECK: type=pcdata target= pc=[0-{{[0-9]+}}:-1,{{[0-9]+}}-{{[0-9]+}}:1,{{[0-9]+}}-{{[0-9]+}}:-1]
 
 declare goabiinternal void @callee()
 
