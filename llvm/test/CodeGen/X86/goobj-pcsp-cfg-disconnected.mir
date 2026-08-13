@@ -1,0 +1,53 @@
+# REQUIRES: x86-registered-target
+# RUN: llc -mtriple=x86_64-unknown-linux-goobj \
+# RUN:   -start-after=block-placement -verify-machineinstrs \
+# RUN:   -goobj-package-path=main -filetype=obj %s -o %t.o
+# RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | FileCheck %s
+
+# The physically emitted bb.1 is disconnected from the entry CFG. It inherits
+# the linear pcsp state and records its real SP changes. Its deliberately
+# different exit depth does not change bb.2's independently proved entry
+# depth. The physically trailing bb.3 starts at the state left by bb.2.
+# CHECK: aux 0.3: type=pcsp target= pc=[0-1:0,1-7:8,7-16:40,16-18:24,18-19:8,19-24:0,24-28:32,28-29:0]
+
+--- |
+  target triple = "x86_64-unknown-linux-goobj"
+
+  declare goabiinternal void @runtime.GC()
+
+  define goabiinternal void @disconnected() {
+    ret void
+  }
+...
+---
+name: disconnected
+tracksRegLiveness: true
+frameInfo:
+  stackSize: 8
+  adjustsStack: true
+  hasCalls: true
+body: |
+  bb.0:
+    liveins: $rbp
+    successors: %bb.2
+
+    frame-setup PUSH64r $rbp, implicit-def $rsp, implicit $rsp
+    JMP_1 %bb.2
+
+  bb.1:
+    successors: %bb.2
+
+    $rsp = frame-setup SUB64ri32 $rsp, 32, implicit-def dead $eflags
+    CALL64pcrel32 @runtime.GC, csr_64_go, implicit $rsp
+    $rsp = frame-destroy ADD64ri32 $rsp, 16, implicit-def dead $eflags
+    JMP_1 %bb.2
+
+  bb.2:
+    $rbp = frame-destroy POP64r implicit-def $rsp, implicit $rsp
+    RET64
+
+  bb.3:
+    $rsp = frame-setup SUB64ri32 $rsp, 32, implicit-def dead $eflags
+    $rsp = frame-destroy ADD64ri32 $rsp, 32, implicit-def dead $eflags
+    RET64
+...

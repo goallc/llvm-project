@@ -1,0 +1,54 @@
+# REQUIRES: aarch64-registered-target
+# RUN: llc -mtriple=aarch64-apple-darwin-goobj \
+# RUN:   -start-after=block-placement -verify-machineinstrs \
+# RUN:   -goobj-package-path=main -filetype=obj %s -o %t.o
+# RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | FileCheck %s
+
+# A late AArch64 pass proves that bb.0's conditional branch is always taken
+# and removes bb.1's predecessor while retaining its emitted instructions.
+# The disconnected block inherits the linear pcsp state, records its real
+# nested SP changes. Its deliberately different exit depth does not change
+# bb.2's entry depth, which was independently proved from bb.0. The physically
+# trailing bb.3 starts at the state left by bb.2.
+# CHECK: aux 0.3: type=pcsp target= pc=[0-1:0,1-3:16,3-5:48,5-6:32,6-7:16,7-9:0,9-10:32,10-11:0]
+
+--- |
+  target triple = "aarch64-apple-darwin-goobj"
+
+  declare goabiinternal void @runtime.GC()
+
+  define goabiinternal void @disconnected() {
+    ret void
+  }
+...
+---
+name: disconnected
+tracksRegLiveness: true
+frameInfo:
+  stackSize: 16
+  adjustsStack: true
+  hasCalls: true
+body: |
+  bb.0:
+    successors: %bb.2, %bb.1
+
+    early-clobber $sp = frame-setup STRXpre $xzr, $sp, -16
+    CBZX $xzr, %bb.2
+
+  bb.1:
+    successors: %bb.2
+
+    early-clobber $sp = frame-setup STRXpre $xzr, $sp, -32
+    BL @runtime.GC, csr_aarch64_go, implicit-def dead $lr, implicit $sp, implicit-def $sp
+    early-clobber $sp, $x8 = frame-destroy LDRXpost $sp, 16
+    B %bb.2
+
+  bb.2:
+    early-clobber $sp, $lr = frame-destroy LDRXpost $sp, 16
+    RET undef $lr
+
+  bb.3:
+    early-clobber $sp = frame-setup STRXpre $xzr, $sp, -32
+    early-clobber $sp, $x8 = frame-destroy LDRXpost $sp, 32
+    RET undef $lr
+...

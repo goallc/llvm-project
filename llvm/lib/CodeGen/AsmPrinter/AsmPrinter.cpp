@@ -2609,39 +2609,71 @@ computeGoObjMBBEntrySPDelta(const MachineFunction &MF) {
     return EntrySPDelta;
 
   const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
-  SmallVector<const MachineBasicBlock *, 8> Worklist;
-  EntrySPDelta[MF.front().getNumber()] = 0;
-  Worklist.push_back(&MF.front());
+  SmallVector<std::optional<unsigned>, 8> EntryComponent(MF.getNumBlockIDs());
+  auto Propagate = [&](const MachineBasicBlock &Root, unsigned Component) {
+    SmallVector<const MachineBasicBlock *, 8> Worklist;
+    Worklist.push_back(&Root);
 
-  for (size_t I = 0; I != Worklist.size(); ++I) {
-    const MachineBasicBlock &MBB = *Worklist[I];
-    int32_t ExitSPDelta = *EntrySPDelta[MBB.getNumber()];
+    for (size_t I = 0; I != Worklist.size(); ++I) {
+      const MachineBasicBlock &MBB = *Worklist[I];
+      int32_t ExitSPDelta = *EntrySPDelta[MBB.getNumber()];
+      for (const MachineInstr &MI : MBB) {
+        if (MI.getOpcode() == TargetOpcode::CFI_INSTRUCTION)
+          continue;
+        ExitSPDelta =
+            applyGoObjSPAdjust(ExitSPDelta, TII->getGoObjSPAdjust(MI));
+      }
+
+      for (const MachineBasicBlock *Succ : MBB.successors()) {
+        std::optional<int32_t> &SuccEntrySPDelta =
+            EntrySPDelta[Succ->getNumber()];
+        if (!SuccEntrySPDelta) {
+          SuccEntrySPDelta = ExitSPDelta;
+          EntryComponent[Succ->getNumber()] = Component;
+          Worklist.push_back(Succ);
+          continue;
+        }
+        // A disconnected component can branch back into code whose state was
+        // already proved from a different root. The edge is not executable
+        // from that root, so physical emission restores the destination's
+        // independently proved state instead of merging the two components.
+        if (*EntryComponent[Succ->getNumber()] != Component)
+          continue;
+        if (*SuccEntrySPDelta != ExitSPDelta)
+          report_fatal_error(
+              Twine("inconsistent GoObj pcsp value at entry to ") +
+              Succ->getFullName() + " in function " + MF.getName());
+      }
+    }
+  };
+
+  EntrySPDelta[MF.front().getNumber()] = 0;
+  EntryComponent[MF.front().getNumber()] = 0;
+  Propagate(MF.front(), 0);
+
+  // Late target passes can make a still-emitted block unreachable, for
+  // example by proving that a conditional branch is always taken. Such a
+  // block still occupies PCs in the linear pcsp table. Seed each disconnected
+  // CFG component with the pcsp state carried to its first block by physical
+  // emission, then continue to validate every semantic edge in that component.
+  // A later reachable block will restore its independently proven entry state.
+  int32_t LayoutSPDelta = 0;
+  unsigned NextComponent = 1;
+  for (const MachineBasicBlock &MBB : MF) {
+    std::optional<int32_t> &MBBEntrySPDelta = EntrySPDelta[MBB.getNumber()];
+    if (!MBBEntrySPDelta) {
+      MBBEntrySPDelta = LayoutSPDelta;
+      EntryComponent[MBB.getNumber()] = NextComponent;
+      Propagate(MBB, NextComponent++);
+    }
+
+    LayoutSPDelta = *MBBEntrySPDelta;
     for (const MachineInstr &MI : MBB) {
       if (MI.getOpcode() == TargetOpcode::CFI_INSTRUCTION)
         continue;
-      ExitSPDelta = applyGoObjSPAdjust(ExitSPDelta, TII->getGoObjSPAdjust(MI));
+      LayoutSPDelta =
+          applyGoObjSPAdjust(LayoutSPDelta, TII->getGoObjSPAdjust(MI));
     }
-
-    for (const MachineBasicBlock *Succ : MBB.successors()) {
-      std::optional<int32_t> &SuccEntrySPDelta =
-          EntrySPDelta[Succ->getNumber()];
-      if (!SuccEntrySPDelta) {
-        SuccEntrySPDelta = ExitSPDelta;
-        Worklist.push_back(Succ);
-        continue;
-      }
-      if (*SuccEntrySPDelta != ExitSPDelta)
-        report_fatal_error(Twine("inconsistent GoObj pcsp value at entry to ") +
-                           Succ->getFullName() + " in function " +
-                           MF.getName());
-    }
-  }
-
-  for (const MachineBasicBlock &MBB : MF) {
-    if (!EntrySPDelta[MBB.getNumber()])
-      report_fatal_error(
-          Twine("cannot determine GoObj pcsp value at entry to ") +
-          MBB.getFullName() + " in function " + MF.getName());
   }
 
   return EntrySPDelta;
