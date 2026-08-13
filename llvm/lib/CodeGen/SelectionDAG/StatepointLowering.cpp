@@ -1070,7 +1070,10 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
 
   // Since we always emit CopyToRegs (even for local relocates), we must
   // update root, so that they are emitted before any local uses.
-  (void)getControlRoot();
+  SDValue FinalChain = getControlRoot();
+  FinalChain = DAG.getTargetLoweringInfo().finalizeStatepointCallChain(
+      FinalChain, SI.CLI.CallConv, getCurSDLoc(), DAG);
+  DAG.setRoot(FinalChain);
 
   // TODO: A better future implementation would be to emit a single variable
   // argument, variable return value STATEPOINT node here and then hookup the

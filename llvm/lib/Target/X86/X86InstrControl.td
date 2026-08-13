@@ -465,6 +465,15 @@ def GO_GC_WRITE_BARRIER
                     (int_go_gc_write_barrier (i32 timm:$entries)))]>,
       Requires<[In64BitMode]>;
 
+// Go ABI0 neither supplies nor preserves ABIInternal's dedicated g and zero
+// registers.  Keep the repair sequence as a call-adjacent pseudo until after
+// register allocation so it cannot be treated as an ordinary callee-saved
+// register definition before ABI0's reduced callee-save policy is applied.
+let isCodeGenOnly = 1, hasSideEffects = 1, mayLoad = 1,
+    hasNoSchedulingInfo = 1 in
+def GO_REPAIR_ABI_INTERNAL_REGS
+    : PseudoI<(outs), (ins), []>, Requires<[In64BitMode]>;
+
 // Conditional tail calls are similar to the above, but they are branches
 // rather than barriers, and they use EFLAGS.
 let isCall = 1, isTerminator = 1, isReturn = 1, isBranch = 1,

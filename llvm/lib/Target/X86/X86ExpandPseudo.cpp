@@ -315,6 +315,23 @@ bool X86ExpandPseudoImpl::expandMI(MachineBasicBlock &MBB,
     MI.eraseFromParent();
     return true;
   }
+  case X86::GO_REPAIR_ABI_INTERNAL_REGS: {
+    // The native Go compiler emits exactly this sequence when crossing from
+    // ABI0 into ABIInternal, and again after an ABIInternal caller returns
+    // from ABI0. R_TLS_LE deliberately has no symbol in internal Go linking;
+    // the linker resolves it to runtime.tlsg.
+    BuildMI(MBB, MBBI, DL, TII->get(X86::XORPSrr), X86::XMM15)
+        .addReg(X86::XMM15, RegState::Undef)
+        .addReg(X86::XMM15, RegState::Undef);
+    BuildMI(MBB, MBBI, DL, TII->get(X86::MOV64rm), X86::R14)
+        .addReg(X86::NoRegister)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addExternalSymbol("runtime.tlsg", X86II::MO_TPOFF)
+        .addReg(X86::FS);
+    MI.eraseFromParent();
+    return true;
+  }
   case X86::TCRETURNdi:
   case X86::TCRETURNdicc:
   case X86::TCRETURNri:

@@ -5138,6 +5138,15 @@ public:
     llvm_unreachable("Not Implemented");
   }
 
+  /// Let a target append mandatory call-boundary work after a statepoint has
+  /// replaced the temporary target call node.
+  virtual SDValue finalizeStatepointCallChain(SDValue Chain,
+                                              CallingConv::ID CalleeCC,
+                                              const SDLoc &DL,
+                                              SelectionDAG &DAG) const {
+    return Chain;
+  }
+
   /// Target-specific cleanup for formal ByVal parameters.
   virtual void HandleByVal(CCState *, unsigned &, Align) const {}
 
