@@ -57,12 +57,12 @@ done:
 ; COMMON-NEXT: file 0: {{.*}}cdebug.c
 ; COMMON: hasheddef-count: 5
 ; COMMON: nonpkgdef-count: 0
-; X86: hash 0: b3ea8d63c732dc89ddc1accf4206a7bb
-; X86-NEXT: hash 1: 2f05713252bb1b9673be7cf4f639e025
-; X86-NEXT: hash 2: 2d9a46e763fb2afa2f6bf504aef97634
-; ARM64: hash 0: f933ff4cb32d167004d69c3934a4e464
-; ARM64-NEXT: hash 1: cbf5923fb1da07cca3254ffa87009bcc
-; ARM64-NEXT: hash 2: ba4d2125291d2de2a0592dd4bdc679e7
+; X86: hash 0: 76ebad1f8f49595ad91b08e48dc9dd56
+; X86-NEXT: hash 1: 2e8b983aec877a1c003f94b814d56e69
+; X86-NEXT: hash 2: 1689233d6b8d24e3422d5ebae6f408ee
+; ARM64: hash 0: 105a58e8d53963b571ff833d8449eeda
+; ARM64-NEXT: hash 1: 3bef6118e9cf260f78533cdf1a6375ec
+; ARM64-NEXT: hash 2: 3a577c7591ae76fd8b51f8e7ea4ac9d8
 ; COMMON-NEXT: hash 3: 90eb4206729e98003d69bb53d855ecb0
 ; COMMON-NEXT: hash 4: 4b0e7a681c0340c9a97ef4802a3af2f8
 ; COMMON: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data=010000000100000000 pkg=hashed sym=3
@@ -75,4 +75,4 @@ done:
 ; COMMON-SAME: :5
 ; COMMON-SAME: pkg=hashed sym=1
 ; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc={{.*}} pkg=hashed sym=2
-; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc={{.*}}:0{{.*}} pkg=hashed sym=0
+; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc={{.*}}:-1{{.*}} pkg=hashed sym=2

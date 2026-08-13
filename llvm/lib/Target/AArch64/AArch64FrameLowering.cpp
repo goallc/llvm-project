@@ -1394,6 +1394,12 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
     report_fatal_error("GoObj stack growth does not support dynamic allocas");
 
   uint64_t StackSize = MFI.getStackSize() + MFI.getUnsafeStackSize();
+  // Match the native Go assembler: a leaf function whose final frame is
+  // smaller than StackSmall is effectively NOSPLIT.  The entry argument map
+  // is still emitted independently, but there is no need for a morestack
+  // edge because the function cannot exhaust the nosplit stack allowance.
+  if (!MFI.hasCalls() && StackSize < GoStackSmall)
+    return;
 
   const DebugLoc DL;
   const AArch64InstrInfo &TII =
