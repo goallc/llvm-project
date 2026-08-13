@@ -3323,7 +3323,8 @@ private:
     LoadInst *Load =
         IRB.CreateAlignedLoad(NewAllocaTy, &NewAI, NewAI.getAlign(), "load");
 
-    Load->copyMetadata(LI, {LLVMContext::MD_mem_parallel_loop_access,
+    Load->copyMetadata(LI, {LLVMContext::MD_annotation,
+                            LLVMContext::MD_mem_parallel_loop_access,
                             LLVMContext::MD_access_group});
     return extractVector(IRB, Load, BeginIndex, EndIndex, "vec");
   }
@@ -3420,7 +3421,8 @@ private:
 
       if (LI.isVolatile())
         NewLI->setAtomic(LI.getOrdering(), LI.getSyncScopeID());
-      NewLI->copyMetadata(LI, {LLVMContext::MD_mem_parallel_loop_access,
+      NewLI->copyMetadata(LI, {LLVMContext::MD_annotation,
+                               LLVMContext::MD_mem_parallel_loop_access,
                                LLVMContext::MD_access_group});
 
       V = NewLI;
