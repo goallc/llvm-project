@@ -2369,8 +2369,6 @@ uint64_t GoObjObjectWriter::writeObject() {
           "GoObj private constants with relocations are not supported");
 
     int64_t Addend = getGoObjRelocAddend(Reloc);
-    GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
-
     uint16_t RelocType = checkedUint16(Reloc.Type, "relocation type");
     if (Source.Symbol) {
       if (const auto *Overrides =
@@ -2391,6 +2389,16 @@ uint64_t GoObjObjectWriter::writeObject() {
                              static_cast<uint32_t>(LocalOffset)))
         RelocType |= GoObj::R_WEAK;
     }
+
+    // Native x86 Go objects intentionally leave the internal-linking TLS
+    // relocation target empty. The linker resolves R_TLS_LE against its
+    // synthetic runtime.tlsg symbol and supplies that symbol itself when it
+    // translates the relocation for external ELF linking.
+    const Triple::ArchType Arch = Asm->getContext().getTargetTriple().getArch();
+    const bool IsX86TLSLE = (Arch == Triple::x86 || Arch == Triple::x86_64) &&
+                            (RelocType & ~GoObj::R_WEAK) == GoObj::R_TLS_LE;
+    GoObjSymRef TargetSymRef =
+        IsX86TLSLE ? GoObjSymRef{} : GetTargetSymRef(Reloc, Addend);
 
     Source.Relocations.push_back(
         {static_cast<uint32_t>(LocalOffset), Reloc.Size, RelocType, Addend,
