@@ -43,7 +43,7 @@ attributes #0 = { "frame-pointer"="non-leaf" }
 ; ASM: callq runtime.GC
 ; ASM: callq "runtime.morestack_noctxt<ABI0>"
 
-; The return occupies PC quanta 57-58. The out-of-line then block at 59-66
+; The return occupies PC quanta 59-60. The out-of-line then block at 61-68
 ; restores the 24-byte frame depth before morestack restores the entry depth.
-; OBJ: aux 0.3: type=pcsp target= pc=[0-7:0,7-14:8,14-57:24,57-58:8,58-59:0,59-66:24,66-98:0]
-; OBJ: reloc 0.2: off=60 size=4 type=7 add=0 target=runtime.GC
+; OBJ: aux 0.3: type=pcsp target= pc=[0-7:0,7-14:8,14-59:24,59-60:8,60-61:0,61-68:24,68-100:0]
+; OBJ: reloc 0.2: off=62 size=4 type=7 add=0 target=runtime.GC

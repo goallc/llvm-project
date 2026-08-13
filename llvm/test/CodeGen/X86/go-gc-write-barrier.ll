@@ -25,6 +25,8 @@ define goabiinternal ptr @acquire_one() gc "statepoint-example" {
 ; PSEUDO-SAME: implicit $rsp
 ;
 ; ASM-LABEL: acquire_one:
+; The write-barrier entry is a dedicated ABIInternal thunk with its own
+; clobber contract, not an ABI0 transition.
 ; ASM: callq runtime.gcWriteBarrier1
 ; ASM-NEXT: movq %r11, %rax
   %buf = call ptr @llvm.go.gc.write.barrier(i32 1)

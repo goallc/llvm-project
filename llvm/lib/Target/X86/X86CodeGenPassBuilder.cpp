@@ -198,6 +198,7 @@ void X86CodeGenPassBuilder::addPreEmitPass(PassManagerWrapper &PMW) const {
   }
   addMachineFunctionPass(X86CompressEVEXPass(), PMW);
   addMachineFunctionPass(X86InsertX87WaitPass(), PMW);
+  addMachineFunctionPass(X86GoABIPass(), PMW);
 }
 
 void X86CodeGenPassBuilder::addPreEmitPass2(PassManagerWrapper &PMW) const {

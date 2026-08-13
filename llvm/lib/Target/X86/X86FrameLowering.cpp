@@ -3121,6 +3121,19 @@ StackOffset X86FrameLowering::getFrameIndexReference(const MachineFunction &MF,
   bool IsWin64Prologue = MF.getTarget().getMCAsmInfo().usesWindowsCFI();
   int64_t FPDelta = 0;
 
+  // Go keeps a frame-pointer chain for profiling and traceback, but its local
+  // frame slots are addressed from SP.  This is more than a code-generation
+  // preference: runtime.gogo can resume a suspended frame after restoring SP
+  // while deliberately clearing BP.  A BP-relative local would then become
+  // inaccessible even though the Go frame is otherwise valid.  Go frames have
+  // a reserved call frame, so SP remains a stable base for ordinary locals.
+  if (goabi::isGoCallingConv(MF.getFunction().getCallingConv()) && !IsFixed &&
+      !TRI->hasStackRealignment(MF) && !TRI->hasBasePointer(MF) &&
+      hasReservedCallFrame(MF)) {
+    FrameReg = TRI->getStackRegister();
+    return StackOffset::getFixed(Offset + StackSize);
+  }
+
   // In an x86 interrupt, remove the offset we added to account for the return
   // address from any stack object allocated in the caller's frame. Interrupts
   // do not have a standard return address. Fixed objects in the current frame,
