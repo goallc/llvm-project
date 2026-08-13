@@ -9105,13 +9105,9 @@ static SDValue lowerAArch64GoFormalArguments(
       ArgTys, getAArch64GoReturnTypes(F.getReturnType(), F.getAttributes()),
       DAG.getDataLayout(), ABIConfig);
 
-  std::optional<goabi::EntryArgsInfo> EntryArgs;
-  SmallBitVector MatchedEntryArgWords;
-  if (F.hasFnAttribute(goabi::StackGrowthStatepointAttr)) {
-    EntryArgs = goabi::computeEntryArgsInfo(ArgTys, Layout, DAG.getDataLayout(),
-                                            ABIConfig);
-    MatchedEntryArgWords.resize(EntryArgs->NumBits);
-  }
+  goabi::EntryArgsInfo EntryArgs = goabi::computeEntryArgsInfo(
+      ArgTys, Layout, DAG.getDataLayout(), ABIConfig);
+  SmallBitVector MatchedEntryArgWords(EntryArgs.NumBits);
 
   SmallVector<uint64_t, 8> ArgSpillOffsets(ArgTys.size(), 0);
   uint64_t SpillOffset = Layout.SpillAreaOffset;
@@ -9129,11 +9125,10 @@ static SDValue lowerAArch64GoFormalArguments(
   FuncInfo->clearGoArgPointerSlots();
   unsigned StackBias = getAArch64GoStackBias(F.getCallingConv());
 
-  auto RecordPointerSlots = [&](int FI, uint64_t ArgOffset, uint64_t Size) {
-    if (!EntryArgs)
-      return;
-    uint64_t PointerSize = EntryArgs->PointerSize;
-    for (uint32_t Word : EntryArgs->PointerWords) {
+  auto RecordPointerSlots = [&](int FI, uint64_t ArgOffset, uint64_t Size,
+                                bool IsLiveAtEntry) {
+    uint64_t PointerSize = EntryArgs.PointerSize;
+    for (uint32_t Word : EntryArgs.PointerWords) {
       uint64_t PointerOffset = static_cast<uint64_t>(Word) * PointerSize;
       if (PointerOffset < ArgOffset ||
           PointerOffset + PointerSize > ArgOffset + Size)
@@ -9146,8 +9141,9 @@ static SDValue lowerAArch64GoFormalArguments(
       if (WithinObject > UINT32_MAX)
         report_fatal_error(
             "Go entry argument pointer offset exceeds AArch64 metadata range");
-      FuncInfo->addGoArgPointerSlot(FI, static_cast<uint32_t>(WithinObject),
-                                    Word);
+      if (IsLiveAtEntry)
+        FuncInfo->addGoArgPointerSlot(FI, static_cast<uint32_t>(WithinObject),
+                                      Word);
       MatchedEntryArgWords.set(Word);
     }
   };
@@ -9181,7 +9177,14 @@ static SDValue lowerAArch64GoFormalArguments(
                                     /*IsImmutable=*/true);
     AArch64FunctionInfo::GoArgHome &Home =
         FuncInfo->addGoArgHome(Group.Index, HomeFI);
-    RecordPointerSlots(HomeFI, LogicalHomeOffset, ArgLayout.Size);
+    // LLVM may replace an unused incoming pointer with poison at every call
+    // edge. Keep its ABI home so morestack can preserve the complete register
+    // assignment, but do not expose that uninitialized word as a GC root.
+    bool IsLiveAtEntry = llvm::any_of(
+        ArrayRef(Ins).slice(Group.Start, Group.End - Group.Start),
+        [](const ISD::InputArg &In) { return In.Used; });
+    RecordPointerSlots(HomeFI, LogicalHomeOffset, ArgLayout.Size,
+                       IsLiveAtEntry);
 
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
@@ -9222,12 +9225,10 @@ static SDValue lowerAArch64GoFormalArguments(
     }
   }
 
-  if (EntryArgs) {
-    for (uint32_t Word : EntryArgs->PointerWords)
-      if (!MatchedEntryArgWords.test(Word))
-        report_fatal_error(
-            "Go entry argument pointer word has no AArch64 fixed object");
-  }
+  for (uint32_t Word : EntryArgs.PointerWords)
+    if (!MatchedEntryArgWords.test(Word))
+      report_fatal_error(
+          "Go entry argument pointer word has no AArch64 fixed object");
 
   return Chain;
 }
@@ -9337,7 +9338,13 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
       getAArch64GoABIConfig(TLI, Subtarget, CLI.CallConv));
 
   unsigned StackBias = getAArch64GoStackBias(CLI.CallConv);
-  unsigned NumBytes = Layout.TotalStackSize + StackBias;
+  // Layout.TotalStackSize rounds the logical Go argument area to the target
+  // stack alignment before the physical entry-SP bias is applied. Adding the
+  // bias after that rounding reserves an extra word for one-word calls (the
+  // common ABI0 funcval case) and inflates every containing nosplit frame.
+  // The caller frame itself remains stack-aligned; reserve only the bytes
+  // through the last physical argument home here.
+  unsigned NumBytes = Layout.ArgSize + StackBias;
   Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, DL);
 
   SDValue StackPtr;

@@ -97,21 +97,21 @@ TEST(GoObjStackMapUtilsTest, RejectsInvalidVectorWordPlacement) {
             goobj::StackMapSlotKind::Invalid);
 }
 
-TEST(GoObjStackMapUtilsTest, ClassifiesStackGrowthPointerVectorWords) {
+TEST(GoObjStackMapUtilsTest, ClassifiesEntryArgsPointerVectorWords) {
   auto Words = goobj::expandStackMapPointerWords(
       /*Offset=*/64, /*Size=*/16, /*IsIndirect=*/true, /*PointerSize=*/8);
   ASSERT_TRUE(Words);
-  EXPECT_EQ(goobj::classifyStackGrowthStackMapSlot(
+  EXPECT_EQ(goobj::classifyEntryArgsStackMapSlot(
                 (*Words)[0], /*PointerSize=*/8, /*ArgsStart=*/64,
                 /*ArgsSize=*/16),
             0u);
-  EXPECT_EQ(goobj::classifyStackGrowthStackMapSlot(
+  EXPECT_EQ(goobj::classifyEntryArgsStackMapSlot(
                 (*Words)[1], /*PointerSize=*/8, /*ArgsStart=*/64,
                 /*ArgsSize=*/16),
             1u);
-  EXPECT_FALSE(goobj::classifyStackGrowthStackMapSlot(
+  EXPECT_FALSE(goobj::classifyEntryArgsStackMapSlot(
       /*Offset=*/68, /*PointerSize=*/8, /*ArgsStart=*/64, /*ArgsSize=*/16));
-  EXPECT_FALSE(goobj::classifyStackGrowthStackMapSlot(
+  EXPECT_FALSE(goobj::classifyEntryArgsStackMapSlot(
       /*Offset=*/80, /*PointerSize=*/8, /*ArgsStart=*/64, /*ArgsSize=*/16));
 }
 

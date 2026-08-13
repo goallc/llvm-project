@@ -12,9 +12,10 @@ define goabiinternal void @stack_slot(ptr %value) #0 {
 ; CHECK-NOT:   AND64
 ; CHECK:       $rsp = frame-setup SUB64ri32 $rsp, 40
 ; CHECK-NOT:   MOVAPSmr
-; CHECK:       MOVUPSmr $rbp, 1, $noreg, -16, $noreg
+; Go locals stay SP-relative because runtime context restoration may clear BP.
+; CHECK:       MOVUPSmr $rsp, 1, $noreg, 24, $noreg
 ; CHECK-SAME:  align 8
-; CHECK:       MOVUPSmr $rbp, 1, $noreg, -32, $noreg
+; CHECK:       MOVUPSmr $rsp, 1, $noreg, 8, $noreg
 ; CHECK-SAME:  align 8
 ; CHECK:       CALL64pcrel32 @sink
 entry:
@@ -30,4 +31,4 @@ entry:
 declare void @llvm.memset.inline.p0.i64(ptr, i8, i64, i1 immarg)
 
 attributes #0 = { "frame-pointer"="non-leaf" "go-async-unsafe"
-                  "go-stack-growth-statepoint" }
+ }

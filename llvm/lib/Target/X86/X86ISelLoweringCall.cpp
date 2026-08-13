@@ -30,6 +30,7 @@
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Statepoint.h"
 #include "llvm/Transforms/CFGuard.h"
 
 #define DEBUG_TYPE "x86-isel"
@@ -205,13 +206,9 @@ static SDValue lowerX86GoFormalArguments(
       ArgTys, getX86GoReturnTypes(F.getReturnType(), F.getAttributes()),
       DAG.getDataLayout(), ABIConfig);
 
-  std::optional<goabi::EntryArgsInfo> EntryArgs;
-  SmallBitVector MatchedEntryArgWords;
-  if (F.hasFnAttribute(goabi::StackGrowthStatepointAttr)) {
-    EntryArgs = goabi::computeEntryArgsInfo(ArgTys, Layout, DAG.getDataLayout(),
-                                            ABIConfig);
-    MatchedEntryArgWords.resize(EntryArgs->NumBits);
-  }
+  goabi::EntryArgsInfo EntryArgs = goabi::computeEntryArgsInfo(
+      ArgTys, Layout, DAG.getDataLayout(), ABIConfig);
+  SmallBitVector MatchedEntryArgWords(EntryArgs.NumBits);
 
   SmallVector<uint64_t, 8> ArgSpillOffsets(ArgTys.size(), 0);
   uint64_t SpillOffset = Layout.SpillAreaOffset;
@@ -230,11 +227,10 @@ static SDValue lowerX86GoFormalArguments(
   FuncInfo->clearGoArgHomes();
   FuncInfo->clearGoArgPointerSlots();
 
-  auto RecordPointerSlots = [&](int FI, uint64_t ArgOffset, uint64_t Size) {
-    if (!EntryArgs)
-      return;
-    uint64_t PointerSize = EntryArgs->PointerSize;
-    for (uint32_t Word : EntryArgs->PointerWords) {
+  auto RecordPointerSlots = [&](int FI, uint64_t ArgOffset, uint64_t Size,
+                                bool IsLiveAtEntry) {
+    uint64_t PointerSize = EntryArgs.PointerSize;
+    for (uint32_t Word : EntryArgs.PointerWords) {
       uint64_t PointerOffset = static_cast<uint64_t>(Word) * PointerSize;
       if (PointerOffset < ArgOffset ||
           PointerOffset + PointerSize > ArgOffset + Size)
@@ -256,9 +252,10 @@ static SDValue lowerX86GoFormalArguments(
           !isInt<32>(EntryOffset))
         report_fatal_error(
             "Go entry argument pointer word has an invalid X86 fixed object");
-      FuncInfo->addGoArgPointerSlot(
-          FI, static_cast<uint32_t>(WithinObject),
-          static_cast<int32_t>(EntryOffset), Word);
+      if (IsLiveAtEntry)
+        FuncInfo->addGoArgPointerSlot(
+            FI, static_cast<uint32_t>(WithinObject),
+            static_cast<int32_t>(EntryOffset), Word);
       MatchedEntryArgWords.set(Word);
     }
   };
@@ -294,7 +291,14 @@ static SDValue lowerX86GoFormalArguments(
                                     /*IsImmutable=*/true);
     X86MachineFunctionInfo::GoArgHome &Home =
         FuncInfo->addGoArgHome(Group.Index, HomeFI);
-    RecordPointerSlots(HomeFI, LogicalHomeOffset, ArgLayout.Size);
+    // LLVM may replace an unused incoming pointer with poison at every call
+    // edge. Keep its ABI home so morestack can preserve the complete register
+    // assignment, but do not expose that uninitialized word as a GC root.
+    bool IsLiveAtEntry = llvm::any_of(
+        ArrayRef(Ins).slice(Group.Start, Group.End - Group.Start),
+        [](const ISD::InputArg &In) { return In.Used; });
+    RecordPointerSlots(HomeFI, LogicalHomeOffset, ArgLayout.Size,
+                       IsLiveAtEntry);
 
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
@@ -335,12 +339,10 @@ static SDValue lowerX86GoFormalArguments(
     }
   }
 
-  if (EntryArgs) {
-    for (uint32_t Word : EntryArgs->PointerWords)
-      if (!MatchedEntryArgWords.test(Word))
-        report_fatal_error(
-            "Go entry argument pointer word has no X86 fixed object");
-  }
+  for (uint32_t Word : EntryArgs.PointerWords)
+    if (!MatchedEntryArgWords.test(Word))
+      report_fatal_error(
+          "Go entry argument pointer word has no X86 fixed object");
 
   return Chain;
 }
@@ -433,6 +435,12 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
   const X86Subtarget &Subtarget = MF.getSubtarget<X86Subtarget>();
   const X86RegisterInfo *RegInfo = Subtarget.getRegisterInfo();
   MVT PtrVT = TLI.getPointerTy(DAG.getDataLayout());
+  CallingConv::ID CallerCC = MF.getFunction().getCallingConv();
+  bool RepairBeforeCall = goabi::isGoABI0CallingConv(CallerCC) &&
+                          goabi::isGoABIInternalCallingConv(CLI.CallConv);
+  bool RepairAfterCall = goabi::isGoABIInternalCallingConv(CallerCC) &&
+                         goabi::isGoABI0CallingConv(CLI.CallConv);
+  bool IsStatepoint = CLI.CB && isa<GCStatepointInst>(CLI.CB);
 
   CLI.IsTailCall = false;
   if (CLI.IsVarArg)
@@ -518,6 +526,11 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
     Callee = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i64, Callee);
 
   SDValue InGlue;
+  if (RepairBeforeCall) {
+    Chain = SDValue(DAG.getMachineNode(X86::GO_REPAIR_ABI_INTERNAL_REGS, DL,
+                                       MVT::Other, Chain),
+                    0);
+  }
   for (const auto &[Reg, Val] : RegsToPass) {
     Chain = DAG.getCopyToReg(Chain, DL, Reg, Val, InGlue);
     InGlue = Chain.getValue(1);
@@ -528,7 +541,14 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
   Ops.push_back(Callee);
   for (const auto &[Reg, Val] : RegsToPass)
     Ops.push_back(DAG.getRegister(Reg, Val.getValueType()));
-  Ops.push_back(DAG.getRegisterMask(RegInfo->getCallPreservedMask(MF, CLI.CallConv)));
+  // An ABI0 callee may clobber R14/XMM15, but the mandatory adjacent repair
+  // restores their ABIInternal values before any following instruction can
+  // observe them. Model that compound boundary as preserving the registers so
+  // PEI does not spill and then restore stale copies around the whole function.
+  CallingConv::ID EffectiveCallCC =
+      RepairAfterCall ? CallingConv::GoABIInternal : CLI.CallConv;
+  Ops.push_back(
+      DAG.getRegisterMask(RegInfo->getCallPreservedMask(MF, EffectiveCallCC)));
   if (InGlue.getNode())
     Ops.push_back(InGlue);
 
@@ -537,6 +557,13 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
                       Ops);
   DAG.addCallSiteInfo(Chain.getNode(), std::move(CSInfo));
   InGlue = Chain.getValue(1);
+
+  if (RepairAfterCall && !IsStatepoint) {
+    Chain = SDValue(DAG.getMachineNode(X86::GO_REPAIR_ABI_INTERNAL_REGS, DL,
+                                       MVT::Other, Chain),
+                    0);
+    InGlue = SDValue();
+  }
 
   SmallVector<SDValue, 8> ResultVals(Ins.size());
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
@@ -612,6 +639,19 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
 }
 
 } // namespace
+
+SDValue X86TargetLowering::finalizeStatepointCallChain(
+    SDValue Chain, CallingConv::ID CalleeCC, const SDLoc &DL,
+    SelectionDAG &DAG) const {
+  CallingConv::ID CallerCC =
+      DAG.getMachineFunction().getFunction().getCallingConv();
+  if (!goabi::isGoABIInternalCallingConv(CallerCC) ||
+      !goabi::isGoABI0CallingConv(CalleeCC))
+    return Chain;
+  return SDValue(DAG.getMachineNode(X86::GO_REPAIR_ABI_INTERNAL_REGS, DL,
+                                    MVT::Other, Chain),
+                 0);
+}
 
 std::optional<TargetLowering::ArgumentCopyElisionFrameInfo>
 X86TargetLowering::getArgumentCopyElisionFrameInfo(const Argument &Arg,

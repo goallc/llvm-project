@@ -867,6 +867,9 @@ namespace llvm {
     int getGoABI0FrameIndex(MachineFunction &MF) const override;
     SDValue LowerCall(CallLoweringInfo &CLI,
                       SmallVectorImpl<SDValue> &InVals) const override;
+    SDValue finalizeStatepointCallChain(SDValue Chain, CallingConv::ID CalleeCC,
+                                        const SDLoc &DL,
+                                        SelectionDAG &DAG) const override;
 
     SDValue LowerReturn(SDValue Chain, CallingConv::ID CallConv, bool isVarArg,
                         const SmallVectorImpl<ISD::OutputArg> &Outs,
