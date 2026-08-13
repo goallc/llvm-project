@@ -42,7 +42,7 @@ attributes #0 = { "frame-pointer"="non-leaf" }
 ; ASM: ldr x30, [sp], #32
 ; ASM: ret
 ; ASM: bl runtime.GC
-; ASM: bl runtime.morestack_noctxt
+; ASM: bl "runtime.morestack_noctxt<ABI0>"
 
 ; The return occupies PC quanta 18-19. The out-of-line then block at 19-23
 ; restores the 32-byte frame depth before morestack restores the entry depth.

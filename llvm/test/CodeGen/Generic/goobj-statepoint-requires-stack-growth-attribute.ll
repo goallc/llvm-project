@@ -8,7 +8,7 @@
 ; function instead of allowing the preceding call's map to cover the raw
 ; runtime.morestack call.
 
-declare void @callee()
+declare goabiinternal void @callee()
 
 define goabiinternal void @missing_stack_growth_attribute()
     gc "statepoint-example" {

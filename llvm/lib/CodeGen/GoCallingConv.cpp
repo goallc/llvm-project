@@ -8,14 +8,25 @@
 
 #include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <limits>
+#include <string>
 
 using namespace llvm;
 
 namespace llvm::goabi {
+
+void addGoObjABI0Callee(MachineInstrBuilder &MIB, MachineFunction &MF,
+                        StringRef SymbolName) {
+  if (SymbolName.empty() || SymbolName.ends_with(GoObj::ABI0SymbolSuffix))
+    report_fatal_error("invalid logical Go ABI0 symbol name");
+  std::string StorageName = (SymbolName + GoObj::ABI0SymbolSuffix).str();
+  MIB.addExternalSymbol(MF.createExternalSymbolName(StorageName));
+}
 
 static bool isPaddingType(Type *Ty) {
   auto *ST = dyn_cast<StructType>(Ty);

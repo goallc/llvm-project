@@ -242,11 +242,8 @@ private:
   /// Bindings of names to symbol table values.
   SymbolTable Symbols;
 
-  /// Go object symbol ABI overrides keyed by MC symbol.
-  DenseMap<const MCSymbol *, uint16_t> GoObjSymbolABIs;
-
-  /// Go object linker names for MC symbols whose LLVM names were made unique.
-  DenseMap<const MCSymbol *, std::string> GoObjSymbolNames;
+  /// MC symbols known to denote Go functions, including declarations.
+  DenseSet<const MCSymbol *> GoObjFunctionSymbols;
 
   /// Package-local indices assigned to Go object definitions by the frontend.
   DenseMap<const MCSymbol *, uint32_t> GoObjPackageSymbolIndexes;
@@ -692,26 +689,12 @@ public:
   /// inline assembly.
   LLVM_ABI void registerInlineAsmLabel(MCSymbol *Sym);
 
-  void setGoObjSymbolABI(const MCSymbol *Sym, uint16_t ABI) {
-    GoObjSymbolABIs[Sym] = ABI;
+  void setGoObjFunctionSymbol(const MCSymbol *Sym) {
+    GoObjFunctionSymbols.insert(Sym);
   }
 
-  std::optional<uint16_t> getGoObjSymbolABI(const MCSymbol *Sym) const {
-    auto It = GoObjSymbolABIs.find(Sym);
-    if (It == GoObjSymbolABIs.end())
-      return std::nullopt;
-    return It->second;
-  }
-
-  void setGoObjSymbolName(const MCSymbol *Sym, StringRef Name) {
-    GoObjSymbolNames[Sym] = Name.str();
-  }
-
-  StringRef getGoObjSymbolName(const MCSymbol *Sym) const {
-    auto It = GoObjSymbolNames.find(Sym);
-    if (It == GoObjSymbolNames.end())
-      return {};
-    return It->second;
+  bool isGoObjFunctionSymbol(const MCSymbol *Sym) const {
+    return GoObjFunctionSymbols.contains(Sym);
   }
 
   void setGoObjPackageSymbolIndex(const MCSymbol *Sym, uint32_t Index) {

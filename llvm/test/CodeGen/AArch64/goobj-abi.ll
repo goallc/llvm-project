@@ -11,7 +11,7 @@ entry:
   ret i64 %sum
 }
 
-define goabi0 i64 @stackadd(i64 %a, i64 %b) #0 {
+define goabi0 i64 @"stackadd<ABI0>"(i64 %a, i64 %b) #0 {
 entry:
   %sum = add i64 %a, %b
   ret i64 %sum
@@ -78,7 +78,7 @@ entry:
   ret %aggregate %result
 }
 
-; ASM-LABEL: stackadd:
+; ASM-LABEL: "stackadd<ABI0>":
 ; ASM: ldp x{{[0-9]+}}, x{{[0-9]+}}, [sp, #8]
 ; ASM: str x{{[0-9]+}}, [sp, #24]
 
@@ -88,7 +88,7 @@ entry:
 ; ASM: cmp sp, x17
 ; ASM: b.hi [[CALLS_BODY:.LBB[0-9_]+]]
 ; ASM: mov x3, x30
-; ASM: bl runtime.morestack_noctxt
+; ASM: bl "runtime.morestack_noctxt<ABI0>"
 ; ASM-NEXT: b [[CALLS_CHECK]]
 ; ASM: [[CALLS_BODY]]:
 ; ASM: str x30, [sp, #-16]!
@@ -126,7 +126,7 @@ entry:
 ; ASM: [[LARGE_MORESTACK]]:
 ; ASM: mov x3, x30
 ; ASM: str x0, [sp, #8]
-; ASM: bl runtime.morestack_noctxt
+; ASM: bl "runtime.morestack_noctxt<ABI0>"
 ; ASM: ldr x0, [sp, #8]
 ; ASM-NEXT: b [[LARGE_CHECK]]
 ; ASM: [[LARGE_BODY]]:
@@ -145,7 +145,7 @@ entry:
 ; ASM: b.hi [[CLOSURE_BODY:.LBB[0-9_]+]]
 ; ASM: [[CLOSURE_MORESTACK]]:
 ; ASM: mov x3, x30
-; ASM: bl runtime.morestack
+; ASM: bl "runtime.morestack<ABI0>"
 ; ASM: b [[CLOSURE_CHECK]]
 ; ASM: [[CLOSURE_BODY]]:
 

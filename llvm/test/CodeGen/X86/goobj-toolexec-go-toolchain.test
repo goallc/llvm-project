@@ -1,8 +1,8 @@
 # This exercises a mixed Go/LLVM GoObj link through go build -toolexec. The
 # dependency package contains an LLVM IR file that llvm-goobj-toolexec discovers
-# from the package source directory. The IR definitions use goabiinternal and goabi0,
-# so their symabis declarations and GoObj symbol ABI records come directly from
-# each function's IR calling convention.
+# from the package source directory. Its IR uses plain ABIInternal names and
+# <ABI0>-suffixed ABI0 names, exercising the same identity contract as the Go
+# frontend for declarations, definitions, and GoObj records.
 
 # The test executes the linked binary, so it requires a native linux/amd64 host.
 # REQUIRES: x86-registered-target, x86_64-linux, native

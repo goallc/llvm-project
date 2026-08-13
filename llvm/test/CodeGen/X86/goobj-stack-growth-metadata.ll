@@ -88,7 +88,7 @@ join:
 ; ASM: cmpq 16(%r14), %r12
 ; ASM: ja [[BIG_BODY:.LBB0_[0-9]+]]
 ; ASM: [[BIG_MORESTACK]]:
-; ASM: callq runtime.morestack_noctxt
+; ASM: callq "runtime.morestack_noctxt<ABI0>"
 ; ASM-NEXT: movq 8(%rsp), %rax
 ; ASM-NEXT: jmp [[BIG_CHECK]]
 ; ASM: [[BIG_BODY]]:
@@ -96,7 +96,7 @@ join:
 
 ; ASM-LABEL: big_closure_frame:
 ; ASM: [[CLOSURE_CHECK:.LBB1_[0-9]+]]:
-; ASM: callq runtime.morestack
+; ASM: callq "runtime.morestack<ABI0>"
 ; ASM: jmp [[CLOSURE_CHECK]]
 ; ASM: retq
 
@@ -112,11 +112,11 @@ join:
 ; PEI: fixedStack:
 ; PEI-NEXT: - { id: 0, type: spill-slot, offset: 0, size: 8
 ; PEI: MOV64mr {{.*rsp}}, 1, {{.*noreg}}, 8, {{.*noreg}}, {{.*rax}}
-; PEI: CALL64pcrel32 &runtime.morestack_noctxt
+; PEI: CALL64pcrel32 &"runtime.morestack_noctxt<ABI0>"
 ; PEI: {{.*rax}} = MOV64rm {{.*rsp}}, 1, {{.*noreg}}, 8, {{.*noreg}}
 
 ; PEI-LABEL: name: big_closure_frame
-; PEI: CALL64pcrel32 &runtime.morestack, {{.*}}implicit $rdx
+; PEI: CALL64pcrel32 &"runtime.morestack<ABI0>", {{.*}}implicit $rdx
 
 ; PEI-LABEL: name: large_outgoing_frame
 ; PEI: stackSize: 0
