@@ -975,12 +975,13 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   Pairs.push_back(BuildPair(*EntryArgsEntry->Entry));
   SmallVector<GoObjPCTabEntry, 16> PCDataEntries;
   // PCSP is derived from the Machine CFG. Whenever control flow returns to
-  // the entry stack depth, only the function-level entry argument map is
-  // valid. This covers the pre-frame morestack slow path without naming the
-  // helper or manufacturing a statepoint for its raw ABI0 call.
+  // the entry stack depth, restore Go's entry value (-1). The runtime
+  // normalizes that value to ArgsPointerMaps bitmap 0. This covers the
+  // pre-frame morestack slow path without naming the helper or manufacturing
+  // a statepoint for its raw ABI0 call.
   for (const GoObjPCTabEntry &Entry : PCSPEntries)
     if (Entry.Value == 0 && Entry.PC < Function.Size)
-      PCDataEntries.push_back({Entry.PC, 0});
+      PCDataEntries.push_back({Entry.PC, -1});
   std::optional<uint64_t> PreviousCallsitePC;
   SmallVector<uint32_t, 4> IndirectCallOffsets;
   for (const ResolvedEntry &Resolved : ResolvedEntries) {
@@ -1087,7 +1088,7 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
   Result.Args = makeStackMap(ArgsNBits, ArgsBitmaps);
   Result.Locals = makeStackMap(NBits, LocalsBitmaps);
   Result.PCData =
-      makePCTab(0, NormalizedPCDataEntries, Function.Size, PCQuantum);
+      makePCTab(-1, NormalizedPCDataEntries, Function.Size, PCQuantum);
   Result.OpenDefer = std::move(OpenDeferData);
   Result.IndirectCallOffsets = std::move(IndirectCallOffsets);
   Result.StackObjects = std::move(FunctionStackObjects);
@@ -2005,7 +2006,7 @@ uint64_t GoObjObjectWriter::writeObject() {
           makePCTab(-1, LineInfo.PCInline, CodeSize, PCQuantum));
       SmallString<0> ArgsMap = makeEmptyStackMap();
       SmallString<0> LocalsMap = makeEmptyStackMap();
-      SmallString<0> StackMapIndex = makeConstantPCTab(0, CodeSize, PCQuantum);
+      SmallString<0> StackMapIndex = makeConstantPCTab(-1, CodeSize, PCQuantum);
       std::optional<uint32_t> StackObjectsSym;
       std::optional<uint32_t> OpenDeferSym;
       if (const auto *Entries = Asm->getContext().getGoObjSymbolStackMapEntries(

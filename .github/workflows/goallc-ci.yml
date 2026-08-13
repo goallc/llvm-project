@@ -106,6 +106,8 @@ jobs:
             "$build/test/CodeGen/Generic/go-abi0-frame.ll"
             "$build/test/CodeGen/Generic/go-argument-homes.ll"
             "$build/test/CodeGen/Generic/goobj-data-kinds.ll"
+            "$build/test/CodeGen/Generic/goobj-entry-stackmap-cfg.ll"
+            "$build/test/CodeGen/Generic/goobj-entry-stackmap-sentinel.ll"
             "$build/test/CodeGen/Generic/goobj-stack-check-policy.ll"
             "$build/test/CodeGen/X86/go-callconv.ll"
             "$build/test/CodeGen/X86/go-gc-write-barrier.ll"

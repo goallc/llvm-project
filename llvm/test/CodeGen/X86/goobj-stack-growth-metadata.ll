@@ -69,7 +69,7 @@ join:
 ; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data={{[0-9a-f]+}}
 ; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=funcdata target= data={{[0-9a-f]+}}
 ; CHECK: aux 0.{{[0-9]+}}: type=pcdata target= pc=[0-{{[0-9]+}}:-1]
-; CHECK-NEXT: aux 0.{{[0-9]+}}: type=pcdata target= pc=[0-{{[0-9]+}}:0]
+; CHECK-NEXT: aux 0.{{[0-9]+}}: type=pcdata target= pc=[0-{{[0-9]+}}:-1]
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.morestack_noctxt
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.morestack
 ; The outgoing frame is 72 bytes of alignment/register-argument space plus 23

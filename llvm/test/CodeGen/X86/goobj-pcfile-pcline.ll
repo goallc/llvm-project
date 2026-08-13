@@ -75,4 +75,4 @@ done:
 ; COMMON-SAME: :5
 ; COMMON-SAME: pkg=hashed sym=1
 ; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc={{.*}} pkg=hashed sym=2
-; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc={{.*}}:0{{.*}} pkg=hashed sym=0
+; COMMON-NEXT: aux {{[0-9]+}}.{{[0-9]+}}: type=pcdata target= pc={{.*}}:-1{{.*}} pkg=hashed sym=2
