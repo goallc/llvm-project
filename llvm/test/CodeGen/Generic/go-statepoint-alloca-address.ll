@@ -11,7 +11,7 @@ declare goabiinternal void @safepoint()
 declare goabiinternal void @observe(ptr addrspace(1))
 
 define goabiinternal void @first_class_alloca_address()
-    "go-stack-growth-statepoint" gc "statepoint-example" {
+ gc "statepoint-example" {
 ; X86-LABEL: name: first_class_alloca_address
 ; X86:       STATEPOINT 1,
 ; X86-NEXT:  $rax = LEA64r

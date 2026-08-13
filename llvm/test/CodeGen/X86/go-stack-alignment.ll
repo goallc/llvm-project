@@ -30,4 +30,4 @@ entry:
 declare void @llvm.memset.inline.p0.i64(ptr, i8, i64, i1 immarg)
 
 attributes #0 = { "frame-pointer"="non-leaf" "go-async-unsafe"
-                  "go-stack-growth-statepoint" }
+ }
