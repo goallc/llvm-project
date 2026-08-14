@@ -2,9 +2,9 @@
 ; RUN: llc -mtriple=aarch64-apple-darwin-goobj -verify-machineinstrs \
 ; RUN:   -stop-after=prolog-epilog < %s | FileCheck %s
 
-declare goabi0 void @"runtime.morestack<ABI0>"()
-declare goabi0 void @"runtime.morestack_noctxt<ABI0>"()
-declare goabi0 void @"runtime.morestackc<ABI0>"()
+declare goabi0 void @"runtime.morestack<builtin.244><ABI0>"()
+declare goabi0 void @"runtime.morestack_noctxt<builtin.246><ABI0>"()
+declare goabi0 void @"runtime.morestackc<builtin.245><ABI0>"()
 
 define goabiinternal i64 @closure_morestack_call(
     i64 %value, ptr nest %ctxt) "frame-pointer"="non-leaf"
@@ -52,27 +52,27 @@ entry:
 
 ; CHECK-LABEL: name: closure_morestack_call
 ; CHECK-NOT: ANNOTATION_LABEL
-; CHECK: BL &"runtime.morestack<ABI0>", implicit-def $lr, implicit $sp,
+; CHECK: BL &"runtime.morestack<builtin.244><ABI0>", implicit-def $lr, implicit $sp,
 ; CHECK-SAME: implicit $x3, implicit $x26
 ; CHECK: STACKMAP 5147419139155979380, 0
 ; CHECK-NOT: STATEPOINT
 
 ; CHECK-LABEL: name: pointer_morestack_call
 ; CHECK: STRXui $x0, $sp, 1
-; CHECK: BL &"runtime.morestack_noctxt<ABI0>", implicit-def $lr, implicit $sp,
+; CHECK: BL &"runtime.morestack_noctxt<builtin.246><ABI0>", implicit-def $lr, implicit $sp,
 ; CHECK-SAME: implicit $x3
 ; CHECK: $x0 = LDRXui $sp, 1
 ; CHECK: STACKMAP 5147419139155979380, 0, 1, 8, $sp, 8
 ; CHECK-NOT: BL
 
 ; CHECK-LABEL: name: mixed_register_and_stack_pointer_args
-; CHECK: BL &"runtime.morestack_noctxt<ABI0>", implicit-def $lr, implicit $sp,
+; CHECK: BL &"runtime.morestack_noctxt<builtin.246><ABI0>", implicit-def $lr, implicit $sp,
 ; CHECK-SAME: implicit $x3
 ; CHECK: STACKMAP 5147419139155979380, 0,
 ; CHECK-SAME: 1, 8, $sp, 16, 1, 8, $sp, 8
 
 ; CHECK-LABEL: name: systemstack_growth
 ; CHECK: $x17 = LDRXui $x28, 3
-; CHECK: BL &"runtime.morestackc<ABI0>", implicit-def $lr, implicit $sp,
+; CHECK: BL &"runtime.morestackc<builtin.245><ABI0>", implicit-def $lr, implicit $sp,
 ; CHECK-SAME: implicit $x3
 ; CHECK: STACKMAP 5147419139155979380, 0

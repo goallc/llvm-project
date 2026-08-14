@@ -8,10 +8,12 @@
 
 #include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <limits>
 #include <string>
@@ -20,11 +22,60 @@ using namespace llvm;
 
 namespace llvm::goabi {
 
+std::string getGoObjBuiltinCalleeName(MachineFunction &MF, StringRef SymbolName,
+                                      CallingConv::ID CC) {
+  if (SymbolName.empty() ||
+      (CC != CallingConv::GoABIInternal && CC != CallingConv::GoABI0))
+    report_fatal_error("invalid logical Go builtin symbol");
+
+  const Module &M = *MF.getFunction().getParent();
+  const Function *Match = nullptr;
+  for (const Function &F : M) {
+    StringRef Candidate = F.getName();
+    bool IsABI0 = Candidate.consume_back(GoObj::ABI0SymbolSuffix);
+    if (IsABI0 != (CC == CallingConv::GoABI0) ||
+        !Candidate.consume_front(SymbolName) ||
+        !Candidate.consume_front(GoObj::BuiltinSymbolSuffixPrefix) ||
+        !Candidate.consume_back(">") || Candidate.empty())
+      continue;
+    uint32_t Index;
+    if (Candidate.getAsInteger(10, Index))
+      continue;
+    if (F.getCallingConv() != CC)
+      report_fatal_error(
+          "Go builtin declaration has invalid calling convention");
+    if (Match)
+      report_fatal_error("duplicate Go builtin declaration");
+    Match = &F;
+  }
+  if (Match)
+    return Match->getName().str();
+
+  // Native Go disables builtin-index references for -linkshared.
+  if (std::optional<codegen::GoObjConfig> Config = codegen::getGoObjConfig();
+      Config && Config->IsShared) {
+    std::string StorageName = SymbolName.str();
+    if (CC == CallingConv::GoABI0)
+      StorageName += GoObj::ABI0SymbolSuffix;
+    return StorageName;
+  }
+
+  // Hand-written backend fixtures predate the compiler declaration contract.
+  // Production Go IR is self-describing and must fail closed if its late
+  // helper declaration is missing.
+  if (M.getNamedMetadata("goobj.config"))
+    report_fatal_error("missing Go builtin declaration for " + SymbolName);
+
+  std::string StorageName = SymbolName.str();
+  if (CC == CallingConv::GoABI0)
+    StorageName += GoObj::ABI0SymbolSuffix;
+  return StorageName;
+}
+
 void addGoObjABI0Callee(MachineInstrBuilder &MIB, MachineFunction &MF,
                         StringRef SymbolName) {
-  if (SymbolName.empty() || SymbolName.ends_with(GoObj::ABI0SymbolSuffix))
-    report_fatal_error("invalid logical Go ABI0 symbol name");
-  std::string StorageName = (SymbolName + GoObj::ABI0SymbolSuffix).str();
+  std::string StorageName =
+      getGoObjBuiltinCalleeName(MF, SymbolName, CallingConv::GoABI0);
   MIB.addExternalSymbol(MF.createExternalSymbolName(StorageName));
 }
 

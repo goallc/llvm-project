@@ -47,6 +47,7 @@ struct GoObjConfig {
   std::vector<std::string> Experiments;
   bool IsMain = false;
   bool IsShared = false;
+  bool IsStd = false;
 };
 
 LLVM_ABI void setGoObjConfig(GoObjConfig Config);

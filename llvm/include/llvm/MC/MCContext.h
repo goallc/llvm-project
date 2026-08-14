@@ -150,13 +150,7 @@ public:
     std::array<uint8_t, 8> Fingerprint = {};
   };
 
-  enum class GoObjSymbolRefKind : uint8_t {
-    Imported = 1,
-    Builtin = 2,
-  };
-
-  struct GoObjSymbolRef {
-    GoObjSymbolRefKind Kind = GoObjSymbolRefKind::Imported;
+  struct GoObjImportedSymbolRef {
     std::string PackagePrefix;
     uint32_t SymIdx = 0;
     uint8_t Flags2 = 0;
@@ -290,8 +284,8 @@ private:
   /// Imported packages and their opaque linker fingerprints, in source order.
   std::vector<GoObjImport> GoObjImports;
 
-  /// Indexed imported or builtin references keyed by their MC symbol.
-  DenseMap<const MCSymbol *, GoObjSymbolRef> GoObjSymbolRefs;
+  /// Indexed imported references keyed by their MC symbol.
+  DenseMap<const MCSymbol *, GoObjImportedSymbolRef> GoObjImportedSymbolRefs;
 
   /// Explicit LLVM global alignments for Go object data symbols.
   DenseMap<const MCSymbol *, uint32_t> GoObjSymbolAlignments;
@@ -852,13 +846,15 @@ public:
 
   ArrayRef<GoObjImport> getGoObjImports() const { return GoObjImports; }
 
-  void setGoObjSymbolRef(const MCSymbol *Sym, GoObjSymbolRef Ref) {
-    GoObjSymbolRefs[Sym] = std::move(Ref);
+  void setGoObjImportedSymbolRef(const MCSymbol *Sym,
+                                 GoObjImportedSymbolRef Ref) {
+    GoObjImportedSymbolRefs[Sym] = std::move(Ref);
   }
 
-  const GoObjSymbolRef *getGoObjSymbolRef(const MCSymbol *Sym) const {
-    auto It = GoObjSymbolRefs.find(Sym);
-    if (It == GoObjSymbolRefs.end())
+  const GoObjImportedSymbolRef *
+  getGoObjImportedSymbolRef(const MCSymbol *Sym) const {
+    auto It = GoObjImportedSymbolRefs.find(Sym);
+    if (It == GoObjImportedSymbolRefs.end())
       return nullptr;
     return &It->second;
   }

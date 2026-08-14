@@ -9,6 +9,8 @@
 ; RUN:   FileCheck %s --check-prefix=OBJ
 
 declare ptr @llvm.go.gc.write.barrier(i32 immarg)
+declare goabiinternal void @"runtime.gcWriteBarrier1<builtin.234>"()
+declare goabiinternal void @"runtime.gcWriteBarrier8<builtin.241>"()
 
 define goabiinternal ptr @acquire_one() gc "statepoint-example" {
 ; OPT-LABEL: define goabiinternal ptr @acquire_one()
@@ -54,8 +56,6 @@ define goabiinternal void @store_one(ptr %value) gc "statepoint-example" {
   ret void
 }
 
-; OBJ: nonpkgref {{[0-9]+}}: runtime.gcWriteBarrier1 abi=1 type=0 size=0
-; OBJ: nonpkgref {{[0-9]+}}: runtime.gcWriteBarrier8 abi=1 type=0 size=0
-; OBJ-NOT: runtime.gcWriteBarrier{{[18]}} abi=0
-; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=runtime.gcWriteBarrier1
-; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=runtime.gcWriteBarrier8
+; OBJ-NOT: nonpkgref {{[0-9]+}}: runtime.gcWriteBarrier
+; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=builtin:234 {{.*}}pkg=builtin sym=234
+; OBJ: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=9 add=0 target=builtin:241 {{.*}}pkg=builtin sym=241

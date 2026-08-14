@@ -18,6 +18,7 @@
 #include "X86MachineFunctionInfo.h"
 #include "X86Subtarget.h"
 #include "llvm/BinaryFormat/GoObj.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineFunctionAnalysisManager.h"
@@ -300,7 +301,9 @@ bool X86ExpandPseudoImpl::expandMI(MachineBasicBlock &MBB,
     MachineFunction &MF = *MBB.getParent();
     if (MF.getTarget().getTargetTriple().isOSBinFormatGoObj()) {
       MCContext &Ctx = MF.getContext();
-      MCSymbol *Callee = Ctx.getOrCreateSymbol(WriteBarrierName);
+      std::string StorageName = goabi::getGoObjBuiltinCalleeName(
+          MF, WriteBarrierName, CallingConv::GoABIInternal);
+      MCSymbol *Callee = Ctx.getOrCreateSymbol(StorageName);
       Call.addSym(Callee);
     } else {
       Call.addExternalSymbol(WriteBarrierName);

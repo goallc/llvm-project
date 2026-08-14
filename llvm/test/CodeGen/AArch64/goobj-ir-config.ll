@@ -12,9 +12,9 @@ entry:
 }
 
 !goobj.config = !{!0}
-!0 = !{!"goallc.goobj", !"darwin", !"arm64", !"go1.27", !"GOARM64", !"v8.0", !"metadata-build", !"main", !"1", !"1", !1}
+!0 = !{!"goallc.goobj", !"darwin", !"arm64", !"go1.27", !"GOARM64", !"v8.0", !"metadata-build", !"main", !"1", !"1", !"1", !1}
 !1 = !{!"metadata-test"}
 
 ; CHECK: header: go object darwin arm64 go1.27 GOARM64=v8.0 X:metadata-test\nbuild id "metadata-build"\nmain\n\n!\n
-; CHECK: flags: 1
+; CHECK: flags: 17
 ; CHECK: symdef {{[0-9]+}}: main.main

@@ -181,7 +181,7 @@ void MCContext::reset() {
   GoObjKeepTargets.clear();
   GoObjMarkerRelocs.clear();
   GoObjImports.clear();
-  GoObjSymbolRefs.clear();
+  GoObjImportedSymbolRefs.clear();
   GoObjSymbolAlignments.clear();
   GoObjSymbolSizes.clear();
   GoObjGotypeTargets.clear();
