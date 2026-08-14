@@ -1520,20 +1520,53 @@ uint64_t GoObjObjectWriter::writeObject() {
   const uint64_t StartOffset = OS.tell();
 
   StringRef ABI0Suffix = GoObj::ABI0SymbolSuffix;
-  auto HasABI0Suffix = [&](const MCSymbol *Sym) {
-    return Sym && Sym->getName().ends_with(ABI0Suffix);
+  StringRef BuiltinPrefix = GoObj::BuiltinSymbolSuffixPrefix;
+  StringRef LinknameSuffix = GoObj::LinknameSymbolSuffix;
+  struct GoObjSymbolIdentity {
+    StringRef Name;
+    std::optional<uint32_t> BuiltinIndex;
+    bool IsLinknameRef = false;
+    bool IsABI0 = false;
+  };
+  auto GetSymbolIdentity = [&](const MCSymbol *Sym) {
+    if (!Sym)
+      return GoObjSymbolIdentity{};
+    StringRef Name = Sym->getName();
+    bool IsABI0 = Name.consume_back(ABI0Suffix);
+    if (IsABI0 && (Name.empty() || Name.ends_with(ABI0Suffix)))
+      report_fatal_error("invalid Go ABI0 symbol name");
+
+    bool IsLinknameRef = Name.consume_back(LinknameSuffix);
+    if (Name.contains(LinknameSuffix))
+      report_fatal_error("invalid Go linkname symbol name");
+
+    std::optional<uint32_t> BuiltinIndex;
+    size_t BuiltinBegin = Name.rfind(BuiltinPrefix);
+    if (BuiltinBegin != StringRef::npos) {
+      StringRef Base = Name.take_front(BuiltinBegin);
+      StringRef Index = Name.drop_front(BuiltinBegin + BuiltinPrefix.size());
+      if (Base.empty() || Base.contains(BuiltinPrefix) ||
+          !Index.consume_back(">") || Index.empty())
+        report_fatal_error("invalid Go builtin symbol name");
+      uint32_t ParsedIndex = 0;
+      if (Index.getAsInteger(10, ParsedIndex))
+        report_fatal_error("invalid Go builtin symbol index");
+      Name = Base;
+      BuiltinIndex = ParsedIndex;
+    }
+    if (BuiltinIndex && IsLinknameRef)
+      report_fatal_error("conflicting Go builtin and linkname symbol identity");
+    if ((BuiltinIndex || IsLinknameRef) &&
+        (Name.empty() || Name.contains(BuiltinPrefix) ||
+         Name.contains(LinknameSuffix)))
+      report_fatal_error("invalid Go builtin symbol name");
+    return GoObjSymbolIdentity{Name, BuiltinIndex, IsLinknameRef, IsABI0};
   };
   auto GetSymbolName = [&](const MCSymbol *Sym) -> StringRef {
-    StringRef Name = Sym->getName();
-    if (!HasABI0Suffix(Sym))
-      return Name;
-    Name = Name.drop_back(ABI0Suffix.size());
-    if (Name.empty() || Name.ends_with(ABI0Suffix))
-      report_fatal_error("invalid Go ABI0 symbol name");
-    return Name;
+    return GetSymbolIdentity(Sym).Name;
   };
   auto GetSymbolABI = [&](const MCSymbol *Sym, bool IsFunction) {
-    if (HasABI0Suffix(Sym)) {
+    if (GetSymbolIdentity(Sym).IsABI0) {
       if (!IsFunction)
         report_fatal_error("Go ABI0 suffix requires a function symbol");
       return GoObj::SymABI0;
@@ -1554,10 +1587,14 @@ uint64_t GoObjObjectWriter::writeObject() {
   for (const MCSymbol &Symbol : Asm->symbols()) {
     if (!Symbol.isCommon())
       continue;
-    if (HasABI0Suffix(&Symbol))
+    GoObjSymbolIdentity Identity = GetSymbolIdentity(&Symbol);
+    if (Identity.BuiltinIndex || Identity.IsLinknameRef)
+      report_fatal_error(
+          "Go builtin and linkname suffixes require an undefined symbol");
+    if (Identity.IsABI0)
       report_fatal_error("Go ABI0 suffix requires a function symbol");
     GoObjSymbol GoSym;
-    GoSym.Name = GetSymbolName(&Symbol).str();
+    GoSym.Name = Identity.Name.str();
     GoSym.Symbol = &Symbol;
     GoSym.DefinedBlock = Asm->getContext().isGoObjSymbolNonPackage(&Symbol)
                              ? GoObj::DefinedSymbolBlock::Nonpkgdef
@@ -1609,6 +1646,12 @@ uint64_t GoObjObjectWriter::writeObject() {
 
     auto AddSectionSymbol = [&](const MCSymbol *MCSym, StringRef Name,
                                 uint64_t Begin, uint64_t End) {
+      if (MCSym) {
+        GoObjSymbolIdentity Identity = GetSymbolIdentity(MCSym);
+        if (Identity.BuiltinIndex || Identity.IsLinknameRef)
+          report_fatal_error(
+              "Go builtin and linkname suffixes require an undefined symbol");
+      }
       uint64_t Size = End - Begin;
       ArrayRef<char> Data;
       if (!Section.isBssSection() && Size != 0) {
@@ -2195,15 +2238,20 @@ uint64_t GoObjObjectWriter::writeObject() {
   std::vector<GoObjSymbol> NonPkgRefs;
   StringMap<uint32_t> NonPkgRefIndexes;
   auto GetNonPkgRefSymIdx = [&](const MCSymbol *Sym, bool IsFunction) {
-    StringRef Name = GetSymbolName(Sym);
+    GoObjSymbolIdentity Identity = GetSymbolIdentity(Sym);
+    StringRef Name = Identity.Name;
     if (Name.empty())
       report_fatal_error("GoObj relocation target has an empty name");
 
     uint16_t ABI = GetSymbolABI(Sym, IsFunction);
     std::string Key = (Name + "#" + Twine(ABI)).str();
     auto It = NonPkgRefIndexes.find(Key);
-    if (It != NonPkgRefIndexes.end())
+    if (It != NonPkgRefIndexes.end()) {
+      if (Identity.IsLinknameRef)
+        NonPkgRefs[It->second - NonpkgdefSymbols.size()].Flag2 |=
+            GoObj::SymFlagLinkname;
       return It->second;
+    }
 
     uint32_t SymIdx = checkedUint32(NonpkgdefSymbols.size() + NonPkgRefs.size(),
                                     "non-package reference index");
@@ -2212,6 +2260,8 @@ uint64_t GoObjObjectWriter::writeObject() {
     GoObjSymbol Ref;
     Ref.Name = Name.str();
     Ref.ABI = ABI;
+    if (Identity.IsLinknameRef)
+      Ref.Flag2 |= GoObj::SymFlagLinkname;
     NonPkgRefs.push_back(std::move(Ref));
     return SymIdx;
   };
@@ -2287,22 +2337,18 @@ uint64_t GoObjObjectWriter::writeObject() {
     }
 
     if (Reloc.Symbol->isUndefined()) {
-      if (const MCContext::GoObjSymbolRef *Metadata =
-              Asm->getContext().getGoObjSymbolRef(Reloc.Symbol)) {
-        switch (Metadata->Kind) {
-        case MCContext::GoObjSymbolRefKind::Imported: {
-          GoObjSymRef Ref{GetPackageIndex(Metadata->PackagePrefix),
-                          Metadata->SymIdx};
-          RecordIndexedRef(Ref, TrimInlineHash(GetSymbolName(Reloc.Symbol)),
-                           Metadata->Flags2);
-          return Ref;
-        }
-        case MCContext::GoObjSymbolRefKind::Builtin:
-          if (!Metadata->PackagePrefix.empty() || Metadata->Flags2 != 0)
-            report_fatal_error("invalid GoObj builtin symbol reference");
-          return GoObjSymRef{GoObj::PkgIdxBuiltin, Metadata->SymIdx};
-        }
+      GoObjSymbolIdentity Identity = GetSymbolIdentity(Reloc.Symbol);
+      if (const MCContext::GoObjImportedSymbolRef *Metadata =
+              Asm->getContext().getGoObjImportedSymbolRef(Reloc.Symbol)) {
+        if (Identity.BuiltinIndex || Identity.IsLinknameRef)
+          report_fatal_error("conflicting GoObj symbol reference identity");
+        GoObjSymRef Ref{GetPackageIndex(Metadata->PackagePrefix),
+                        Metadata->SymIdx};
+        RecordIndexedRef(Ref, TrimInlineHash(Identity.Name), Metadata->Flags2);
+        return Ref;
       }
+      if (Identity.BuiltinIndex && !Identity.IsLinknameRef)
+        return GoObjSymRef{GoObj::PkgIdxBuiltin, *Identity.BuiltinIndex};
       bool IsFunction;
       switch (Reloc.Type) {
       case GoObj::R_CALL:

@@ -10,15 +10,21 @@
 @"fmt.data" = external global i8, !goobj.import !2
 @"fmt.inlined#AAAAAAAAAAA=#suffix" = external global i8, !goobj.import !3
 @"fmt.unused" = external global i8, !goobj.import !8
-@"type:string" = external global i8, !goobj.builtin !4
+@"type:string<builtin.7>" = external global i8
 @data_source = constant ptr @"fmt.data", section ".rodata", align 8
 @inline_source = constant ptr @"fmt.inlined#AAAAAAAAAAA=#suffix", section ".rodata", align 8
-@llvm.compiler.used = appending global [6 x ptr] [ptr @source, ptr @data_source, ptr @inline_source, ptr @"fmt.data", ptr @"fmt.inlined#AAAAAAAAAAA=#suffix", ptr @"type:string"], section "llvm.metadata"
+@llvm.compiler.used = appending global [9 x ptr] [ptr @source, ptr @data_source, ptr @inline_source, ptr @"fmt.data", ptr @"fmt.inlined#AAAAAAAAAAA=#suffix", ptr @"type:string<builtin.7>", ptr @"runtime.internal<builtin.8>", ptr @"runtime.abi0<builtin.9><ABI0>", ptr @"runtime.named<linkname>"], section "llvm.metadata"
 
 declare !goobj.import !5 goabiinternal void @"os.Exit"(i64)
+declare goabiinternal void @"runtime.internal<builtin.8>"()
+declare goabi0 void @"runtime.abi0<builtin.9><ABI0>"()
+declare goabiinternal void @"runtime.named<linkname>"()
 
 define goabiinternal void @source() "frame-pointer"="non-leaf" {
   call goabiinternal void @"os.Exit"(i64 1)
+  call goabiinternal void @"runtime.internal<builtin.8>"()
+  call goabi0 void @"runtime.abi0<builtin.9><ABI0>"()
+  call goabiinternal void @"runtime.named<linkname>"()
   ret void
 }
 
@@ -27,11 +33,10 @@ define goabiinternal void @source() "frame-pointer"="non-leaf" {
 !1 = !{!"fmt", !"fmt", !"fedcba9876543210"}
 !2 = !{!"fmt", i32 9, i32 1}
 !3 = !{!"fmt", i32 10, i32 0}
-!4 = !{i32 7}
 !5 = !{!"os", i32 15, i32 0}
 
 !goobj.marker_relocs = !{!6, !7}
-!6 = !{ptr @source, ptr @"type:string", i32 23, i64 0}
+!6 = !{ptr @source, ptr @"type:string<builtin.7>", i32 23, i64 0}
 !7 = !{ptr @data_source, ptr @"fmt.data", i32 23, i64 0}
 !8 = !{!"fmt", i32 11, i32 0}
 
@@ -46,10 +51,14 @@ define goabiinternal void @source() "frame-pointer"="non-leaf" {
 ; CHECK-DAG: refname [[FMTIDX]]:10: fmt.inlinedsuffix
 ; CHECK-DAG: refname [[OSIDX]]:15: os.Exit
 ; CHECK: refflags [[FMTIDX]]:9: flag=0 flag2=1
+; CHECK-DAG: nonpkgref {{[0-9]+}}: runtime.named abi=1 {{.*}}flag2=16
 ; CHECK-NOT: nonpkgref {{[0-9]+}}: fmt.data
 ; CHECK-NOT: nonpkgref {{[0-9]+}}: os.Exit
 ; CHECK-NOT: fmt.unused
 ; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: off=0 size=8 {{.*}}target=fmt.data {{.*}}pkg=[[FMTIDX]] sym=9
 ; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: off=0 size=0 type=23 add=0 target=fmt.data {{.*}}pkg=[[FMTIDX]] sym=9
 ; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: off=0 size=0 type=23 add=0 target=builtin:7 {{.*}}pkg=builtin sym=7
+; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: {{.*}}target=builtin:8 {{.*}}pkg=builtin sym=8
+; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: {{.*}}target=builtin:9 {{.*}}pkg=builtin sym=9
+; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: {{.*}}target=runtime.named {{.*}}pkg=none
 ; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: {{.*}}target=os.Exit {{.*}}pkg=[[OSIDX]] sym=15

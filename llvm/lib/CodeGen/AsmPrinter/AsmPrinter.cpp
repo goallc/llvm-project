@@ -1153,10 +1153,15 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
   // The LLVM symbol name is the sole carrier of ABI0 object identity. Keep the
   // calling convention as an independent lowering contract and reject stale
   // metadata or mismatched names instead of trying to repair either one.
-  for (const GlobalObject &GO : M.global_objects())
+  for (const GlobalObject &GO : M.global_objects()) {
     if (GO.getMetadata("goobj.symbol.name"))
       report_fatal_error(
           "!goobj.symbol.name is obsolete; encode ABI0 in the symbol name");
+    if (GO.getMetadata("goobj.builtin"))
+      report_fatal_error(
+          "!goobj.builtin is obsolete; encode the builtin index in the symbol "
+          "name");
+  }
 
   for (const Function &F : M) {
     if (F.isIntrinsic())
@@ -1201,44 +1206,34 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
   }
 
   // Only the optimized relocation stream decides which declarations become
-  // GoObj references. Attachments retain the package-local indices that LLVM
-  // symbol names and MC relocations cannot reconstruct.
+  // GoObj references. The attachment retains the package-local index that
+  // LLVM symbol names and MC relocations cannot reconstruct. Builtin identity
+  // is encoded directly in the declaration name instead.
   for (const GlobalObject &GO : M.global_objects()) {
     const MDNode *Imported = GO.getMetadata("goobj.import");
-    const MDNode *Builtin = GO.getMetadata("goobj.builtin");
-    if (!Imported && !Builtin)
+    if (!Imported)
       continue;
-    if (!GO.isDeclaration() || (Imported && Builtin))
+    if (!GO.isDeclaration() ||
+        GO.getName().contains(GoObj::BuiltinSymbolSuffixPrefix) ||
+        GO.getName().contains(GoObj::LinknameSymbolSuffix))
       report_fatal_error("invalid GoObj symbol reference attachment");
 
-    MCContext::GoObjSymbolRef Ref;
-    if (Imported) {
-      if (Imported->getNumOperands() != 3)
-        report_fatal_error("expected !goobj.import to have three operands");
-      StringRef Prefix =
-          getGoObjMetadataString(Imported->getOperand(0), "goobj.import");
-      const auto *SymIdx =
-          mdconst::dyn_extract<ConstantInt>(Imported->getOperand(1));
-      const auto *Flags2 =
-          mdconst::dyn_extract<ConstantInt>(Imported->getOperand(2));
-      if (Prefix.empty() || !SymIdx || SymIdx->getValue().ugt(UINT32_MAX) ||
-          !Flags2 || Flags2->getValue().ugt(UINT8_MAX))
-        report_fatal_error("invalid !goobj.import attachment");
-      Ref.Kind = MCContext::GoObjSymbolRefKind::Imported;
-      Ref.PackagePrefix = Prefix.str();
-      Ref.SymIdx = static_cast<uint32_t>(SymIdx->getZExtValue());
-      Ref.Flags2 = static_cast<uint8_t>(Flags2->getZExtValue());
-    } else {
-      if (Builtin->getNumOperands() != 1)
-        report_fatal_error("expected !goobj.builtin to have one operand");
-      const auto *SymIdx =
-          mdconst::dyn_extract<ConstantInt>(Builtin->getOperand(0));
-      if (!SymIdx || SymIdx->getValue().ugt(UINT32_MAX))
-        report_fatal_error("invalid !goobj.builtin attachment");
-      Ref.Kind = MCContext::GoObjSymbolRefKind::Builtin;
-      Ref.SymIdx = static_cast<uint32_t>(SymIdx->getZExtValue());
-    }
-    AP.OutContext.setGoObjSymbolRef(AP.getSymbol(&GO), std::move(Ref));
+    if (Imported->getNumOperands() != 3)
+      report_fatal_error("expected !goobj.import to have three operands");
+    StringRef Prefix =
+        getGoObjMetadataString(Imported->getOperand(0), "goobj.import");
+    const auto *SymIdx =
+        mdconst::dyn_extract<ConstantInt>(Imported->getOperand(1));
+    const auto *Flags2 =
+        mdconst::dyn_extract<ConstantInt>(Imported->getOperand(2));
+    if (Prefix.empty() || !SymIdx || SymIdx->getValue().ugt(UINT32_MAX) ||
+        !Flags2 || Flags2->getValue().ugt(UINT8_MAX))
+      report_fatal_error("invalid !goobj.import attachment");
+    MCContext::GoObjImportedSymbolRef Ref;
+    Ref.PackagePrefix = Prefix.str();
+    Ref.SymIdx = static_cast<uint32_t>(SymIdx->getZExtValue());
+    Ref.Flags2 = static_cast<uint8_t>(Flags2->getZExtValue());
+    AP.OutContext.setGoObjImportedSymbolRef(AP.getSymbol(&GO), std::move(Ref));
   }
 
   if (const NamedMDNode *Keep = M.getNamedMetadata("goobj.keep")) {
