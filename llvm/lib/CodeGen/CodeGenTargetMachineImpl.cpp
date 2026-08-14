@@ -250,6 +250,7 @@ CodeGenTargetMachineImpl::createMCStreamer(raw_pwrite_stream &Out,
         Config.Experiments = std::move(IRConfig->Experiments);
         Config.IsMain = IRConfig->IsMain;
         Config.IsShared = IRConfig->IsShared;
+        Config.IsStd = IRConfig->IsStd;
       } else {
         Config.PackagePath = GoObjPackagePath;
         if (!GoObjVersion.empty())
