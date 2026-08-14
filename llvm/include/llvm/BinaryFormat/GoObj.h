@@ -23,6 +23,19 @@ namespace GoObj {
 // Go function. GoObj serialization strips it and records ABI0 separately.
 inline constexpr char ABI0SymbolSuffix[] = "<ABI0>";
 
+// Compiler-generated references to predefined Go runtime symbols carry this
+// prefix followed by their decimal GoObj builtin index and a closing '>'. The
+// suffix keeps those declarations distinct from runtime package definitions in
+// LLVM IR. GoObj serialization strips it and normally records PkgIdxBuiltin
+// plus the encoded index instead.
+inline constexpr char BuiltinSymbolSuffixPrefix[] = "<builtin.";
+
+// References resolved through //go:linkname carry this suffix instead of a
+// builtin suffix. It remains orthogonal to ABI identity, so ABI0 linkname
+// references end in <linkname><ABI0>. GoObj strips it and preserves
+// name-based non-package reference classification.
+inline constexpr char LinknameSymbolSuffix[] = "<linkname>";
+
 // "GoNoSplt" encoded as the stable STACKMAP identifier for the function-level
 // entry argument pointer map. This record is metadata-only: it is present for
 // both split and nosplit functions and never denotes a callsite.

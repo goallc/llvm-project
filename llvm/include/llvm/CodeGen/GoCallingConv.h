@@ -20,6 +20,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/Support/Alignment.h"
 #include <cstdint>
+#include <string>
 
 namespace llvm {
 
@@ -122,6 +123,12 @@ bool isFloatingPiece(Type *Ty);
 /// strips the reserved suffix and records ABI0 in the object symbol.
 void addGoObjABI0Callee(MachineInstrBuilder &MIB, MachineFunction &MF,
                         StringRef SymbolName);
+
+/// Resolve a compiler-provided Go builtin declaration by its logical linker
+/// name and calling convention. The declaration name carries its GoObj builtin
+/// index, so target late passes never need a duplicate builtin table.
+std::string getGoObjBuiltinCalleeName(MachineFunction &MF, StringRef SymbolName,
+                                      CallingConv::ID CC);
 
 } // namespace goabi
 } // namespace llvm

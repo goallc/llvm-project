@@ -12,8 +12,8 @@
 }
 
 declare goabiinternal void @use_three_pointers(ptr, ptr, ptr)
-declare goabi0 void @"runtime.morestack_noctxt<ABI0>"()
-declare goabi0 void @"runtime.morestackc<ABI0>"()
+declare goabi0 void @"runtime.morestack_noctxt<builtin.246><ABI0>"()
+declare goabi0 void @"runtime.morestackc<builtin.245><ABI0>"()
 
 define goabiinternal i64 @morestack_call(i64 %value) {
 entry:
@@ -89,7 +89,7 @@ entry:
 
 ; CHECK-LABEL: name: morestack_call
 ; CHECK-NOT: ANNOTATION_LABEL
-; CHECK: CALL64pcrel32 &"runtime.morestack_noctxt<ABI0>", implicit $rsp, implicit $ssp
+; CHECK: CALL64pcrel32 &"runtime.morestack_noctxt<builtin.246><ABI0>", implicit $rsp, implicit $ssp
 ; CHECK: STACKMAP 5147419139155979380, 0
 ; CHECK-NOT: STATEPOINT
 
@@ -105,7 +105,7 @@ entry:
 ; CHECK: offset: 16, size: 8
 ; CHECK: offset: 8, size: 8
 ; CHECK: offset: 0, size: 8
-; CHECK: CALL64pcrel32 &"runtime.morestack_noctxt<ABI0>", implicit $rsp, implicit $ssp
+; CHECK: CALL64pcrel32 &"runtime.morestack_noctxt<builtin.246><ABI0>", implicit $rsp, implicit $ssp
 ; CHECK: STACKMAP 5147419139155979380, 0,
 ; CHECK-SAME: 1, 8, $rsp, 8, 1, 8, $rsp, 16, 1, 8, $rsp, 24
 ; CHECK: renamable $rax = MOV64rm $rbp, 1, $noreg, 16, $noreg
@@ -114,7 +114,7 @@ entry:
 
 ; CHECK-LABEL: name: initialized_pointer_result
 ; CHECK: MOV64mr $rsp, 1, $noreg, 72, $noreg, $rax
-; CHECK: CALL64pcrel32 &"runtime.morestack_noctxt<ABI0>", implicit $rsp, implicit $ssp
+; CHECK: CALL64pcrel32 &"runtime.morestack_noctxt<builtin.246><ABI0>", implicit $rsp, implicit $ssp
 ; The unused pointer parameter may arrive as poison. Its home is preserved for
 ; the ABI retry path but must not be scanned.
 ; CHECK: STACKMAP 5147419139155979380, 0{{$}}
@@ -122,19 +122,19 @@ entry:
 ; CHECK-LABEL: name: partial_aggregate_result
 ; CHECK: MOV64mr $rsp, 1, $noreg, 80, $noreg, $rax
 ; CHECK: MOV64mr $rsp, 1, $noreg, 88, $noreg, $rbx
-; CHECK: CALL64pcrel32 &"runtime.morestack_noctxt<ABI0>", implicit $rsp, implicit $ssp
+; CHECK: CALL64pcrel32 &"runtime.morestack_noctxt<builtin.246><ABI0>", implicit $rsp, implicit $ssp
 ; CHECK: STACKMAP 5147419139155979380, 0{{$}}
 
 ; CHECK-LABEL: name: scalar_stack_argument
-; CHECK: CALL64pcrel32 &"runtime.morestack_noctxt<ABI0>", implicit $rsp, implicit $ssp
+; CHECK: CALL64pcrel32 &"runtime.morestack_noctxt<builtin.246><ABI0>", implicit $rsp, implicit $ssp
 ; CHECK: STACKMAP 5147419139155979380, 0, 1, 8, $rsp, 64
 
 ; CHECK-LABEL: name: aggregate_stack_argument
-; CHECK: CALL64pcrel32 &"runtime.morestack_noctxt<ABI0>", implicit $rsp, implicit $ssp
+; CHECK: CALL64pcrel32 &"runtime.morestack_noctxt<builtin.246><ABI0>", implicit $rsp, implicit $ssp
 ; CHECK: STACKMAP 5147419139155979380, 0,
 ; CHECK-SAME: 1, 8, $rsp, 48, 1, 8, $rsp, 64
 
 ; CHECK-LABEL: name: systemstack_growth
 ; CHECK: CMP64rm $r12, $r14, 1, $noreg, 24, $noreg
-; CHECK: CALL64pcrel32 &"runtime.morestackc<ABI0>", implicit $rsp, implicit $ssp
+; CHECK: CALL64pcrel32 &"runtime.morestackc<builtin.245><ABI0>", implicit $rsp, implicit $ssp
 ; CHECK: STACKMAP 5147419139155979380, 0

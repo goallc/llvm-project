@@ -91,18 +91,18 @@ static Error configureGoObjFromModule(const Module &M) {
                              "!goobj.config must contain one operand");
 
   const MDNode &Node = *Named->getOperand(0);
-  if (Node.getNumOperands() != 11)
+  if (Node.getNumOperands() != 12)
     return createStringError(inconvertibleErrorCode(),
-                             "!goobj.config must contain eleven fields");
+                             "!goobj.config must contain twelve fields");
 
-  SmallVector<std::string, 10> Fields;
-  for (unsigned I = 0; I != 10; ++I) {
+  SmallVector<std::string, 11> Fields;
+  for (unsigned I = 0; I != 11; ++I) {
     Expected<std::string> Field = getGoObjConfigField(Node, I);
     if (!Field)
       return Field.takeError();
     Fields.push_back(std::move(*Field));
   }
-  const auto *ExperimentNode = dyn_cast<MDNode>(Node.getOperand(10));
+  const auto *ExperimentNode = dyn_cast<MDNode>(Node.getOperand(11));
   if (!ExperimentNode)
     return createStringError(inconvertibleErrorCode(),
                              "!goobj.config experiments must be a metadata node");
@@ -131,9 +131,11 @@ static Error configureGoObjFromModule(const Module &M) {
         inconvertibleErrorCode(),
         "!goobj.config GOARCH setting key and value must be both present or absent");
   if ((Fields[8] != "0" && Fields[8] != "1") ||
-      (Fields[9] != "0" && Fields[9] != "1"))
-    return createStringError(inconvertibleErrorCode(),
-                             "!goobj.config main and shared flags must be 0 or 1");
+      (Fields[9] != "0" && Fields[9] != "1") ||
+      (Fields[10] != "0" && Fields[10] != "1"))
+    return createStringError(
+        inconvertibleErrorCode(),
+        "!goobj.config main, shared, and std flags must be 0 or 1");
   if (!Triple(M.getTargetTriple()).isOSBinFormatGoObj())
     return createStringError(inconvertibleErrorCode(),
                              "!goobj.config requires a GoObj target triple");
@@ -148,6 +150,7 @@ static Error configureGoObjFromModule(const Module &M) {
   Config.PackagePath = std::move(Fields[7]);
   Config.IsMain = Fields[8] == "1";
   Config.IsShared = Fields[9] == "1";
+  Config.IsStd = Fields[10] == "1";
   Config.Experiments.assign(Experiments.begin(), Experiments.end());
   codegen::setGoObjConfig(std::move(Config));
   return Error::success();
