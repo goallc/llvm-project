@@ -2209,6 +2209,27 @@ uint64_t GoObjObjectWriter::writeObject() {
   SetDefinedSymRefs(Hashed64defSymbols, GoObj::PkgIdxHashed64);
   SetDefinedSymRefs(HasheddefSymbols, GoObj::PkgIdxHashed);
   SetDefinedSymRefs(NonpkgdefSymbols, GoObj::PkgIdxNone);
+
+  // LLVM keeps suffixed builtin declarations separate from canonical
+  // definitions so their function types may differ.  GoObj, however, uses a
+  // same-object definition when its canonical name and ABI match.
+  StringMap<uint32_t> DefinedSymbolIdentityIndexes;
+  for (uint32_t I : DefinedSymbolOrder) {
+    const GoObjSymbol &Symbol = Symbols[I];
+    if (Symbol.Name.empty())
+      continue;
+    DefinedSymbolIdentityIndexes.try_emplace(
+        (Twine(Symbol.Name) + "#" + Twine(Symbol.ABI)).str(), I);
+  }
+  auto FindDefinedSymRef = [&](StringRef Name,
+                               uint16_t ABI) -> std::optional<GoObjSymRef> {
+    auto It =
+        DefinedSymbolIdentityIndexes.find((Name + "#" + Twine(ABI)).str());
+    if (It == DefinedSymbolIdentityIndexes.end())
+      return std::nullopt;
+    return DefinedSymRefs[It->second];
+  };
+
   for (GoObjSymbol &Symbol : Symbols) {
     for (GoObjSymbol::Relocation &Reloc : Symbol.Relocations) {
       if (!Reloc.TargetSymbolIndex)
@@ -2347,8 +2368,6 @@ uint64_t GoObjObjectWriter::writeObject() {
         RecordIndexedRef(Ref, TrimInlineHash(Identity.Name), Metadata->Flags2);
         return Ref;
       }
-      if (Identity.BuiltinIndex && !Identity.IsLinknameRef)
-        return GoObjSymRef{GoObj::PkgIdxBuiltin, *Identity.BuiltinIndex};
       bool IsFunction;
       switch (Reloc.Type) {
       case GoObj::R_CALL:
@@ -2361,6 +2380,12 @@ uint64_t GoObjObjectWriter::writeObject() {
       default:
         IsFunction = Asm->getContext().isGoObjFunctionSymbol(Reloc.Symbol);
         break;
+      }
+      if (Identity.BuiltinIndex && !Identity.IsLinknameRef) {
+        if (std::optional<GoObjSymRef> Ref = FindDefinedSymRef(
+                Identity.Name, GetSymbolABI(Reloc.Symbol, IsFunction)))
+          return *Ref;
+        return GoObjSymRef{GoObj::PkgIdxBuiltin, *Identity.BuiltinIndex};
       }
       return GoObjSymRef{GoObj::PkgIdxNone,
                          GetNonPkgRefSymIdx(Reloc.Symbol, IsFunction)};
