@@ -418,6 +418,16 @@ static void reservePreviousStackSlotForValue(const Value *IncomingValue,
 /// reference lowered call result
 static SDNode *peelCallResultChain(SDNode *Node) {
   while (true) {
+    if (Node->getOpcode() == ISD::CALLSEQ_START ||
+        Node->getOpcode() == ISD::CALLSEQ_END)
+      break;
+    // Target call nodes carry the preserved-register mask. They may also have
+    // explicit memory operands and no glue result, so recognize this semantic
+    // boundary before considering target memory-copy nodes below.
+    if (llvm::any_of(Node->ops(), [](SDValue Operand) {
+          return isa<RegisterMaskSDNode>(Operand.getNode());
+        }))
+      break;
     if (Node->getOpcode() == ISD::CopyFromReg) {
       Node = Node->getOperand(0).getNode();
       continue;
@@ -428,19 +438,21 @@ static SDNode *peelCallResultChain(SDNode *Node) {
     }
 
     // A target may represent a large memory-result copy with a custom node
-    // rather than a MemSDNode. Peel any non-glued node with exactly one chain
-    // input and one chain result. Stop at glued target call nodes.
-    bool HasGlueResult = false;
+    // rather than a MemSDNode. Peel a single chain input/result after the
+    // register-mask check above has established that this is not the call.
     unsigned ChainResults = 0;
     for (unsigned I = 0; I != Node->getNumValues(); ++I) {
-      HasGlueResult |= Node->getValueType(I) == MVT::Glue;
       ChainResults += Node->getValueType(I) == MVT::Other;
     }
-    if (Node->getOpcode() != ISD::TokenFactor && !HasGlueResult) {
+    if (Node->getOpcode() != ISD::TokenFactor) {
       SDNode *ChainInput = nullptr;
       unsigned ChainInputs = 0;
       for (SDValue Operand : Node->ops()) {
         if (Operand.getValueType() != MVT::Other)
+          continue;
+        // Target nodes may use an MVT::Other VTSDNode as an immediate type
+        // descriptor (for example X86ISD::REP_MOVS). It is not a chain edge.
+        if (isa<VTSDNode>(Operand.getNode()))
           continue;
         ChainInput = Operand.getNode();
         ++ChainInputs;
@@ -951,6 +963,17 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
     // Glue is always last operand
     Glue = CallNode->getOperand(CallNode->getNumOperands() - 1);
   }
+  unsigned FixedCallOperands = CallHasIncomingGlue ? 4 : 3;
+  if (CallNode->getNumOperands() < FixedCallOperands)
+    report_fatal_error(
+        Twine("statepoint call chain did not resolve to a call in ") +
+        DAG.getMachineFunction().getName());
+  unsigned RegMaskOperand =
+      CallNode->getNumOperands() - (CallHasIncomingGlue ? 2 : 1);
+  if (!isa<RegisterMaskSDNode>(CallNode->getOperand(RegMaskOperand).getNode()))
+    report_fatal_error(
+        Twine("statepoint call chain did not resolve to a call in ") +
+        DAG.getMachineFunction().getName());
 
   // Build the GC_TRANSITION_START node if necessary.
   //
@@ -1001,7 +1024,7 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
   // Calculate and push starting position of vmstate arguments
   // Get number of arguments incoming directly into call node
   unsigned NumCallRegArgs =
-      CallNode->getNumOperands() - (CallHasIncomingGlue ? 4 : 3);
+      CallNode->getNumOperands() - FixedCallOperands;
   Ops.push_back(DAG.getTargetConstant(NumCallRegArgs, getCurSDLoc(), MVT::i32));
 
   // Add call target
