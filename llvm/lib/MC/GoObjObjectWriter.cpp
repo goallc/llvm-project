@@ -2338,29 +2338,29 @@ uint64_t GoObjObjectWriter::writeObject() {
     IndexedRefs.push_back({Ref, Name.str(), Flags2});
   };
 
-  auto GetTargetSymRef = [&](const GoObjRelocationEntry &Reloc,
+  auto GetTargetSymRef = [&](const MCSymbol *Target, unsigned RelocType,
                              int64_t &Addend) {
-    if (!Reloc.Symbol)
+    if (!Target)
       report_fatal_error("GoObj relocation without a target symbol");
 
-    if (auto It = DefinedSymbolIndexes.find(Reloc.Symbol);
+    if (auto It = DefinedSymbolIndexes.find(Target);
         It != DefinedSymbolIndexes.end())
       return DefinedSymRefs[It->second];
 
-    if (Reloc.Symbol->isInSection()) {
-      uint64_t TargetOffset = Asm->getSymbolOffset(*Reloc.Symbol);
+    if (Target->isInSection()) {
+      uint64_t TargetOffset = Asm->getSymbolOffset(*Target);
       if (std::optional<uint32_t> SymIdx =
-              FindContainingSymbol(&Reloc.Symbol->getSection(), TargetOffset)) {
+              FindContainingSymbol(&Target->getSection(), TargetOffset)) {
         Addend +=
             static_cast<int64_t>(TargetOffset - Symbols[*SymIdx].SectionBegin);
         return DefinedSymRefs[*SymIdx];
       }
     }
 
-    if (Reloc.Symbol->isUndefined()) {
-      GoObjSymbolIdentity Identity = GetSymbolIdentity(Reloc.Symbol);
+    if (Target->isUndefined()) {
+      GoObjSymbolIdentity Identity = GetSymbolIdentity(Target);
       if (const MCContext::GoObjImportedSymbolRef *Metadata =
-              Asm->getContext().getGoObjImportedSymbolRef(Reloc.Symbol)) {
+              Asm->getContext().getGoObjImportedSymbolRef(Target)) {
         if (Identity.BuiltinIndex || Identity.IsLinknameRef)
           report_fatal_error("conflicting GoObj symbol reference identity");
         GoObjSymRef Ref{GetPackageIndex(Metadata->PackagePrefix),
@@ -2369,7 +2369,7 @@ uint64_t GoObjObjectWriter::writeObject() {
         return Ref;
       }
       bool IsFunction;
-      switch (Reloc.Type) {
+      switch (RelocType) {
       case GoObj::R_CALL:
       case GoObj::R_CALLARM:
       case GoObj::R_CALLARM64:
@@ -2378,31 +2378,27 @@ uint64_t GoObjObjectWriter::writeObject() {
         IsFunction = true;
         break;
       default:
-        IsFunction = Asm->getContext().isGoObjFunctionSymbol(Reloc.Symbol);
+        IsFunction = Asm->getContext().isGoObjFunctionSymbol(Target);
         break;
       }
       if (Identity.BuiltinIndex && !Identity.IsLinknameRef) {
         if (std::optional<GoObjSymRef> Ref = FindDefinedSymRef(
-                Identity.Name, GetSymbolABI(Reloc.Symbol, IsFunction)))
+                Identity.Name, GetSymbolABI(Target, IsFunction)))
           return *Ref;
         return GoObjSymRef{GoObj::PkgIdxBuiltin, *Identity.BuiltinIndex};
       }
       return GoObjSymRef{GoObj::PkgIdxNone,
-                         GetNonPkgRefSymIdx(Reloc.Symbol, IsFunction)};
+                         GetNonPkgRefSymIdx(Target, IsFunction)};
     }
 
     report_fatal_error(
         Twine("unsupported GoObj relocation target symbol: name=") +
-        Reloc.Symbol->getName() + " temporary=" +
-        Twine(static_cast<unsigned>(Reloc.Symbol->isTemporary())) +
-        " variable=" +
-        Twine(static_cast<unsigned>(Reloc.Symbol->isVariable())) +
-        " absolute=" +
-        Twine(static_cast<unsigned>(Reloc.Symbol->isAbsolute())) +
-        " in-section=" +
-        Twine(static_cast<unsigned>(Reloc.Symbol->isInSection())) +
-        " undefined=" +
-        Twine(static_cast<unsigned>(Reloc.Symbol->isUndefined())));
+        Target->getName() +
+        " temporary=" + Twine(static_cast<unsigned>(Target->isTemporary())) +
+        " variable=" + Twine(static_cast<unsigned>(Target->isVariable())) +
+        " absolute=" + Twine(static_cast<unsigned>(Target->isAbsolute())) +
+        " in-section=" + Twine(static_cast<unsigned>(Target->isInSection())) +
+        " undefined=" + Twine(static_cast<unsigned>(Target->isUndefined())));
   };
 
   SmallVector<GoObjRelocationEntry> MergedRelocations;
@@ -2470,7 +2466,8 @@ uint64_t GoObjObjectWriter::writeObject() {
     const bool IsX86TLSLE = (Arch == Triple::x86 || Arch == Triple::x86_64) &&
                             (RelocType & ~GoObj::R_WEAK) == GoObj::R_TLS_LE;
     GoObjSymRef TargetSymRef =
-        IsX86TLSLE ? GoObjSymRef{} : GetTargetSymRef(Reloc, Addend);
+        IsX86TLSLE ? GoObjSymRef{}
+                   : GetTargetSymRef(Reloc.Symbol, Reloc.Type, Addend);
 
     Source.Relocations.push_back(
         {static_cast<uint32_t>(LocalOffset), Reloc.Size, RelocType, Addend,
@@ -2486,10 +2483,8 @@ uint64_t GoObjObjectWriter::writeObject() {
     if (!Targets)
       continue;
     for (const MCSymbol *Target : *Targets) {
-      GoObjRelocationEntry Reloc;
-      Reloc.Symbol = Target;
       int64_t Addend = 0;
-      GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
+      GoObjSymRef TargetSymRef = GetTargetSymRef(Target, GoObj::R_KEEP, Addend);
       Source.Relocations.push_back({0, 0, GoObj::R_KEEP, Addend,
                                     TargetSymRef.PkgIdx, TargetSymRef.SymIdx,
                                     std::nullopt});
@@ -2503,10 +2498,9 @@ uint64_t GoObjObjectWriter::writeObject() {
     if (!Markers)
       continue;
     for (const MCContext::GoObjMarkerReloc &Marker : *Markers) {
-      GoObjRelocationEntry Reloc;
-      Reloc.Symbol = Marker.Target;
       int64_t Addend = Marker.Addend;
-      GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
+      GoObjSymRef TargetSymRef =
+          GetTargetSymRef(Marker.Target, Marker.Type, Addend);
       Source.Relocations.push_back({0, 0, Marker.Type, Addend,
                                     TargetSymRef.PkgIdx, TargetSymRef.SymIdx,
                                     std::nullopt});
@@ -2520,10 +2514,9 @@ uint64_t GoObjObjectWriter::writeObject() {
         Asm->getContext().getGoObjGotypeTarget(Source.Symbol);
     if (!Target)
       continue;
-    GoObjRelocationEntry Reloc;
-    Reloc.Symbol = Target;
     int64_t Addend = 0;
-    GoObjSymRef TargetSymRef = GetTargetSymRef(Reloc, Addend);
+    GoObjSymRef TargetSymRef =
+        GetTargetSymRef(Target, GoObj::R_USETYPE, Addend);
     if (Addend != 0)
       report_fatal_error("GoObj gotype auxiliary target has an addend");
     Source.Auxiliaries.emplace_back(GoObj::AuxGotype, TargetSymRef);
@@ -2547,10 +2540,8 @@ uint64_t GoObjObjectWriter::writeObject() {
       const GoObjInlineTreeNode &Node = Patch.InlineTree[I];
       if (!Node.Callee)
         report_fatal_error("GoObj inline tree node has no callee symbol");
-      GoObjRelocationEntry Reloc;
-      Reloc.Symbol = Node.Callee;
       int64_t Addend = 0;
-      GoObjSymRef Ref = GetTargetSymRef(Reloc, Addend);
+      GoObjSymRef Ref = GetTargetSymRef(Node.Callee, GoObj::R_CALL, Addend);
       if (Addend != 0)
         report_fatal_error("GoObj inline callee symbol has an addend");
       uint64_t NodeOffset = InlineTreeOffset + static_cast<uint64_t>(I) * 24;
