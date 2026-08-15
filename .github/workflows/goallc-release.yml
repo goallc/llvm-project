@@ -46,11 +46,14 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release-tag || github.ref }}
 
       - name: Validate release tag
+        id: release
         shell: bash
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^goallc-llvm23\.1\.0-(v[0-9]+|[0-9]{8}T[0-9]{6}Z)$ ]]
-          test "$(git rev-list -n1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
+          source_revision="$(git rev-parse HEAD)"
+          test "$(git rev-list -n1 "$RELEASE_TAG")" = "$source_revision"
+          echo "source_revision=$source_revision" >>"$GITHUB_OUTPUT"
 
       - name: Install build dependencies
         run: |
@@ -64,12 +67,15 @@ jobs:
             zlib1g-dev
 
       - name: Restore ccache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: goallc-llvm23-linux-${{ matrix.arch }}-${{ github.sha }}
+          key: goallc-llvm23-ci-linux-${{ matrix.arch }}-${{ steps.release.outputs.source_revision }}
           restore-keys: |
-            goallc-llvm23-linux-${{ matrix.arch }}-
+            goallc-llvm23-ci-linux-${{ matrix.arch }}-
+
+      - name: Reset ccache statistics
+        run: ccache --zero-stats
 
       - name: Build installed LLVM payload
         shell: bash
