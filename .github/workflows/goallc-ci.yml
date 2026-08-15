@@ -99,6 +99,7 @@ jobs:
           set -euo pipefail
           build="$RUNNER_TEMP/goallc-llvm-build"
           tests=(
+            "$build/test/CodeGen/AArch64/go-argument-homes.ll"
             "$build/test/CodeGen/AArch64/go-callconv.ll"
             "$build/test/CodeGen/AArch64/go-statepoint-stack-args.ll"
             "$build/test/CodeGen/AArch64/goobj-ir-config.ll"
@@ -109,6 +110,7 @@ jobs:
             "$build/test/CodeGen/Generic/goobj-entry-stackmap-cfg.ll"
             "$build/test/CodeGen/Generic/goobj-entry-stackmap-sentinel.ll"
             "$build/test/CodeGen/Generic/goobj-stack-check-policy.ll"
+            "$build/test/CodeGen/X86/go-argument-homes.ll"
             "$build/test/CodeGen/X86/go-callconv.ll"
             "$build/test/CodeGen/X86/go-gc-write-barrier.ll"
             "$build/test/CodeGen/X86/go-statepoint-stack-results.ll"

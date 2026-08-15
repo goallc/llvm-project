@@ -11742,6 +11742,8 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
         Flags.setByVal();
       if (Args[i].IsByRef)
         Flags.setByRef();
+      if (Args[i].IsGoRet)
+        Flags.setGoRet();
       if (Args[i].IsPreallocated) {
         Flags.setPreallocated();
         // Set the byval flag for CCAssignFn callbacks that don't know about
@@ -11770,6 +11772,20 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
           MemAlign = *MA;
         else
           MemAlign = getByValTypeAlignment(Args[i].IndirectType, DL);
+      } else if (Args[i].IsByRef) {
+        unsigned FrameSize = DL.getTypeAllocSize(Args[i].IndirectType);
+        Flags.setByRefSize(FrameSize);
+        if (auto MA = Args[i].Alignment)
+          MemAlign = *MA;
+        else
+          MemAlign = getByValTypeAlignment(Args[i].IndirectType, DL);
+      } else if (Args[i].IsGoRet) {
+        unsigned FrameSize = DL.getTypeAllocSize(Args[i].IndirectType);
+        Flags.setGoRetSize(FrameSize);
+        if (auto MA = Args[i].Alignment)
+          MemAlign = *MA;
+        else
+          MemAlign = getByValTypeAlignment(Args[i].IndirectType, DL);
       } else if (auto MA = Args[i].Alignment) {
         MemAlign = *MA;
       } else {
@@ -11792,8 +11808,8 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
       else if (Args[i].IsZExt)
         ExtendKind = ISD::ZERO_EXTEND;
 
-      // Conservatively only handle 'returned' on non-vectors that can be lowered,
-      // for now.
+      // Conservatively only handle 'returned' on non-vectors that can be
+      // lowered, for now.
       if (Args[i].IsReturned && !Op.getValueType().isVector() &&
           CanLowerReturn) {
         assert((CLI.RetTy == Args[i].Ty ||
@@ -12306,6 +12322,8 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
         Flags.setByVal();
       if (Arg.hasAttribute(Attribute::ByRef))
         Flags.setByRef();
+      if (Arg.hasAttribute(Attribute::GoRet))
+        Flags.setGoRet();
       if (Arg.hasAttribute(Attribute::InAlloca)) {
         Flags.setInAlloca();
         // Set the byval flag for CCAssignFn callbacks that don't know about
@@ -12335,7 +12353,7 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
       Align MemAlign;
       Type *ArgMemTy = nullptr;
       if (Flags.isByVal() || Flags.isInAlloca() || Flags.isPreallocated() ||
-          Flags.isByRef()) {
+          Flags.isByRef() || Flags.isGoRet()) {
         if (!ArgMemTy)
           ArgMemTy = Arg.getPointeeInMemoryValueType();
 
@@ -12352,6 +12370,8 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
           MemAlign = TLI->getByValTypeAlignment(ArgMemTy, DL);
         if (Flags.isByRef())
           Flags.setByRefSize(MemSize);
+        else if (Flags.isGoRet())
+          Flags.setGoRetSize(MemSize);
         else
           Flags.setByValSize(MemSize);
       } else if (auto ParamAlign = Arg.getParamStackAlign()) {
@@ -12477,8 +12497,8 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
                              ArrayRef(&InVals[i], NumParts), *TLI, ArgHasUses);
     }
 
-    // If this argument is unused then remember its value. It is used to generate
-    // debugging information.
+    // If this argument is unused then remember its value. It is used to
+    // generate debugging information.
     bool isSwiftErrorArg =
         TLI->supportSwiftError() &&
         Arg.hasAttribute(Attribute::SwiftError);
@@ -12886,7 +12906,8 @@ void SelectionDAGBuilder::lowerWorkItem(SwitchWorkListItem W, Value *Cond,
     } else {
       Fallthrough = CurMF->CreateMachineBasicBlock(CurMBB->getBasicBlock());
       CurMF->insert(BBI, Fallthrough);
-      // Put Cond in a virtual register to make it available from the new blocks.
+      // Put Cond in a virtual register to make it available from the new
+      // blocks.
       ExportFromCurrentBlock(Cond);
     }
     UnhandledProbs -= I->Prob;

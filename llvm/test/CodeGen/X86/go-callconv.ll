@@ -2,6 +2,9 @@
 ; RUN: llc -mtriple=x86_64-unknown-linux-gnu -O2 < %s | FileCheck %s --check-prefix=X86-O2
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -O0 -filetype=null < %s
 
+declare token @llvm.call.preallocated.setup(i32)
+declare ptr @llvm.call.preallocated.arg(token, i32)
+
 define goabiinternal i64 @second_int(i64 %a, i64 %b) {
 ; X86-LABEL: second_int:
 ; X86: movq %rbx, %rax
@@ -61,25 +64,40 @@ entry:
   ret { i64, %go.empty.carrier, i64 } %r1
 }
 
-define goabi0 i64 @"abi0_second_int<ABI0>"(i64 %a, i64 %b) {
+define goabi0 i64 @"abi0_second_int<ABI0>"(
+    ptr preallocated(i64) align 8 %a.home,
+    ptr preallocated(i64) align 8 %b.home) {
 ; X86-LABEL: "abi0_second_int<ABI0>":
-; X86: movq 16(%rsp), %rax
-; X86: movq %rax, 24(%rsp)
+; X86: leaq 16(%rsp), %[[BHOME:r[a-z0-9]+]]
+; X86: movq (%[[BHOME]]), %[[B:r[a-z0-9]+]]
+; X86: movq %[[B]], 24(%rsp)
 ; X86: retq
 entry:
+  %b = load i64, ptr %b.home, align 8
   ret i64 %b
 }
 
 define goabi0 i64 @"abi0_call_second_int<ABI0>"() {
 ; X86-LABEL: "abi0_call_second_int<ABI0>":
-; X86: movq %rsp, %[[BASE:r[a-z0-9]+]]
-; X86: movq $22, 8(%[[BASE]])
-; X86: movq $11, (%[[BASE]])
+; X86-DAG: leaq (%rsp), %[[AHOME:r[a-z0-9]+]]
+; X86-DAG: leaq 8(%rsp), %[[BHOME:r[a-z0-9]+]]
+; X86-DAG: movq $11, (%[[AHOME]])
+; X86-DAG: movq $22, (%[[BHOME]])
 ; X86: callq "abi0_second_int<ABI0>"
 ; X86: movq %rsp, %[[RELOAD:r[a-z0-9]+]]
 ; X86: movq 16(%[[RELOAD]]), %rax
 entry:
-  %ret = call goabi0 i64 @"abi0_second_int<ABI0>"(i64 11, i64 22)
+  %setup = call token @llvm.call.preallocated.setup(i32 2)
+  %a.home = call ptr @llvm.call.preallocated.arg(token %setup, i32 0)
+      preallocated(i64)
+  %b.home = call ptr @llvm.call.preallocated.arg(token %setup, i32 1)
+      preallocated(i64)
+  store i64 11, ptr %a.home, align 8
+  store i64 22, ptr %b.home, align 8
+  %ret = call goabi0 i64 @"abi0_second_int<ABI0>"(
+      ptr preallocated(i64) align 8 %a.home,
+      ptr preallocated(i64) align 8 %b.home)
+      ["preallocated"(token %setup)]
   ret i64 %ret
 }
 
@@ -125,9 +143,19 @@ define goabiinternal i64 @call_method_results(ptr %callee, ptr %recv,
 ; X86-O2:       addq 56(%rsp), %rax
 ; X86-O2:       addq ${{[0-9]+}}, %rsp
 entry:
+  %setup = call token @llvm.call.preallocated.setup(i32 2)
+  %integers.home = call ptr @llvm.call.preallocated.arg(token %setup, i32 0)
+      preallocated([2 x i64])
+  %floats.home = call ptr @llvm.call.preallocated.arg(token %setup, i32 1)
+      preallocated([2 x double])
+  store [2 x i64] [i64 456, i64 789], ptr %integers.home, align 8
+  store [2 x double] [double 3.4, double 5.6], ptr %floats.home, align 8
   %result = call goabiinternal %method.results %callee(
-      ptr %recv, i64 123, [2 x i64] [i64 456, i64 789],
-      double 1.2, [2 x double] [double 3.4, double 5.6], ptr nest %ctxt) #0
+      ptr %recv, i64 123,
+      ptr preallocated([2 x i64]) align 8 %integers.home,
+      double 1.2,
+      ptr preallocated([2 x double]) align 8 %floats.home,
+      ptr nest %ctxt) #0 ["preallocated"(token %setup)]
   %s = extractvalue %method.results %result, 0
   %a = extractvalue %method.results %result, 1
   %x = extractvalue %method.results %result, 2
@@ -148,13 +176,16 @@ entry:
 
 define goabiinternal i64 @stack_pair(
     i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4,
-    i64 %a5, i64 %a6, i64 %a7, i64 %a8, %pair %value) {
+    i64 %a5, i64 %a6, i64 %a7, i64 %a8,
+    ptr preallocated(%pair) align 8 %value.home) {
 ; X86-LABEL: stack_pair:
-; X86-DAG: movq 8(%rsp), %[[LEFT:r[a-z0-9]+]]
-; X86-DAG: movq 16(%rsp), %[[RIGHT:r[a-z0-9]+]]
+; X86: leaq 8(%rsp), %[[HOME:r[a-z0-9]+]]
+; X86-DAG: movq (%[[HOME]]), %[[LEFT:r[a-z0-9]+]]
+; X86-DAG: movq 8(%[[HOME]]), %[[RIGHT:r[a-z0-9]+]]
 ; X86: addq %[[RIGHT]], %[[LEFT]]
 ; X86: retq
 entry:
+  %value = load %pair, ptr %value.home, align 8
   %left = extractvalue %pair %value, 0
   %right = extractvalue %pair %value, 1
   %sum = add i64 %left, %right
@@ -163,39 +194,55 @@ entry:
 
 define goabiinternal i64 @call_stack_pair() {
 ; X86-LABEL: call_stack_pair:
-; X86-DAG: movq $13, (%[[BASE:r[a-z0-9]+]])
+; X86: leaq (%rsp), %[[BASE:r[a-z0-9]+]]
+; X86-DAG: movq $13, (%[[BASE]])
 ; X86-DAG: movq $17, 8(%[[BASE]])
 ; X86: callq stack_pair
 entry:
+  %setup = call token @llvm.call.preallocated.setup(i32 1)
+  %value.home = call ptr @llvm.call.preallocated.arg(token %setup, i32 0)
+      preallocated(%pair)
+  store %pair { i64 13, i64 17 }, ptr %value.home, align 8
   %result = call goabiinternal i64 @stack_pair(
       i64 0, i64 1, i64 2, i64 3, i64 4,
       i64 5, i64 6, i64 7, i64 8,
-      %pair { i64 13, i64 17 })
+      ptr preallocated(%pair) align 8 %value.home)
+      ["preallocated"(token %setup)]
   ret i64 %result
 }
 
-define goabiinternal [8 x i8] @stack_bytes([8 x i8] %value) {
+define goabiinternal [8 x i8] @stack_bytes(
+    ptr preallocated([8 x i8]) align 1 %value.home) {
 ; X86-LABEL: stack_bytes:
-; X86-DAG: movb 8(%rsp), %{{[a-z0-9]+}}
-; X86-DAG: movb 15(%rsp), %{{[a-z0-9]+}}
+; X86: leaq 8(%rsp), %[[HOME:r[a-z0-9]+]]
+; X86-DAG: movb (%[[HOME]]), %{{[a-z0-9]+}}
+; X86-DAG: movb 7(%[[HOME]]), %{{[a-z0-9]+}}
 ; X86-DAG: movb %{{[a-z0-9]+}}, 16(%rsp)
 ; X86-DAG: movb %{{[a-z0-9]+}}, 23(%rsp)
 ; X86: retq
 entry:
+  %value = load [8 x i8], ptr %value.home, align 1
   ret [8 x i8] %value
 }
 
 define goabiinternal i16 @call_stack_bytes() {
 ; X86-LABEL: call_stack_bytes:
-; X86-DAG: movb $1, (%[[BASE:r[a-z0-9]+]])
+; X86: leaq (%rsp), %[[BASE:r[a-z0-9]+]]
+; X86-DAG: movb $1, (%[[BASE]])
 ; X86-DAG: movb $8, 7(%[[BASE]])
 ; X86: callq stack_bytes
 ; X86: movq %rsp, %[[RESULT_BASE:r[a-z0-9]+]]
 ; X86-DAG: movzbl 8(%[[RESULT_BASE]]), %{{[a-z0-9]+}}
 ; X86-DAG: movzbl 15(%[[RESULT_BASE]]), %{{[a-z0-9]+}}
 entry:
+  %setup = call token @llvm.call.preallocated.setup(i32 1)
+  %value.home = call ptr @llvm.call.preallocated.arg(token %setup, i32 0)
+      preallocated([8 x i8])
+  store [8 x i8] [i8 1, i8 2, i8 3, i8 4, i8 5, i8 6, i8 7, i8 8],
+      ptr %value.home, align 1
   %result = call goabiinternal [8 x i8] @stack_bytes(
-      [8 x i8] [i8 1, i8 2, i8 3, i8 4, i8 5, i8 6, i8 7, i8 8])
+      ptr preallocated([8 x i8]) align 1 %value.home)
+      ["preallocated"(token %setup)]
   %first = extractvalue [8 x i8] %result, 0
   %last = extractvalue [8 x i8] %result, 7
   %first.ext = zext i8 %first to i16

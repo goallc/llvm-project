@@ -12,6 +12,7 @@
 
 #include "AArch64SelectionDAGInfo.h"
 #include "AArch64MachineFunctionInfo.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 
 #define GET_SDNODE_DESC
 #include "AArch64GenSDNodeInfo.inc"
@@ -233,6 +234,16 @@ SDValue AArch64SelectionDAGInfo::EmitTargetCodeForMemcpy(
     return EmitMOPS(AArch64::MOPSMemoryCopyPseudo, DAG, DL, Chain, Dst, Src,
                     Size, DstAlign, SrcAlign, isVolatile, DstPtrInfo,
                     SrcPtrInfo);
+
+  // A Go call cannot use a C memcpy libcall to populate its outgoing argument
+  // area: the copy is part of the call sequence and must not introduce another
+  // call or safepoint.  Small constant copies have already been expanded by
+  // SelectionDAG.  Keep large copies compact by expanding this pseudo to a
+  // baseline-AArch64 loop in the AsmPrinter.
+  if (goabi::isGoCallingConv(
+          DAG.getMachineFunction().getFunction().getCallingConv()))
+    return EmitMOPS(AArch64::GoMemoryCopyPseudo, DAG, DL, Chain, Dst, Src, Size,
+                    DstAlign, SrcAlign, isVolatile, DstPtrInfo, SrcPtrInfo);
 
   auto *AFI = DAG.getMachineFunction().getInfo<AArch64FunctionInfo>();
   SMEAttrs Attrs = AFI->getSMEFnAttrs();

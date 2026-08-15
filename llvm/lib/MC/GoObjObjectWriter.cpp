@@ -37,9 +37,11 @@
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -57,6 +59,25 @@ struct GoObjSymRef {
   uint32_t PkgIdx = GoObj::PkgIdxInvalid;
   uint32_t SymIdx = 0;
 };
+
+std::string goObjPathToPrefix(StringRef Path) {
+  size_t Slash = Path.rfind('/');
+  size_t LastSegment = Slash == StringRef::npos ? 0 : Slash + 1;
+  SmallString<128> Prefix;
+  constexpr char Hex[] = "0123456789abcdef";
+  for (size_t I = 0; I != Path.size(); ++I) {
+    uint8_t C = static_cast<uint8_t>(Path[I]);
+    if (C <= ' ' || (C == '.' && I >= LastSegment) || C == '%' || C == '"' ||
+        C >= 0x7f) {
+      Prefix.push_back('%');
+      Prefix.push_back(Hex[C >> 4]);
+      Prefix.push_back(Hex[C & 0xf]);
+    } else {
+      Prefix.push_back(static_cast<char>(C));
+    }
+  }
+  return Prefix.str().str();
+}
 
 struct GoObjSymbol {
   struct Relocation {
@@ -1771,7 +1792,8 @@ uint64_t GoObjObjectWriter::writeObject() {
                        GoObj::SRODATA,
                        GoObj::SymFlagDupok | GoObj::SymFlagLocal, 0,
                        GoObj::SymABI0, *ExactSize, Align, Data);
-      Symbols.back().ContentHash = makeGoObjContentHash(0, Data);
+      // The native Go object identity includes relocations as well as data.
+      // Compute it after all MC fixups have been assigned to their carriers.
     }
   }
 
@@ -2338,14 +2360,15 @@ uint64_t GoObjObjectWriter::writeObject() {
     IndexedRefs.push_back({Ref, Name.str(), Flags2});
   };
 
-  auto GetTargetSymRef = [&](const MCSymbol *Target, unsigned RelocType,
-                             int64_t &Addend) {
+  auto ResolveTargetSymRef = [&](const MCSymbol *Target, unsigned RelocType,
+                                 int64_t &Addend) {
     if (!Target)
       report_fatal_error("GoObj relocation without a target symbol");
 
     if (auto It = DefinedSymbolIndexes.find(Target);
         It != DefinedSymbolIndexes.end())
-      return DefinedSymRefs[It->second];
+      return std::make_pair(DefinedSymRefs[It->second],
+                            std::optional<uint32_t>(It->second));
 
     if (Target->isInSection()) {
       uint64_t TargetOffset = Asm->getSymbolOffset(*Target);
@@ -2353,7 +2376,7 @@ uint64_t GoObjObjectWriter::writeObject() {
               FindContainingSymbol(&Target->getSection(), TargetOffset)) {
         Addend +=
             static_cast<int64_t>(TargetOffset - Symbols[*SymIdx].SectionBegin);
-        return DefinedSymRefs[*SymIdx];
+        return std::make_pair(DefinedSymRefs[*SymIdx], SymIdx);
       }
     }
 
@@ -2366,7 +2389,7 @@ uint64_t GoObjObjectWriter::writeObject() {
         GoObjSymRef Ref{GetPackageIndex(Metadata->PackagePrefix),
                         Metadata->SymIdx};
         RecordIndexedRef(Ref, TrimInlineHash(Identity.Name), Metadata->Flags2);
-        return Ref;
+        return std::make_pair(Ref, std::optional<uint32_t>());
       }
       bool IsFunction;
       switch (RelocType) {
@@ -2384,11 +2407,15 @@ uint64_t GoObjObjectWriter::writeObject() {
       if (Identity.BuiltinIndex && !Identity.IsLinknameRef) {
         if (std::optional<GoObjSymRef> Ref = FindDefinedSymRef(
                 Identity.Name, GetSymbolABI(Target, IsFunction)))
-          return *Ref;
-        return GoObjSymRef{GoObj::PkgIdxBuiltin, *Identity.BuiltinIndex};
+          return std::make_pair(*Ref, std::optional<uint32_t>());
+        return std::make_pair(
+            GoObjSymRef{GoObj::PkgIdxBuiltin, *Identity.BuiltinIndex},
+            std::optional<uint32_t>());
       }
-      return GoObjSymRef{GoObj::PkgIdxNone,
-                         GetNonPkgRefSymIdx(Target, IsFunction)};
+      return std::make_pair(
+          GoObjSymRef{GoObj::PkgIdxNone,
+                      GetNonPkgRefSymIdx(Target, IsFunction)},
+          std::optional<uint32_t>());
     }
 
     report_fatal_error(
@@ -2399,6 +2426,10 @@ uint64_t GoObjObjectWriter::writeObject() {
         " absolute=" + Twine(static_cast<unsigned>(Target->isAbsolute())) +
         " in-section=" + Twine(static_cast<unsigned>(Target->isInSection())) +
         " undefined=" + Twine(static_cast<unsigned>(Target->isUndefined())));
+  };
+  auto GetTargetSymRef = [&](const MCSymbol *Target, unsigned RelocType,
+                             int64_t &Addend) {
+    return ResolveTargetSymRef(Target, RelocType, Addend).first;
   };
 
   SmallVector<GoObjRelocationEntry> MergedRelocations;
@@ -2431,11 +2462,6 @@ uint64_t GoObjObjectWriter::writeObject() {
     if (LocalOffset >
         static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
       report_fatal_error("GoObj relocation offset exceeds int32 range");
-    if (Source.DefinedBlock == GoObj::DefinedSymbolBlock::Hasheddef &&
-        Source.Symbol && Source.Symbol->isTemporary())
-      report_fatal_error(
-          "GoObj private constants with relocations are not supported");
-
     int64_t Addend = getGoObjRelocAddend(Reloc);
     uint16_t RelocType = checkedUint16(Reloc.Type, "relocation type");
     if (Source.Symbol) {
@@ -2465,13 +2491,15 @@ uint64_t GoObjObjectWriter::writeObject() {
     const Triple::ArchType Arch = Asm->getContext().getTargetTriple().getArch();
     const bool IsX86TLSLE = (Arch == Triple::x86 || Arch == Triple::x86_64) &&
                             (RelocType & ~GoObj::R_WEAK) == GoObj::R_TLS_LE;
-    GoObjSymRef TargetSymRef =
-        IsX86TLSLE ? GoObjSymRef{}
-                   : GetTargetSymRef(Reloc.Symbol, Reloc.Type, Addend);
+    GoObjSymRef TargetSymRef;
+    std::optional<uint32_t> TargetSymbolIndex;
+    if (!IsX86TLSLE)
+      std::tie(TargetSymRef, TargetSymbolIndex) =
+          ResolveTargetSymRef(Reloc.Symbol, Reloc.Type, Addend);
 
     Source.Relocations.push_back(
         {static_cast<uint32_t>(LocalOffset), Reloc.Size, RelocType, Addend,
-         TargetSymRef.PkgIdx, TargetSymRef.SymIdx, std::nullopt});
+         TargetSymRef.PkgIdx, TargetSymRef.SymIdx, TargetSymbolIndex});
   }
 
   // R_KEEP has no bytes or MC fixup. It is a Go linker reachability edge
@@ -2559,6 +2587,133 @@ uint64_t GoObjObjectWriter::writeObject() {
                         return LHS.Offset < RHS.Offset;
                       });
   }
+
+  // LLVM optimizations can synthesize private pointer lookup tables. Match
+  // cmd/internal/obj's content identity: hash the symbol bytes and each
+  // relocation's shape and globally stable target identity. Hashing only the
+  // zero relocation placeholders would incorrectly merge different tables.
+  DenseSet<uint32_t> ContentHashInProgress;
+  std::function<void(uint32_t)> ComputeContentHash = [&](uint32_t SymbolIndex) {
+    if (SymbolIndex >= Symbols.size())
+      report_fatal_error("GoObj hashed definition index is invalid");
+    GoObjSymbol &Symbol = Symbols[SymbolIndex];
+    if (Symbol.ContentHash)
+      return;
+    if (Symbol.DefinedBlock != GoObj::DefinedSymbolBlock::Hasheddef)
+      report_fatal_error(
+          "GoObj content hash requested for a non-hashed symbol");
+    if (!Symbol.Symbol || !Symbol.Symbol->isTemporary() ||
+        Symbol.Type != GoObj::SRODATA)
+      report_fatal_error(
+          "GoObj frontend hashed definition has no content hash");
+    if (!ContentHashInProgress.insert(SymbolIndex).second)
+      report_fatal_error("circular GoObj content-addressable relocation");
+
+    SHA256 Hasher;
+    const char Version = 1;
+    Hasher.update(StringRef(&Version, 1));
+    SmallString<16> Encoded;
+    raw_svector_ostream EncodedOS(Encoded);
+    support::endian::Writer EncodedWriter(EncodedOS, llvm::endianness::little);
+    EncodedWriter.write<uint64_t>(Symbol.Size);
+    EncodedWriter.write<uint8_t>(0); // Default read-only data section.
+    Hasher.update(StringRef(Encoded.data(), Encoded.size()));
+
+    ArrayRef<char> Data(Symbol.Data);
+    while (!Data.empty() && Data.back() == 0)
+      Data = Data.drop_back();
+    if (!Data.empty())
+      Hasher.update(StringRef(Data.data(), Data.size()));
+
+    for (const GoObjSymbol::Relocation &Reloc : Symbol.Relocations) {
+      Encoded.clear();
+      EncodedWriter.write<uint32_t>(Reloc.Offset);
+      EncodedWriter.write<uint8_t>(Reloc.Size);
+      if (Reloc.Type > std::numeric_limits<uint8_t>::max())
+        report_fatal_error("GoObj content hash relocation type is too large");
+      EncodedWriter.write<uint8_t>(static_cast<uint8_t>(Reloc.Type));
+      EncodedWriter.write<uint64_t>(static_cast<uint64_t>(Reloc.Addend));
+      Hasher.update(StringRef(Encoded.data(), Encoded.size()));
+
+      if (Reloc.TargetSymbolIndex && *Reloc.TargetSymbolIndex == SymbolIndex) {
+        Hasher.update("self symbol");
+        continue;
+      }
+      if (Reloc.PkgIdx == GoObj::PkgIdxInvalid) {
+        Hasher.update("nil symbol");
+        continue;
+      }
+
+      switch (Reloc.PkgIdx) {
+      case GoObj::PkgIdxHashed64: {
+        if (Reloc.SymIdx >= Hashed64defSymbols.size())
+          report_fatal_error("invalid GoObj short-hashed relocation target");
+        const GoObjSymbol &Target = Symbols[Hashed64defSymbols[Reloc.SymIdx]];
+        if (Target.Data.size() != GoObj::Hash64Size)
+          report_fatal_error("GoObj short-hashed target has invalid size");
+        const char Kind = 0;
+        Hasher.update(StringRef(&Kind, 1));
+        Hasher.update(StringRef(Target.Data.data(), Target.Data.size()));
+        break;
+      }
+      case GoObj::PkgIdxHashed: {
+        if (Reloc.SymIdx >= HasheddefSymbols.size())
+          report_fatal_error("invalid GoObj hashed relocation target");
+        uint32_t TargetIndex = HasheddefSymbols[Reloc.SymIdx];
+        ComputeContentHash(TargetIndex);
+        const char Kind = 1;
+        Hasher.update(StringRef(&Kind, 1));
+        Hasher.update(ArrayRef<uint8_t>(*Symbols[TargetIndex].ContentHash));
+        break;
+      }
+      case GoObj::PkgIdxNone: {
+        const char Kind = 2;
+        Hasher.update(StringRef(&Kind, 1));
+        if (Reloc.SymIdx < NonpkgdefSymbols.size()) {
+          Hasher.update(Symbols[NonpkgdefSymbols[Reloc.SymIdx]].Name);
+        } else {
+          uint32_t RefIndex = Reloc.SymIdx - NonpkgdefSymbols.size();
+          if (RefIndex >= NonPkgRefs.size())
+            report_fatal_error("invalid GoObj non-package relocation target");
+          Hasher.update(NonPkgRefs[RefIndex].Name);
+        }
+        break;
+      }
+      case GoObj::PkgIdxBuiltin: {
+        const char Kind = 3;
+        Hasher.update(StringRef(&Kind, 1));
+        Encoded.clear();
+        EncodedWriter.write<uint32_t>(Reloc.SymIdx);
+        Hasher.update(StringRef(Encoded.data(), Encoded.size()));
+        break;
+      }
+      case GoObj::PkgIdxSelf: {
+        Hasher.update(goObjPathToPrefix(Config.PackagePath));
+        Encoded.clear();
+        EncodedWriter.write<uint32_t>(Reloc.SymIdx);
+        Hasher.update(StringRef(Encoded.data(), Encoded.size()));
+        break;
+      }
+      default:
+        if (Reloc.PkgIdx >= PackagePrefixes.size())
+          report_fatal_error("invalid GoObj imported relocation package");
+        Hasher.update(PackagePrefixes[Reloc.PkgIdx]);
+        Encoded.clear();
+        EncodedWriter.write<uint32_t>(Reloc.SymIdx);
+        Hasher.update(StringRef(Encoded.data(), Encoded.size()));
+        break;
+      }
+    }
+
+    std::array<uint8_t, 32> FullHash = Hasher.final();
+    std::array<uint8_t, GoObj::HashSize> Hash;
+    std::copy_n(FullHash.begin(), Hash.size(), Hash.begin());
+    Symbol.ContentHash = Hash;
+    ContentHashInProgress.erase(SymbolIndex);
+  };
+  for (uint32_t SymbolIndex : HasheddefSymbols)
+    if (!Symbols[SymbolIndex].ContentHash)
+      ComputeContentHash(SymbolIndex);
 
   SmallString<0> Body;
   raw_svector_ostream BodyOS(Body);

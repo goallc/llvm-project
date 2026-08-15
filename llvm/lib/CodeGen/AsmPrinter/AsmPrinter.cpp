@@ -265,15 +265,23 @@ static uint32_t getGoObjArgSize(const Function &F, const DataLayout &DL,
   }
 
   SmallVector<Type *, 8> ArgTys;
+  SmallVector<goabi::MemoryResult, 4> MemoryResults;
   for (const Argument &Arg : F.args())
-    if (!Arg.hasNestAttr())
-      ArgTys.push_back(Arg.getType());
+    if (Arg.hasGoRetAttr())
+      MemoryResults.push_back(
+          {goabi::getGoRetIndex(Arg), Arg.getParamGoRetType()});
+    else if (!Arg.hasNestAttr())
+      ArgTys.push_back(goabi::getParameterType(Arg));
 
   SmallVector<Type *, 8> ResultTys;
   goabi::getReturnTypes(F.getReturnType(), goabi::hasTupleResultsAttr(F),
-                        ResultTys);
+                        MemoryResults, ResultTys);
   uint64_t Size =
-      goabi::computeCallLayout(ArgTys, ResultTys, DL, Config).ArgSize;
+      goabi::computeCallLayout(
+          ArgTys, ResultTys, goabi::getMemoryArgMask(F),
+          goabi::getMemoryResultMask(ResultTys.size(), MemoryResults), DL,
+          Config)
+          .ArgSize;
   if (Size > std::numeric_limits<uint32_t>::max())
     report_fatal_error("GoObj function argument size exceeds uint32 limit");
   return static_cast<uint32_t>(Size);

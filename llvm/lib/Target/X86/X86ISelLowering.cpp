@@ -38838,22 +38838,28 @@ X86TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     return BB;
   }
   case TargetOpcode::PREALLOCATED_SETUP: {
-    assert(Subtarget.is32Bit() && "preallocated only used in 32-bit");
     auto *MFI = MF->getInfo<X86MachineFunctionInfo>();
-    MFI->setHasPreallocatedCall(true);
     int64_t PreallocatedId = MI.getOperand(0).getImm();
+    if (MFI->preallocatedUsesReservedCallFrame(PreallocatedId)) {
+      // Go's outgoing argument area is already part of the fixed function
+      // frame. The setup token owns that area without moving SP again.
+      MI.eraseFromParent();
+      return BB;
+    }
+    MFI->setHasPreallocatedCall(true);
     size_t StackAdjustment = MFI->getPreallocatedStackSize(PreallocatedId);
     assert(StackAdjustment != 0 && "0 stack adjustment");
     LLVM_DEBUG(dbgs() << "PREALLOCATED_SETUP stack adjustment "
                       << StackAdjustment << "\n");
-    BuildMI(*BB, MI, MIMD, TII->get(X86::SUB32ri), X86::ESP)
-        .addReg(X86::ESP)
+    Register StackPtr = Subtarget.is64Bit() ? X86::RSP : X86::ESP;
+    unsigned SubOpcode = Subtarget.is64Bit() ? X86::SUB64ri32 : X86::SUB32ri;
+    BuildMI(*BB, MI, MIMD, TII->get(SubOpcode), StackPtr)
+        .addReg(StackPtr)
         .addImm(StackAdjustment);
     MI.eraseFromParent();
     return BB;
   }
   case TargetOpcode::PREALLOCATED_ARG: {
-    assert(Subtarget.is32Bit() && "preallocated calls only used in 32-bit");
     int64_t PreallocatedId = MI.getOperand(1).getImm();
     int64_t ArgIdx = MI.getOperand(2).getImm();
     auto *MFI = MF->getInfo<X86MachineFunctionInfo>();
@@ -38861,9 +38867,11 @@ X86TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     LLVM_DEBUG(dbgs() << "PREALLOCATED_ARG arg index " << ArgIdx
                       << ", arg offset " << ArgOffset << "\n");
     // stack pointer + offset
-    addRegOffset(BuildMI(*BB, MI, MIMD, TII->get(X86::LEA32r),
-                         MI.getOperand(0).getReg()),
-                 X86::ESP, false, ArgOffset);
+    Register StackPtr = Subtarget.is64Bit() ? X86::RSP : X86::ESP;
+    unsigned LeaOpcode = Subtarget.is64Bit() ? X86::LEA64r : X86::LEA32r;
+    addRegOffset(
+        BuildMI(*BB, MI, MIMD, TII->get(LeaOpcode), MI.getOperand(0).getReg()),
+        StackPtr, false, ArgOffset);
     MI.eraseFromParent();
     return BB;
   }

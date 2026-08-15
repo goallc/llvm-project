@@ -285,7 +285,8 @@ static bool definedInRegion(const SetVector<BasicBlock *> &Blocks, Value *V) {
 /// function being code extracted, but not in the region being extracted.
 /// These values must be passed in as live-ins to the function.
 static bool definedInCaller(const SetVector<BasicBlock *> &Blocks, Value *V) {
-  if (isa<Argument>(V)) return true;
+  if (isa<Argument>(V))
+    return true;
   if (Instruction *I = dyn_cast<Instruction>(V))
     if (!Blocks.count(I->getParent()))
       return true;
@@ -725,7 +726,8 @@ void CodeExtractor::severSplitPHINodesOfEntry(BasicBlock *&Header) {
 
   if (Header != &Header->getParent()->getEntryBlock()) {
     PHINode *PN = dyn_cast<PHINode>(Header->begin());
-    if (!PN) return;  // No PHI nodes.
+    if (!PN)
+      return; // No PHI nodes.
 
     // If the header node contains any PHI nodes, check to see if there is more
     // than one entry from outside the region.  If so, we need to sever the
@@ -766,8 +768,8 @@ void CodeExtractor::severSplitPHINodesOfEntry(BasicBlock *&Header) {
         TI->replaceUsesOfWith(OldPred, NewBB);
       }
 
-    // Okay, everything within the region is now branching to the right block, we
-    // just have to update the PHI nodes now, inserting PHI nodes into NewBB.
+    // Okay, everything within the region is now branching to the right block,
+    // we just have to update the PHI nodes now, inserting PHI nodes into NewBB.
     BasicBlock::iterator AfterPHIs;
     for (AfterPHIs = OldPred->begin(); isa<PHINode>(AfterPHIs); ++AfterPHIs) {
       PHINode *PN = cast<PHINode>(AfterPHIs);
@@ -1046,6 +1048,7 @@ Function *CodeExtractor::constructFunctionDeclaration(
       case Attribute::ZExt:
       case Attribute::ImmArg:
       case Attribute::ByRef:
+      case Attribute::GoRet:
       case Attribute::WriteOnly:
       case Attribute::Writable:
       case Attribute::DeadOnUnwind:

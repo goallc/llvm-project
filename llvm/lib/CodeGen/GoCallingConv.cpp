@@ -180,7 +180,8 @@ static uint64_t alignToValue(uint64_t Value, Align Alignment) {
 }
 
 static ValueLayout computeValueLayout(Type *Ty, const DataLayout &DL,
-                                      const ABIConfig &Config, unsigned &IntReg,
+                                      const ABIConfig &Config,
+                                      bool MustUseMemory, unsigned &IntReg,
                                       unsigned &FPReg) {
   ValueLayout Layout;
   Layout.Ty = Ty;
@@ -197,7 +198,7 @@ static ValueLayout computeValueLayout(Type *Ty, const DataLayout &DL,
 
   unsigned IntAfter = IntReg;
   unsigned FPAfter = FPReg;
-  if (classifyType(Ty, DL, Config, IntAfter, FPAfter)) {
+  if (!MustUseMemory && classifyType(Ty, DL, Config, IntAfter, FPAfter)) {
     Layout.InRegs = true;
     Layout.IntRegCount = IntAfter - IntReg;
     Layout.FPRegCount = FPAfter - FPReg;
@@ -222,12 +223,44 @@ bool hasTupleResultsAttr(const Function &F) {
   return F.hasFnAttribute(TupleResultsAttr);
 }
 
+static unsigned getGoRetIndex(Attribute Attr) {
+  unsigned Index;
+  if (!Attr.isStringAttribute() ||
+      Attr.getValueAsString().getAsInteger(10, Index))
+    report_fatal_error("invalid or missing goretindex parameter attribute");
+  return Index;
+}
+
+unsigned getGoRetIndex(const Argument &Arg) {
+  return getGoRetIndex(Arg.getAttributes().getAttribute(GoRetIndexAttr));
+}
+
+unsigned getGoRetIndex(const CallBase &CB, unsigned ArgNo) {
+  return getGoRetIndex(CB.getParamAttr(ArgNo, GoRetIndexAttr));
+}
+
 bool hasTupleResultsAttr(const CallBase &CB) {
   if (CB.hasFnAttr(TupleResultsAttr))
     return true;
   if (const Function *Callee = CB.getCalledFunction())
     return Callee->hasFnAttribute(TupleResultsAttr);
   return false;
+}
+
+Type *getParameterType(const Argument &Arg) {
+  if (Arg.hasPreallocatedAttr())
+    return Arg.getAttributes().getPreallocatedType();
+  return Arg.getType();
+}
+
+SmallBitVector getMemoryArgMask(const Function &F) {
+  SmallBitVector MemoryArgs;
+  for (const Argument &Arg : F.args()) {
+    if (Arg.hasNestAttr() || Arg.hasGoRetAttr())
+      continue;
+    MemoryArgs.push_back(Arg.hasPreallocatedAttr());
+  }
+  return MemoryArgs;
 }
 
 void getReturnTypes(Type *ReturnType, bool TupleResults,
@@ -245,9 +278,57 @@ void getReturnTypes(Type *ReturnType, bool TupleResults,
   ResultTys.push_back(ReturnType);
 }
 
+void getReturnTypes(Type *ReturnType, bool TupleResults,
+                    ArrayRef<MemoryResult> MemoryResults,
+                    SmallVectorImpl<Type *> &ResultTys) {
+  SmallVector<Type *, 8> DirectResultTys;
+  getReturnTypes(ReturnType, TupleResults, DirectResultTys);
+  if (MemoryResults.empty()) {
+    ResultTys.append(DirectResultTys.begin(), DirectResultTys.end());
+    return;
+  }
+
+  unsigned TotalResultCount = DirectResultTys.size() + MemoryResults.size();
+  ResultTys.assign(TotalResultCount, nullptr);
+  std::optional<unsigned> Previous;
+  for (const MemoryResult &Result : MemoryResults) {
+    if (!Result.Ty || Result.Index >= TotalResultCount ||
+        ResultTys[Result.Index] || (Previous && *Previous >= Result.Index))
+      report_fatal_error("invalid Go memory result carrier");
+    ResultTys[Result.Index] = Result.Ty;
+    Previous = Result.Index;
+  }
+  auto Direct = DirectResultTys.begin();
+  for (Type *&Ty : ResultTys)
+    if (!Ty)
+      Ty = *Direct++;
+  if (Direct != DirectResultTys.end())
+    report_fatal_error("Go direct result index count mismatch");
+}
+
+SmallBitVector getMemoryResultMask(unsigned NumResults,
+                                   ArrayRef<MemoryResult> MemoryResults) {
+  SmallBitVector Mask(NumResults);
+  std::optional<unsigned> Previous;
+  for (const MemoryResult &Result : MemoryResults) {
+    if (Result.Index >= NumResults || Mask.test(Result.Index) ||
+        (Previous && *Previous >= Result.Index))
+      report_fatal_error("invalid Go memory result carrier");
+    Mask.set(Result.Index);
+    Previous = Result.Index;
+  }
+  return Mask;
+}
+
 CallLayout computeCallLayout(ArrayRef<Type *> ArgTys,
-                             ArrayRef<Type *> ResultTys, const DataLayout &DL,
-                             const ABIConfig &Config) {
+                             ArrayRef<Type *> ResultTys,
+                             const SmallBitVector &MemoryArgs,
+                             const SmallBitVector &MemoryResults,
+                             const DataLayout &DL, const ABIConfig &Config) {
+  if (MemoryArgs.size() != ArgTys.size() ||
+      MemoryResults.size() != ResultTys.size())
+    report_fatal_error("Go ABI memory constraints do not match value counts");
+
   CallLayout Layout;
   Layout.Args.reserve(ArgTys.size());
   Layout.Results.reserve(ResultTys.size());
@@ -255,9 +336,9 @@ CallLayout computeCallLayout(ArrayRef<Type *> ArgTys,
   unsigned NextInt = 0;
   unsigned NextFP = 0;
   uint64_t StackArgsEnd = 0;
-  for (Type *ArgTy : ArgTys) {
-    ValueLayout ArgLayout =
-        computeValueLayout(ArgTy, DL, Config, NextInt, NextFP);
+  for (auto [Index, ArgTy] : llvm::enumerate(ArgTys)) {
+    ValueLayout ArgLayout = computeValueLayout(
+        ArgTy, DL, Config, MemoryArgs.test(Index), NextInt, NextFP);
     if (!ArgLayout.InRegs)
       StackArgsEnd = layoutStackValue(StackArgsEnd, ArgLayout);
     Layout.Args.push_back(ArgLayout);
@@ -268,9 +349,9 @@ CallLayout computeCallLayout(ArrayRef<Type *> ArgTys,
   NextFP = 0;
   uint64_t StackResultsEnd = alignToValue(StackArgsEnd, Config.PtrAlign);
   uint64_t StackResultsStart = StackResultsEnd;
-  for (Type *ResultTy : ResultTys) {
-    ValueLayout ResultLayout =
-        computeValueLayout(ResultTy, DL, Config, NextInt, NextFP);
+  for (auto [Index, ResultTy] : llvm::enumerate(ResultTys)) {
+    ValueLayout ResultLayout = computeValueLayout(
+        ResultTy, DL, Config, MemoryResults.test(Index), NextInt, NextFP);
     if (!ResultLayout.InRegs)
       StackResultsEnd = layoutStackValue(StackResultsEnd, ResultLayout);
     Layout.Results.push_back(ResultLayout);

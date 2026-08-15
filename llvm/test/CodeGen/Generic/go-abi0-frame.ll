@@ -12,7 +12,9 @@ declare ptr @llvm.go.abi0.frame()
 
 ; The intrinsic denotes one mutable, aliased object spanning the two arguments
 ; and one result slot. It deliberately overlaps the per-value fixed objects.
-define goabi0 ptr @abi0_frame(i64 %a, i64 %b) noinline {
+define goabi0 ptr @abi0_frame(
+    ptr preallocated(i64) align 8 %a,
+    ptr preallocated(i64) align 8 %b) noinline {
 entry:
   %frame = call ptr @llvm.go.abi0.frame()
   ret ptr %frame

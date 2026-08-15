@@ -145,6 +145,8 @@ public:
 
   void LowerMOPS(MCStreamer &OutStreamer, const MachineInstr &MI);
 
+  void LowerGoMemoryCopy(MCStreamer &OutStreamer, const MachineInstr &MI);
+
   void LowerSTACKMAP(MCStreamer &OutStreamer, StackMaps &SM,
                      const MachineInstr &MI);
   void LowerPATCHPOINT(MCStreamer &OutStreamer, StackMaps &SM,
@@ -1760,6 +1762,148 @@ void AArch64AsmPrinter::LowerMOPS(llvm::MCStreamer &OutStreamer,
 
     EmitToStreamer(OutStreamer, MCIB);
   }
+}
+
+void AArch64AsmPrinter::LowerGoMemoryCopy(MCStreamer &OutStreamer,
+                                          const MachineInstr &MI) {
+  assert(MI.getOpcode() == AArch64::GoMemoryCopyPseudo);
+  Register Dst = MI.getOperand(0).getReg();
+  Register Src = MI.getOperand(1).getReg();
+  Register Size = MI.getOperand(2).getReg();
+
+  assert(Dst == MI.getOperand(3).getReg() && Src == MI.getOperand(4).getReg() &&
+         Size == MI.getOperand(5).getReg() &&
+         "Go memory-copy operands must be tied");
+
+  MCSymbol *Loop = OutContext.createTempSymbol();
+  MCSymbol *Tail8 = OutContext.createTempSymbol();
+  MCSymbol *Tail4 = OutContext.createTempSymbol();
+  MCSymbol *Tail2 = OutContext.createTempSymbol();
+  MCSymbol *Done = OutContext.createTempSymbol();
+  auto Ref = [&](MCSymbol *Sym) {
+    return MCSymbolRefExpr::create(Sym, OutContext);
+  };
+
+  // Copy full 16-byte units.
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::SUBSXri)
+                                  .addReg(AArch64::XZR)
+                                  .addReg(Size)
+                                  .addImm(16)
+                                  .addImm(0));
+  EmitToStreamer(
+      OutStreamer,
+      MCInstBuilder(AArch64::Bcc).addImm(AArch64CC::LO).addExpr(Ref(Tail8)));
+  OutStreamer.emitLabel(Loop);
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::LDRQui)
+                                  .addReg(AArch64::Q31)
+                                  .addReg(Src)
+                                  .addImm(0));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::STRQui)
+                                  .addReg(AArch64::Q31)
+                                  .addReg(Dst)
+                                  .addImm(0));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::ADDXri)
+                                  .addReg(Src)
+                                  .addReg(Src)
+                                  .addImm(16)
+                                  .addImm(0));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::ADDXri)
+                                  .addReg(Dst)
+                                  .addReg(Dst)
+                                  .addImm(16)
+                                  .addImm(0));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::SUBSXri)
+                                  .addReg(Size)
+                                  .addReg(Size)
+                                  .addImm(16)
+                                  .addImm(0));
+  EmitToStreamer(
+      OutStreamer,
+      MCInstBuilder(AArch64::Bcc).addImm(AArch64CC::HS).addExpr(Ref(Loop)));
+
+  // Copy the remaining 8/4/2/1-byte units.  Advancing both pointers after
+  // each unit keeps every access at offset zero and valid at any alignment.
+  OutStreamer.emitLabel(Tail8);
+  EmitToStreamer(
+      OutStreamer,
+      MCInstBuilder(AArch64::TBZX).addReg(Size).addImm(3).addExpr(Ref(Tail4)));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::LDRDui)
+                                  .addReg(AArch64::D31)
+                                  .addReg(Src)
+                                  .addImm(0));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::STRDui)
+                                  .addReg(AArch64::D31)
+                                  .addReg(Dst)
+                                  .addImm(0));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::ADDXri)
+                                  .addReg(Src)
+                                  .addReg(Src)
+                                  .addImm(8)
+                                  .addImm(0));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::ADDXri)
+                                  .addReg(Dst)
+                                  .addReg(Dst)
+                                  .addImm(8)
+                                  .addImm(0));
+
+  OutStreamer.emitLabel(Tail4);
+  EmitToStreamer(
+      OutStreamer,
+      MCInstBuilder(AArch64::TBZX).addReg(Size).addImm(2).addExpr(Ref(Tail2)));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::LDRSui)
+                                  .addReg(AArch64::S31)
+                                  .addReg(Src)
+                                  .addImm(0));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::STRSui)
+                                  .addReg(AArch64::S31)
+                                  .addReg(Dst)
+                                  .addImm(0));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::ADDXri)
+                                  .addReg(Src)
+                                  .addReg(Src)
+                                  .addImm(4)
+                                  .addImm(0));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::ADDXri)
+                                  .addReg(Dst)
+                                  .addReg(Dst)
+                                  .addImm(4)
+                                  .addImm(0));
+
+  OutStreamer.emitLabel(Tail2);
+  EmitToStreamer(
+      OutStreamer,
+      MCInstBuilder(AArch64::TBZX).addReg(Size).addImm(1).addExpr(Ref(Done)));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::LDRHHui)
+                                  .addReg(AArch64::H31)
+                                  .addReg(Src)
+                                  .addImm(0));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::STRHHui)
+                                  .addReg(AArch64::H31)
+                                  .addReg(Dst)
+                                  .addImm(0));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::ADDXri)
+                                  .addReg(Src)
+                                  .addReg(Src)
+                                  .addImm(2)
+                                  .addImm(0));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::ADDXri)
+                                  .addReg(Dst)
+                                  .addReg(Dst)
+                                  .addImm(2)
+                                  .addImm(0));
+
+  EmitToStreamer(
+      OutStreamer,
+      MCInstBuilder(AArch64::TBZX).addReg(Size).addImm(0).addExpr(Ref(Done)));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::LDRBBui)
+                                  .addReg(AArch64::B31)
+                                  .addReg(Src)
+                                  .addImm(0));
+  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::STRBBui)
+                                  .addReg(AArch64::B31)
+                                  .addReg(Dst)
+                                  .addImm(0));
+  OutStreamer.emitLabel(Done);
 }
 
 void AArch64AsmPrinter::LowerSTACKMAP(MCStreamer &OutStreamer, StackMaps &SM,
@@ -3701,6 +3845,10 @@ void AArch64AsmPrinter::emitInstruction(const MachineInstr *MI) {
   case AArch64::MOPSMemorySetPseudo:
   case AArch64::MOPSMemorySetTaggingPseudo:
     LowerMOPS(*OutStreamer, *MI);
+    return;
+
+  case AArch64::GoMemoryCopyPseudo:
+    LowerGoMemoryCopy(*OutStreamer, *MI);
     return;
 
   case TargetOpcode::STACKMAP:

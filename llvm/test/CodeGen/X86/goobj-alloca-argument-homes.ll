@@ -73,18 +73,16 @@ entry:
 
 ; An aggregate assigned wholly to the stack reuses its caller-populated slot;
 ; the lifetime marker must not make SelectionDAG allocate and copy a local.
-define goabiinternal void @inactive_stack_aggregate(%stack_aggregate %value)
+define goabiinternal void @inactive_stack_aggregate(
+    ptr preallocated(%stack_aggregate) align 8 %value.home)
     gc "statepoint-example" {
 entry:
-  %home = alloca %stack_aggregate, align 8
-  call void @llvm.lifetime.start.p0(i64 16, ptr %home)
-  store %stack_aggregate %value, ptr %home, align 8
   %token = call goabiinternal token (i64, i32, ptr, i32, i32, ...)
       @llvm.experimental.gc.statepoint.p0(
           i64 3, i32 0, ptr elementtype(void ()) @safepoint,
           i32 0, i32 0, i32 0, i32 0)
       [ "deopt"(i64 1195461697, i64 15, i64 1,
-                  i64 1095520067, i64 11, ptr %home, i64 0, i64 16,
+                  i64 1095520067, i64 11, ptr %value.home, i64 0, i64 16,
                   i64 8, i64 8, i64 2, i64 64, i64 1, i64 3,
                   i64 1095519299, i64 15) ]
   ret void

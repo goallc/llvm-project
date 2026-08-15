@@ -7,7 +7,10 @@
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.x86.o %s
 
 declare goabiinternal void @callee(ptr)
-declare goabi0 void @"callee.abi0<ABI0>"(ptr)
+declare token @llvm.call.preallocated.setup(i32)
+declare ptr @llvm.call.preallocated.arg(token, i32)
+declare goabi0 void @"callee.abi0<ABI0>"(
+    ptr preallocated(ptr) align 8)
 
 define goabiinternal void @nosplit(ptr %pointer) "go-nosplit" {
 entry:
@@ -32,7 +35,13 @@ entry:
   %context = getelementptr [3 x ptr], ptr %closure, i64 0, i64 1
   store volatile ptr @callee, ptr %code, align 8
   store volatile ptr %pointer, ptr %context, align 8
-  call goabi0 void @"callee.abi0<ABI0>"(ptr %closure)
+  %setup = call token @llvm.call.preallocated.setup(i32 1)
+  %argument = call ptr @llvm.call.preallocated.arg(token %setup, i32 0)
+      preallocated(ptr)
+  store ptr %closure, ptr %argument, align 8
+  call goabi0 void @"callee.abi0<ABI0>"(
+      ptr preallocated(ptr) align 8 %argument)
+      ["preallocated"(token %setup)]
   ret void
 }
 

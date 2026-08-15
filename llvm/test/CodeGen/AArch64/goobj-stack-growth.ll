@@ -32,8 +32,9 @@ define goabiinternal ptr @mixed_register_and_stack_pointer_args(
     i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5,
     i64 %a6, i64 %a7, i64 %a8, i64 %a9, i64 %a10,
     i64 %a11, i64 %a12, i64 %a13, i64 %a14, i64 %a15,
-    ptr %p16) "frame-pointer"="non-leaf" {
+    ptr preallocated(ptr) align 8 %p16.home) "frame-pointer"="non-leaf" {
 entry:
+  %p16 = load ptr, ptr %p16.home, align 8
   %buf = alloca [8192 x i8], align 16
   %slot = getelementptr inbounds [8192 x i8], ptr %buf, i64 0, i64 8191
   store volatile i8 1, ptr %slot, align 1

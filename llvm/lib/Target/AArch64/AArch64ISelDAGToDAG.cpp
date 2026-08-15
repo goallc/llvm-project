@@ -5108,6 +5108,39 @@ void AArch64DAGToDAGISel::Select(SDNode *Node) {
   default:
     break;
 
+  case ISD::PREALLOCATED_SETUP: {
+    auto *MFI = CurDAG->getMachineFunction().getInfo<AArch64FunctionInfo>();
+    auto CallId = MFI->getPreallocatedIdForCallSite(
+        cast<SrcValueSDNode>(Node->getOperand(1))->getValue());
+    SDValue Chain = Node->getOperand(0);
+    SDValue CallIdValue =
+        CurDAG->getTargetConstant(CallId, SDLoc(Node), MVT::i32);
+    MachineSDNode *New =
+        CurDAG->getMachineNode(TargetOpcode::PREALLOCATED_SETUP, SDLoc(Node),
+                               MVT::Other, CallIdValue, Chain);
+    ReplaceUses(SDValue(Node, 0), SDValue(New, 0));
+    CurDAG->RemoveDeadNode(Node);
+    return;
+  }
+
+  case ISD::PREALLOCATED_ARG: {
+    auto *MFI = CurDAG->getMachineFunction().getInfo<AArch64FunctionInfo>();
+    auto CallId = MFI->getPreallocatedIdForCallSite(
+        cast<SrcValueSDNode>(Node->getOperand(1))->getValue());
+    SDValue Ops[] = {CurDAG->getTargetConstant(CallId, SDLoc(Node), MVT::i32),
+                     Node->getOperand(2), Node->getOperand(0)};
+    MachineSDNode *New = CurDAG->getMachineNode(
+        TargetOpcode::PREALLOCATED_ARG, SDLoc(Node),
+        CurDAG->getVTList(CurDAG->getTargetLoweringInfo().getPointerTy(
+                              CurDAG->getDataLayout()),
+                          MVT::Other),
+        Ops);
+    ReplaceUses(SDValue(Node, 0), SDValue(New, 0));
+    ReplaceUses(SDValue(Node, 1), SDValue(New, 1));
+    CurDAG->RemoveDeadNode(Node);
+    return;
+  }
+
   case ISD::ATOMIC_CMP_SWAP:
     if (SelectCMP_SWAP(Node))
       return;

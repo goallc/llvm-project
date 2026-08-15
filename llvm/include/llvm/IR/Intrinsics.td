@@ -1118,7 +1118,7 @@ def int_instrprof_mcdc_tvbitmap_update : Intrinsic<[],
 
 def int_call_preallocated_setup
     : DefaultAttrsIntrinsic<[llvm_token_ty], [llvm_i32_ty],
-                            [ImmArg<ArgIndex<0>>]>;
+                            [ImmArg<ArgIndex<0>>, IntrNoMerge]>;
 def int_call_preallocated_arg
     : DefaultAttrsIntrinsic<[llvm_ptr_ty], [llvm_token_ty, llvm_i32_ty],
                             [ImmArg<ArgIndex<1>>]>;

@@ -11498,6 +11498,21 @@ let Predicates = [HasMOPS], Defs = [NZCV], Size = 12, mayStore = 1 in {
                                       [], "$Rd = $Rd_wb,$Rn = $Rn_wb,@earlyclobber $Rn_wb">, Sched<[]>;
   }
 }
+
+// Populate a Go call's outgoing stack-argument area without introducing a
+// libcall.  The AsmPrinter expands this to a baseline-AArch64 vector loop with
+// scalar tails.  All three GPR operands are tied because the expansion advances
+// them; Q31 and NZCV are explicit clobbers so register allocation preserves any
+// live values.
+let Defs = [Q31, NZCV], Size = 104, mayLoad = 1, mayStore = 1 in {
+  def GoMemoryCopyPseudo
+      : Pseudo<(outs GPR64common:$Rd_wb, GPR64common:$Rs_wb,
+                       GPR64:$Rn_wb),
+               (ins GPR64common:$Rd, GPR64common:$Rs, GPR64:$Rn), [],
+               "$Rd = $Rd_wb,$Rs = $Rs_wb,$Rn = $Rn_wb">,
+        Sched<[]>;
+}
+
 let Predicates = [HasMOPS, HasMTE], Defs = [NZCV], Size = 12, mayLoad = 0, mayStore = 1 in {
   def MOPSMemorySetTaggingPseudo : Pseudo<(outs GPR64common:$Rd_wb, GPR64:$Rn_wb),
                                           (ins GPR64common:$Rd, GPR64:$Rn, GPR64:$Rm),

@@ -13,6 +13,7 @@
 #include "AArch64ISelLowering.h"
 #include "AArch64CallingConvention.h"
 #include "AArch64ExpandImm.h"
+#include "AArch64InstrInfo.h"
 #include "AArch64MachineFunctionInfo.h"
 #include "AArch64PerfectShuffle.h"
 #include "AArch64RegisterInfo.h"
@@ -3604,6 +3605,30 @@ MachineBasicBlock *AArch64TargetLowering::EmitInstrWithCustomInserter(
     MI.dump();
 #endif
     llvm_unreachable("Unexpected instruction for custom inserter!");
+  case TargetOpcode::PREALLOCATED_SETUP: {
+    auto *FuncInfo = MI.getMF()->getInfo<AArch64FunctionInfo>();
+    int64_t PreallocatedId = MI.getOperand(0).getImm();
+    if (!FuncInfo->preallocatedUsesReservedCallFrame(PreallocatedId))
+      report_fatal_error(
+          "AArch64 preallocated call requires a reserved Go call frame");
+    // Go reserves its maximum outgoing argument area in the function frame.
+    // The preallocated setup token therefore owns that existing area and must
+    // not adjust SP a second time.
+    MI.eraseFromParent();
+    return BB;
+  }
+  case TargetOpcode::PREALLOCATED_ARG: {
+    int64_t PreallocatedId = MI.getOperand(1).getImm();
+    int64_t ArgIndex = MI.getOperand(2).getImm();
+    auto *FuncInfo = MI.getMF()->getInfo<AArch64FunctionInfo>();
+    size_t ArgOffset =
+        FuncInfo->getPreallocatedArgOffsets(PreallocatedId)[ArgIndex];
+    emitFrameOffset(*BB, MI, MI.getDebugLoc(), MI.getOperand(0).getReg(),
+                    AArch64::SP, StackOffset::getFixed(ArgOffset),
+                    Subtarget->getInstrInfo());
+    MI.eraseFromParent();
+    return BB;
+  }
   case AArch64::EntryPStateSM:
     return EmitEntryPStateSM(MI, BB);
   case AArch64::F128CSEL:
@@ -9058,10 +9083,10 @@ getAArch64GoArgTypes(const Function &F, SmallVectorImpl<int> &LayoutMap) {
   LayoutMap.assign(F.arg_size(), -1);
   for (const Argument &Arg : F.args()) {
     unsigned Index = Arg.getArgNo();
-    if (Arg.hasNestAttr())
+    if (Arg.hasNestAttr() || Arg.hasGoRetAttr())
       continue;
     LayoutMap[Index] = ArgTys.size();
-    ArgTys.push_back(Arg.getType());
+    ArgTys.push_back(goabi::getParameterType(Arg));
   }
   return ArgTys;
 }
@@ -9072,19 +9097,79 @@ getAArch64GoCallArgTypes(const TargetLowering::ArgListTy &Args,
   SmallVector<Type *, 8> ArgTys;
   LayoutMap.assign(Args.size(), -1);
   for (unsigned I = 0; I != Args.size(); ++I) {
-    if (Args[I].IsNest)
+    if (Args[I].IsNest || Args[I].IsGoRet)
       continue;
     LayoutMap[I] = ArgTys.size();
-    ArgTys.push_back(Args[I].OrigTy);
+    ArgTys.push_back(Args[I].IsPreallocated ? Args[I].IndirectType
+                                            : Args[I].OrigTy);
   }
   return ArgTys;
 }
 
-static SmallVector<Type *, 8>
-getAArch64GoReturnTypes(Type *RetTy, const AttributeList &Attrs) {
+static SmallBitVector
+getAArch64GoCallMemoryArgMask(const TargetLowering::ArgListTy &Args) {
+  SmallBitVector MemoryArgs;
+  for (const TargetLowering::ArgListEntry &Arg : Args) {
+    if (Arg.IsNest || Arg.IsGoRet)
+      continue;
+    MemoryArgs.push_back(Arg.IsPreallocated);
+  }
+  return MemoryArgs;
+}
+
+static SmallVector<Type *, 8> getAArch64GoReturnTypes(const Function &F) {
+  SmallVector<goabi::MemoryResult, 4> MemoryResults;
+  for (const Argument &Arg : F.args())
+    if (Arg.hasGoRetAttr())
+      MemoryResults.push_back(
+          {goabi::getGoRetIndex(Arg), Arg.getParamGoRetType()});
   SmallVector<Type *, 8> ResultTys;
-  goabi::getReturnTypes(RetTy, goabi::hasTupleResultsAttr(Attrs), ResultTys);
+  goabi::getReturnTypes(F.getReturnType(), goabi::hasTupleResultsAttr(F),
+                        MemoryResults, ResultTys);
   return ResultTys;
+}
+
+static SmallVector<Type *, 8>
+getAArch64GoCallReturnTypes(Type *RetTy, const AttributeList &Attrs,
+                            const TargetLowering::ArgListTy &Args) {
+  SmallVector<goabi::MemoryResult, 4> MemoryResults;
+  for (const TargetLowering::ArgListEntry &Arg : Args)
+    if (Arg.IsGoRet)
+      MemoryResults.push_back({Arg.GoRetIndex, Arg.IndirectType});
+  SmallVector<Type *, 8> ResultTys;
+  goabi::getReturnTypes(RetTy, goabi::hasTupleResultsAttr(Attrs), MemoryResults,
+                        ResultTys);
+  return ResultTys;
+}
+
+static SmallVector<unsigned, 8>
+getAArch64GoDirectResultIndices(ArrayRef<goabi::MemoryResult> MemoryResults,
+                                unsigned DirectResultCount) {
+  SmallVector<unsigned, 8> DirectIndices;
+  for (unsigned I = 0, E = DirectResultCount + MemoryResults.size(); I != E;
+       ++I)
+    if (!llvm::any_of(MemoryResults,
+                      [I](const auto &Result) { return Result.Index == I; }))
+      DirectIndices.push_back(I);
+  return DirectIndices;
+}
+
+static SmallVector<goabi::MemoryResult, 4>
+getAArch64GoMemoryResults(const Function &F) {
+  SmallVector<goabi::MemoryResult, 4> Results;
+  for (const Argument &Arg : F.args())
+    if (Arg.hasGoRetAttr())
+      Results.push_back({goabi::getGoRetIndex(Arg), Arg.getParamGoRetType()});
+  return Results;
+}
+
+static SmallVector<goabi::MemoryResult, 4>
+getAArch64GoMemoryResults(const TargetLowering::ArgListTy &Args) {
+  SmallVector<goabi::MemoryResult, 4> Results;
+  for (const TargetLowering::ArgListEntry &Arg : Args)
+    if (Arg.IsGoRet)
+      Results.push_back({Arg.GoRetIndex, Arg.IndirectType});
+  return Results;
 }
 
 static SDValue lowerAArch64GoFormalArguments(
@@ -9099,10 +9184,14 @@ static SDValue lowerAArch64GoFormalArguments(
 
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys = getAArch64GoArgTypes(F, LayoutMap);
+  SmallVector<Type *, 8> ResultTys = getAArch64GoReturnTypes(F);
+  SmallVector<goabi::MemoryResult, 4> MemoryResults =
+      getAArch64GoMemoryResults(F);
   goabi::ABIConfig ABIConfig =
       getAArch64GoABIConfig(TLI, Subtarget, F.getCallingConv());
   goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgTys, getAArch64GoReturnTypes(F.getReturnType(), F.getAttributes()),
+      ArgTys, ResultTys, goabi::getMemoryArgMask(F),
+      goabi::getMemoryResultMask(ResultTys.size(), MemoryResults),
       DAG.getDataLayout(), ABIConfig);
 
   goabi::EntryArgsInfo EntryArgs = goabi::computeEntryArgsInfo(
@@ -9124,6 +9213,14 @@ static SDValue lowerAArch64GoFormalArguments(
   FuncInfo->clearGoArgHomes();
   FuncInfo->clearGoArgPointerSlots();
   unsigned StackBias = getAArch64GoStackBias(F.getCallingConv());
+
+  SmallVector<Type *, 8> DirectResultTys;
+  goabi::getReturnTypes(F.getReturnType(), goabi::hasTupleResultsAttr(F),
+                        DirectResultTys);
+  SmallVector<int, 8> MemoryResultMap(F.arg_size(), -1);
+  for (const Argument &Arg : F.args())
+    if (Arg.hasGoRetAttr())
+      MemoryResultMap[Arg.getArgNo()] = goabi::getGoRetIndex(Arg);
 
   auto RecordPointerSlots = [&](int FI, uint64_t ArgOffset, uint64_t Size,
                                 bool IsLiveAtEntry) {
@@ -9153,6 +9250,22 @@ static SDValue lowerAArch64GoFormalArguments(
       continue;
 
     const Argument *Arg = F.getArg(Group.Index);
+    if (Arg->hasGoRetAttr()) {
+      int ResultIndex = MemoryResultMap[Group.Index];
+      if (ResultIndex < 0 || Group.End != Group.Start + 1 ||
+          !Ins[Group.Start].Flags.isGoRet())
+        report_fatal_error("invalid AArch64 Go memory result carrier");
+      const goabi::ValueLayout &ResultLayout = Layout.Results[ResultIndex];
+      if (ResultLayout.InRegs || ResultLayout.Size == 0 ||
+          Ins[Group.Start].Flags.getGoRetSize() != ResultLayout.Size)
+        report_fatal_error(
+            "AArch64 Go memory result carrier disagrees with Go ABI layout");
+      int FI = MFI.CreateFixedObject(ResultLayout.Size,
+                                     StackBias + ResultLayout.StackOffset,
+                                     /*IsImmutable=*/false, /*isAliased=*/true);
+      InVals.push_back(DAG.getFrameIndex(FI, PtrVT));
+      continue;
+    }
     if (Arg->hasNestAttr()) {
       assert(Group.End == Group.Start + 1 && "unexpected split nest arg");
       MVT CopyVT = getAArch64GoCopyVT(Ins[Group.Start].VT);
@@ -9166,15 +9279,26 @@ static SDValue lowerAArch64GoFormalArguments(
 
     unsigned LayoutIndex = LayoutMap[Group.Index];
     const goabi::ValueLayout &ArgLayout = Layout.Args[LayoutIndex];
+    bool IsPreallocated = Ins[Group.Start].Flags.isPreallocated();
+    bool MustBePreallocated = !ArgLayout.InRegs && ArgLayout.Size != 0;
+    if (Arg->hasPreallocatedAttr() != IsPreallocated ||
+        IsPreallocated != MustBePreallocated)
+      report_fatal_error(
+          "AArch64 Go formal argument carrier disagrees with Go ABI layout");
     uint64_t LogicalHomeOffset =
         ArgLayout.InRegs ? ArgSpillOffsets[LayoutIndex] : ArgLayout.StackOffset;
     int64_t FixedHomeOffset = StackBias + LogicalHomeOffset;
-    int HomeFI =
-        ArgLayout.InRegs
-            ? MFI.CreateFixedSpillStackObject(ArgLayout.Size, FixedHomeOffset,
-                                              /*IsImmutable=*/false)
-            : MFI.CreateFixedObject(ArgLayout.Size, FixedHomeOffset,
-                                    /*IsImmutable=*/true);
+    int HomeFI;
+    if (ArgLayout.InRegs)
+      HomeFI = MFI.CreateFixedSpillStackObject(ArgLayout.Size, FixedHomeOffset,
+                                               /*IsImmutable=*/false);
+    else if (IsPreallocated)
+      HomeFI = MFI.CreateFixedObject(ArgLayout.Size, FixedHomeOffset,
+                                     /*IsImmutable=*/false,
+                                     /*isAliased=*/true);
+    else
+      HomeFI = MFI.CreateFixedObject(ArgLayout.Size, FixedHomeOffset,
+                                     /*IsImmutable=*/true);
     AArch64FunctionInfo::GoArgHome &Home =
         FuncInfo->addGoArgHome(Group.Index, HomeFI);
     // LLVM may replace an unused incoming pointer with poison at every call
@@ -9185,6 +9309,14 @@ static SDValue lowerAArch64GoFormalArguments(
         [](const ISD::InputArg &In) { return In.Used; });
     RecordPointerSlots(HomeFI, LogicalHomeOffset, ArgLayout.Size,
                        IsLiveAtEntry);
+
+    if (IsPreallocated) {
+      if (Group.End != Group.Start + 1 ||
+          Ins[Group.Start].Flags.getByValSize() != ArgLayout.Size)
+        report_fatal_error("invalid AArch64 Go preallocated formal argument");
+      InVals.push_back(DAG.getFrameIndex(HomeFI, PtrVT));
+      continue;
+    }
 
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
@@ -9243,17 +9375,26 @@ static SDValue lowerAArch64GoReturn(const AArch64TargetLowering &TLI,
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys =
       getAArch64GoArgTypes(MF.getFunction(), LayoutMap);
-  SmallVector<Type *, 8> ResultTys = getAArch64GoReturnTypes(
-      MF.getFunction().getReturnType(), MF.getFunction().getAttributes());
+  SmallVector<Type *, 8> ResultTys = getAArch64GoReturnTypes(MF.getFunction());
+  SmallVector<goabi::MemoryResult, 4> MemoryResults =
+      getAArch64GoMemoryResults(MF.getFunction());
   goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgTys, ResultTys, DAG.getDataLayout(),
+      ArgTys, ResultTys, goabi::getMemoryArgMask(MF.getFunction()),
+      goabi::getMemoryResultMask(ResultTys.size(), MemoryResults),
+      DAG.getDataLayout(),
       getAArch64GoABIConfig(TLI, Subtarget, MF.getFunction().getCallingConv()));
   unsigned StackBias = getAArch64GoStackBias(MF.getFunction().getCallingConv());
+  SmallVector<unsigned, 8> DirectResultIndices =
+      getAArch64GoDirectResultIndices(MemoryResults, Layout.Results.size() -
+                                                         MemoryResults.size());
 
   SmallVector<SDValue, 8> MemOps;
   SmallVector<std::pair<unsigned, SDValue>, 8> RetRegs;
   for (const GoArgGroup<ISD::OutputArg> &Group : groupGoArgs(ArrayRef(Outs))) {
-    const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
+    if (Group.Index >= DirectResultIndices.size())
+      report_fatal_error("invalid AArch64 Go direct result index");
+    const goabi::ValueLayout &ResultLayout =
+        Layout.Results[DirectResultIndices[Group.Index]];
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
     for (unsigned I = Group.Start; I != Group.End; ++I) {
@@ -9328,14 +9469,25 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys =
       getAArch64GoCallArgTypes(CLI.getArgs(), LayoutMap);
-  SmallVector<Type *, 8> ResultTys;
-  goabi::getReturnTypes(CLI.RetTy,
-                        goabi::isGoCallingConv(CLI.CallConv) && CLI.CB &&
-                            goabi::hasTupleResultsAttr(*CLI.CB),
-                        ResultTys);
+  AttributeList CallAttrs = CLI.CB ? CLI.CB->getAttributes() : AttributeList();
+  SmallVector<Type *, 8> ResultTys =
+      getAArch64GoCallReturnTypes(CLI.RetTy, CallAttrs, CLI.getArgs());
+  SmallVector<goabi::MemoryResult, 4> MemoryResults =
+      getAArch64GoMemoryResults(CLI.getArgs());
   goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgTys, ResultTys, DAG.getDataLayout(),
-      getAArch64GoABIConfig(TLI, Subtarget, CLI.CallConv));
+      ArgTys, ResultTys, getAArch64GoCallMemoryArgMask(CLI.getArgs()),
+      goabi::getMemoryResultMask(ResultTys.size(), MemoryResults),
+      DAG.getDataLayout(), getAArch64GoABIConfig(TLI, Subtarget, CLI.CallConv));
+  SmallVector<Type *, 8> DirectResultTys;
+  goabi::getReturnTypes(CLI.RetTy,
+                        CLI.CB && goabi::hasTupleResultsAttr(*CLI.CB),
+                        DirectResultTys);
+  SmallVector<int, 8> MemoryResultMap(CLI.getArgs().size(), -1);
+  for (unsigned I = 0; I != CLI.getArgs().size(); ++I)
+    if (CLI.getArgs()[I].IsGoRet)
+      MemoryResultMap[I] = CLI.getArgs()[I].GoRetIndex;
+  SmallVector<unsigned, 8> DirectResultIndices =
+      getAArch64GoDirectResultIndices(MemoryResults, DirectResultTys.size());
 
   unsigned StackBias = getAArch64GoStackBias(CLI.CallConv);
   // Layout.TotalStackSize rounds the logical Go argument area to the target
@@ -9345,6 +9497,26 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
   // The caller frame itself remains stack-aligned; reserve only the bytes
   // through the last physical argument home here.
   unsigned NumBytes = Layout.ArgSize + StackBias;
+  SmallVector<size_t, 4> PreallocatedOffsets;
+  for (unsigned I = 0; I != CLI.getArgs().size(); ++I) {
+    if (!CLI.getArgs()[I].IsPreallocated)
+      continue;
+    int LayoutIndex = LayoutMap[I];
+    if (LayoutIndex < 0 || Layout.Args[LayoutIndex].InRegs)
+      report_fatal_error(
+          "AArch64 Go preallocated call argument has no stack home");
+    PreallocatedOffsets.push_back(StackBias +
+                                  Layout.Args[LayoutIndex].StackOffset);
+  }
+  if (CLI.IsPreallocated != !PreallocatedOffsets.empty())
+    report_fatal_error(
+        "AArch64 Go preallocated call bundle disagrees with its arguments");
+  if (CLI.IsPreallocated) {
+    auto *FuncInfo = MF.getInfo<AArch64FunctionInfo>();
+    size_t PreallocatedId = FuncInfo->getPreallocatedIdForCallSite(CLI.CB);
+    FuncInfo->setPreallocatedArgOffsets(PreallocatedId, PreallocatedOffsets);
+    FuncInfo->setPreallocatedUsesReservedCallFrame(PreallocatedId);
+  }
   Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, DL);
 
   SDValue StackPtr;
@@ -9353,11 +9525,27 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
 
   SmallVector<SDValue, 8> MemOpChains;
   SmallVector<std::pair<unsigned, SDValue>, 8> RegsToPass;
+  SmallVector<SDValue, 4> MemoryResultDests(Layout.Results.size());
   MachineFunction::CallSiteInfo CSInfo;
 
   for (const GoArgGroup<ISD::OutputArg> &Group : groupGoArgs(ArrayRef(Outs))) {
     if (Group.Index >= CLI.getArgs().size())
       continue;
+
+    if (CLI.getArgs()[Group.Index].IsGoRet) {
+      int ResultIndex = MemoryResultMap[Group.Index];
+      if (ResultIndex < 0 || Group.End != Group.Start + 1 ||
+          !Outs[Group.Start].Flags.isGoRet())
+        report_fatal_error("invalid AArch64 Go memory result call carrier");
+      const goabi::ValueLayout &ResultLayout = Layout.Results[ResultIndex];
+      if (ResultLayout.InRegs || ResultLayout.Size == 0 ||
+          Outs[Group.Start].Flags.getGoRetSize() != ResultLayout.Size)
+        report_fatal_error(
+            "AArch64 Go memory result call carrier disagrees with Go ABI "
+            "layout");
+      MemoryResultDests[ResultIndex] = OutVals[Group.Start];
+      continue;
+    }
 
     if (CLI.getArgs()[Group.Index].IsNest) {
       assert(Group.End == Group.Start + 1 && "unexpected split nest arg");
@@ -9366,6 +9554,21 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
     }
 
     const goabi::ValueLayout &ArgLayout = Layout.Args[LayoutMap[Group.Index]];
+    bool IsPreallocated = CLI.getArgs()[Group.Index].IsPreallocated;
+    bool MustBePreallocated = !ArgLayout.InRegs && ArgLayout.Size != 0;
+    if (Outs[Group.Start].Flags.isPreallocated() != IsPreallocated ||
+        IsPreallocated != MustBePreallocated)
+      report_fatal_error(
+          "AArch64 Go call argument carrier disagrees with Go ABI layout");
+    if (IsPreallocated) {
+      if (Group.End != Group.Start + 1 ||
+          Outs[Group.Start].Flags.getByValSize() != ArgLayout.Size)
+        report_fatal_error("invalid AArch64 Go preallocated call argument");
+      // llvm.call.preallocated.arg exposes the final outgoing home. The
+      // frontend has already initialized it before this call.
+      continue;
+    }
+
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
     for (unsigned I = Group.Start; I != Group.End; ++I) {
@@ -9454,7 +9657,10 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
 
   SmallVector<SDValue, 8> ResultVals(Ins.size());
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
-    const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
+    if (Group.Index >= DirectResultIndices.size())
+      report_fatal_error("invalid AArch64 Go direct call result index");
+    const goabi::ValueLayout &ResultLayout =
+        Layout.Results[DirectResultIndices[Group.Index]];
     if (!ResultLayout.InRegs)
       continue;
     unsigned IntPiece = 0;
@@ -9488,10 +9694,8 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
   // Keep the call sequence active while reading stack results. The load chain
   // is after the call, so the physical SP is the current post-growth Go stack;
   // CALLSEQ_END cannot release the outgoing frame until every result is read.
-  bool HasStackResults =
-      llvm::any_of(groupGoArgs(ArrayRef(Ins)), [&](const auto &Group) {
-        return !Layout.Results[Group.Index].InRegs;
-      });
+  bool HasStackResults = llvm::any_of(
+      Layout.Results, [](const auto &Result) { return !Result.InRegs; });
   SDValue ResultStackPtr;
   if (HasStackResults) {
     ResultStackPtr = DAG.getCopyFromReg(Chain, DL, AArch64::SP, PtrVT, InGlue);
@@ -9499,7 +9703,8 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
     InGlue = ResultStackPtr.getValue(2);
   }
   for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
-    const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
+    const goabi::ValueLayout &ResultLayout =
+        Layout.Results[DirectResultIndices[Group.Index]];
     if (ResultLayout.InRegs)
       continue;
     for (unsigned I = Group.Start; I != Group.End; ++I) {
@@ -9517,6 +9722,25 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
     }
   }
 
+  SmallVector<SDValue, 4> MemoryResultCopies;
+  for (unsigned I = 0; I != MemoryResultDests.size(); ++I) {
+    if (!MemoryResultDests[I].getNode())
+      continue;
+    const goabi::ValueLayout &ResultLayout = Layout.Results[I];
+    SDValue Src = DAG.getNode(
+        ISD::ADD, DL, PtrVT, ResultStackPtr,
+        DAG.getIntPtrConstant(StackBias + ResultLayout.StackOffset, DL));
+    MemoryResultCopies.push_back(DAG.getMemcpy(
+        Chain, DL, MemoryResultDests[I], Src,
+        DAG.getConstant(ResultLayout.Size, DL, PtrVT), ResultLayout.Alignment,
+        ResultLayout.Alignment, /*isVol=*/false, /*AlwaysInline=*/false,
+        /*CI=*/nullptr, std::nullopt, MachinePointerInfo(),
+        MachinePointerInfo::getStack(MF,
+                                     StackBias + ResultLayout.StackOffset)));
+  }
+  if (!MemoryResultCopies.empty())
+    Chain = DAG.getNode(ISD::TokenFactor, DL, MVT::Other, MemoryResultCopies);
+
   Chain = DAG.getCALLSEQ_END(Chain, NumBytes, 0,
                              HasStackResults ? SDValue() : InGlue, DL);
 
@@ -9531,13 +9755,17 @@ AArch64TargetLowering::getArgumentCopyElisionFrameInfo(
     const Argument &Arg, MachineFunction &MF) const {
   if (!goabi::isGoCallingConv(MF.getFunction().getCallingConv()))
     return std::nullopt;
+  // Memory carriers already denote their canonical fixed ABI homes. This
+  // hook only redirects the frontend spill of a direct register parameter.
+  if (Arg.hasPreallocatedAttr() || Arg.hasGoRetAttr())
+    return std::nullopt;
   const auto *FuncInfo = MF.getInfo<AArch64FunctionInfo>();
   uint64_t ArgSize = MF.getDataLayout().getTypeAllocSize(Arg.getType());
   for (const AArch64FunctionInfo::GoArgHome &Home : FuncInfo->getGoArgHomes())
-    if (Home.ArgNo == Arg.getArgNo() &&
+    if (!Home.valueAlreadyInFrame() && Home.ArgNo == Arg.getArgNo() &&
         MF.getFrameInfo().getObjectSize(Home.FrameIndex) == int64_t(ArgSize))
       return ArgumentCopyElisionFrameInfo{Home.FrameIndex,
-                                          Home.valueAlreadyInFrame()};
+                                          /*ValueAlreadyInFrame=*/false};
   return std::nullopt;
 }
 
@@ -9552,8 +9780,12 @@ int AArch64TargetLowering::getGoABI0FrameIndex(MachineFunction &MF) const {
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys = getAArch64GoArgTypes(F, LayoutMap);
   const AArch64Subtarget &Subtarget = MF.getSubtarget<AArch64Subtarget>();
+  SmallVector<Type *, 8> ResultTys = getAArch64GoReturnTypes(F);
+  SmallVector<goabi::MemoryResult, 4> MemoryResults =
+      getAArch64GoMemoryResults(F);
   goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgTys, getAArch64GoReturnTypes(F.getReturnType(), F.getAttributes()),
+      ArgTys, ResultTys, goabi::getMemoryArgMask(F),
+      goabi::getMemoryResultMask(ResultTys.size(), MemoryResults),
       MF.getDataLayout(),
       getAArch64GoABIConfig(*this, Subtarget, F.getCallingConv()));
   if (Layout.ArgSize == 0)
