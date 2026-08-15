@@ -6,11 +6,12 @@
 %pair = type { i64, i64 }
 
 ; Exhaust X86's integer register budget so the pair arrives in one typed stack
-; home. The byval carrier is the home itself; no frontend alloca or copy exists.
+; home. The preallocated carrier is the home itself; no frontend alloca or copy
+; exists.
 define goabiinternal ptr @x86_stack_pair_home(
     i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4,
     i64 %a5, i64 %a6, i64 %a7, i64 %a8,
-    ptr byval(%pair) align 8 %value.home) {
+    ptr preallocated(%pair) align 8 %value.home) {
 entry:
   ret ptr %value.home
 }

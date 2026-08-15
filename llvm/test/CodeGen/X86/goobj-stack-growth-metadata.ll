@@ -34,25 +34,13 @@ entry:
   ret i64 %sum
 }
 
+%stack.args = type [23 x i64]
+
+declare token @llvm.call.preallocated.setup(i32)
+declare ptr @llvm.call.preallocated.arg(token, i32)
 declare goabiinternal void @many_stack_args(
     i64, i64, i64, i64, i64, i64, i64, i64, i64,
-    ptr byval(i64) align 8, ptr byval(i64) align 8,
-    ptr byval(i64) align 8, ptr byval(i64) align 8,
-    ptr byval(i64) align 8, ptr byval(i64) align 8,
-    ptr byval(i64) align 8, ptr byval(i64) align 8,
-    ptr byval(i64) align 8, ptr byval(i64) align 8,
-    ptr byval(i64) align 8, ptr byval(i64) align 8,
-    ptr byval(i64) align 8, ptr byval(i64) align 8,
-    ptr byval(i64) align 8, ptr byval(i64) align 8,
-    ptr byval(i64) align 8, ptr byval(i64) align 8,
-    ptr byval(i64) align 8, ptr byval(i64) align 8,
-    ptr byval(i64) align 8, ptr byval(i64) align 8,
-    ptr byval(i64) align 8)
-@many_stack_arg_values = private constant [23 x i64] [
-    i64 9, i64 10, i64 11, i64 12, i64 13, i64 14,
-    i64 15, i64 16, i64 17, i64 18, i64 19, i64 20,
-    i64 21, i64 22, i64 23, i64 24, i64 25, i64 26,
-    i64 27, i64 28, i64 29, i64 30, i64 31]
+    ptr preallocated(%stack.args) align 8)
 @condition = external global i1
 
 ; X86 lowers the stack arguments below to push sequences instead of reserving
@@ -64,31 +52,18 @@ entry:
   br i1 %cond, label %call, label %join
 
 call:
+  %setup = call token @llvm.call.preallocated.setup(i32 1)
+  %home = call ptr @llvm.call.preallocated.arg(token %setup, i32 0)
+      preallocated(%stack.args)
+  store %stack.args [
+      i64 9, i64 10, i64 11, i64 12, i64 13, i64 14,
+      i64 15, i64 16, i64 17, i64 18, i64 19, i64 20,
+      i64 21, i64 22, i64 23, i64 24, i64 25, i64 26,
+      i64 27, i64 28, i64 29, i64 30, i64 31], ptr %home, align 8
   call goabiinternal void @many_stack_args(
       i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7, i64 8,
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 0),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 1),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 2),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 3),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 4),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 5),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 6),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 7),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 8),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 9),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 10),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 11),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 12),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 13),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 14),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 15),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 16),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 17),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 18),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 19),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 20),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 21),
-      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @many_stack_arg_values, i64 0, i64 22))
+      ptr preallocated(%stack.args) align 8 %home)
+      ["preallocated"(token %setup)]
   br label %join
 
 join:
@@ -106,10 +81,10 @@ join:
 ; CHECK-NEXT: aux 0.{{[0-9]+}}: type=pcdata target= pc=[0-{{[0-9]+}}:-1]
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.morestack_noctxt
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size=4 type=7 add=0 target=runtime.morestack
-; The outgoing frame is 72 bytes of alignment/register-argument space plus 23
-; 8-byte PUSHes. PCSP must reach 256 bytes at the call, return to zero before
-; the CFG join, and thereby let funcMaxSPDelta size a grown Go stack correctly.
-; CHECK: aux 2.{{[0-9]+}}: type=pcsp target= pc=[{{.*}}:256,{{[0-9]+}}-{{[0-9]+}}:0]
+; The outgoing frame is 72 bytes of register-argument homes plus one 184-byte
+; preallocated value. Go reserves it in the containing frame, so PCSP is stable
+; across the call while funcMaxSPDelta still sees the full 256-byte frame.
+; CHECK: aux 2.{{[0-9]+}}: type=pcsp target= pc=[0-[[PROLOG:[0-9]+]]:0,[[PROLOG]]-[[EPILOG:[0-9]+]]:256,[[EPILOG]]-{{[0-9]+}}:0]
 
 ; ASM-LABEL: big_frame:
 ; Match Go's single stack-check loop: the hot entry executes the check
@@ -156,7 +131,8 @@ join:
 ; PEI-SAME: implicit $rsp, implicit $ssp, implicit $rdx
 
 ; PEI-LABEL: name: large_outgoing_frame
-; PEI: stackSize: 0
+; PEI: stackSize: 256
+; PEI-NEXT: offsetAdjustment: -256
 ; PEI: maxCallFrameSize: 256
 ; PEI: $r12 = LEA64r $rsp, 1, $noreg, -128, $noreg
 ; PEI: CMP64rm $r12, $r14, 1, $noreg, 16, $noreg

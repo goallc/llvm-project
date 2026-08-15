@@ -109,9 +109,13 @@ bool hasTupleResultsAttr(const CallBase &CB);
 unsigned getGoRetIndex(const Argument &Arg);
 unsigned getGoRetIndex(const CallBase &CB, unsigned ArgNo);
 /// Return the logical Go ABI type of an IR parameter. Non-empty values that
-/// the Go frontend assigned wholly to memory use a typed byval pointer as the
-/// LLVM carrier; direct parameters retain their logical type.
+/// the Go frontend assigned wholly to memory use a typed preallocated pointer
+/// as the LLVM carrier; direct parameters retain their logical type.
 Type *getParameterType(const Argument &Arg);
+/// Return one bit per logical Go input parameter. A set bit means that the Go
+/// frontend assigned the complete value to memory and represented it with a
+/// typed preallocated carrier. Nest and goret carrier parameters are omitted.
+SmallBitVector getMemoryArgMask(const Function &F);
 // Mirrors ComputeValueTypes and marks leaves originating in %go.abi.pad.
 SmallBitVector getPaddingPieces(Type *Ty);
 
@@ -120,10 +124,14 @@ void getReturnTypes(Type *ReturnType, bool TupleResults,
 void getReturnTypes(Type *ReturnType, bool TupleResults,
                     ArrayRef<MemoryResult> MemoryResults,
                     SmallVectorImpl<Type *> &ResultTys);
+SmallBitVector getMemoryResultMask(unsigned NumResults,
+                                   ArrayRef<MemoryResult> MemoryResults);
 
 CallLayout computeCallLayout(ArrayRef<Type *> ArgTys,
-                             ArrayRef<Type *> ResultTys, const DataLayout &DL,
-                             const ABIConfig &Config);
+                             ArrayRef<Type *> ResultTys,
+                             const SmallBitVector &MemoryArgs,
+                             const SmallBitVector &MemoryResults,
+                             const DataLayout &DL, const ABIConfig &Config);
 
 EntryArgsInfo computeEntryArgsInfo(ArrayRef<Type *> ArgTys,
                                    const CallLayout &Layout,

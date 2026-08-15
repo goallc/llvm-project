@@ -16,6 +16,7 @@
 #include "AArch64SMEAttributes.h"
 #include "AArch64Subtarget.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/CallingConvLower.h"
@@ -83,6 +84,12 @@ private:
   SmallVector<GoArgPointerSlot, 16> GoArgPointerSlots;
   int GoABI0FrameIndex = 0;
   bool HasGoABI0FrameIndex = false;
+
+  /// Preallocated call-frame layouts, keyed by the consuming IR call. These
+  /// fields are used only during instruction selection.
+  DenseMap<const Value *, size_t> PreallocatedIds;
+  SmallVector<SmallVector<size_t, 4>, 0> PreallocatedArgOffsets;
+  SmallVector<uint8_t, 0> PreallocatedUsesReservedCallFrame;
 
   /// Number of bytes of arguments this function has on the stack. If the callee
   /// is expected to restore the argument stack this should be a multiple of 16,
@@ -327,6 +334,30 @@ public:
   void setGoABI0FrameIndex(int FrameIndex) {
     GoABI0FrameIndex = FrameIndex;
     HasGoABI0FrameIndex = true;
+  }
+
+  size_t getPreallocatedIdForCallSite(const Value *Call) {
+    auto Insert = PreallocatedIds.insert({Call, PreallocatedIds.size()});
+    if (Insert.second) {
+      PreallocatedArgOffsets.emplace_back();
+      PreallocatedUsesReservedCallFrame.push_back(false);
+    }
+    return Insert.first->second;
+  }
+
+  void setPreallocatedArgOffsets(size_t Id, ArrayRef<size_t> Offsets) {
+    PreallocatedArgOffsets[Id].assign(Offsets.begin(), Offsets.end());
+  }
+  ArrayRef<size_t> getPreallocatedArgOffsets(size_t Id) const {
+    assert(!PreallocatedArgOffsets[Id].empty() && "arg offsets not set");
+    return PreallocatedArgOffsets[Id];
+  }
+
+  void setPreallocatedUsesReservedCallFrame(size_t Id) {
+    PreallocatedUsesReservedCallFrame[Id] = true;
+  }
+  bool preallocatedUsesReservedCallFrame(size_t Id) const {
+    return PreallocatedUsesReservedCallFrame[Id];
   }
 
   void clearGoArgPointerSlots() { GoArgPointerSlots.clear(); }

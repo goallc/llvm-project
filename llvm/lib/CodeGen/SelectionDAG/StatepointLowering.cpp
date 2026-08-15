@@ -17,6 +17,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallBitVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
@@ -78,7 +79,45 @@ static cl::opt<unsigned> MaxRegistersForGCPointers(
 
 typedef FunctionLoweringInfo::StatepointRelocationRecord RecordType;
 
-static std::optional<std::pair<const Argument *, uint64_t>>
+struct ArgumentValueOffset {
+  const Argument *Arg;
+  uint64_t Offset;
+};
+
+/// Return true when the pointer carrier for an incoming memory argument is
+/// only used to read that argument. In that case the loaded SSA values remain
+/// available in their fixed incoming homes across a Go stack-growing call.
+///
+/// Preallocated itself does not imply immutability. Reject stores, captures,
+/// and all pointer transformations other than constant-addressing operations;
+/// values from a mutable or escaped home must use an ordinary relocation slot.
+static bool isReadOnlyArgumentHome(const Argument *Arg) {
+  SmallVector<const Value *, 8> Worklist(1, Arg);
+  SmallPtrSet<const Value *, 8> Seen;
+  while (!Worklist.empty()) {
+    const Value *Pointer = Worklist.pop_back_val();
+    if (!Seen.insert(Pointer).second)
+      continue;
+
+    for (const User *U : Pointer->users()) {
+      if (const auto *Load = dyn_cast<LoadInst>(U)) {
+        if (Load->getPointerOperand() != Pointer || Load->isVolatile() ||
+            Load->isAtomic())
+          return false;
+        continue;
+      }
+      if (isa<GetElementPtrInst>(U) || isa<BitCastInst>(U) ||
+          isa<AddrSpaceCastInst>(U)) {
+        Worklist.push_back(cast<Value>(U));
+        continue;
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+static std::optional<ArgumentValueOffset>
 getArgumentValueOffset(const Value *V, const DataLayout &DL) {
   uint64_t Offset = 0;
   while (const auto *Extract = dyn_cast<ExtractValueInst>(V)) {
@@ -99,10 +138,30 @@ getArgumentValueOffset(const Value *V, const DataLayout &DL) {
     V = Extract->getAggregateOperand();
   }
 
+  // A first-class parameter exposes its pointer pieces directly. A typed
+  // preallocated parameter instead exposes the same logical value through a
+  // load from its incoming home. Recover that carrier and any constant byte
+  // offset so both IR forms can use the same fixed-home optimization.
+  if (const auto *Load = dyn_cast<LoadInst>(V)) {
+    if (Load->isVolatile() || Load->isAtomic())
+      return std::nullopt;
+    const Value *Pointer = Load->getPointerOperand();
+    APInt PointerOffset(DL.getIndexTypeSizeInBits(Pointer->getType()), 0);
+    V = Pointer->stripAndAccumulateConstantOffsets(DL, PointerOffset,
+                                                   /*AllowNonInbounds=*/true);
+    if (PointerOffset.isNegative() || PointerOffset.getActiveBits() > 64)
+      return std::nullopt;
+    auto NewOffset = checkedAddUnsigned(Offset, PointerOffset.getZExtValue());
+    if (!NewOffset)
+      return std::nullopt;
+    Offset = *NewOffset;
+  }
+
   const auto *Arg = dyn_cast<Argument>(V);
-  if (!Arg)
+  if (!Arg || ((Arg->hasPreallocatedAttr() || Arg->hasGoRetAttr()) &&
+               !isReadOnlyArgumentHome(Arg)))
     return std::nullopt;
-  return std::pair(Arg, Offset);
+  return ArgumentValueOffset{Arg, Offset};
 }
 
 static void pushStackMapConstant(SmallVectorImpl<SDValue>& Ops,
@@ -366,6 +425,30 @@ static SDNode *peelCallResultChain(SDNode *Node) {
     if (auto *Mem = dyn_cast<MemSDNode>(Node)) {
       Node = Mem->getChain().getNode();
       continue;
+    }
+
+    // A target may represent a large memory-result copy with a custom node
+    // rather than a MemSDNode. Peel any non-glued node with exactly one chain
+    // input and one chain result. Stop at glued target call nodes.
+    bool HasGlueResult = false;
+    unsigned ChainResults = 0;
+    for (unsigned I = 0; I != Node->getNumValues(); ++I) {
+      HasGlueResult |= Node->getValueType(I) == MVT::Glue;
+      ChainResults += Node->getValueType(I) == MVT::Other;
+    }
+    if (Node->getOpcode() != ISD::TokenFactor && !HasGlueResult) {
+      SDNode *ChainInput = nullptr;
+      unsigned ChainInputs = 0;
+      for (SDValue Operand : Node->ops()) {
+        if (Operand.getValueType() != MVT::Other)
+          continue;
+        ChainInput = Operand.getNode();
+        ++ChainInputs;
+      }
+      if (ChainInputs == 1 && ChainResults == 1) {
+        Node = ChainInput;
+        continue;
+      }
     }
     break;
   }
@@ -653,8 +736,31 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
     if (auto ArgValue =
             getArgumentValueOffset(V, Builder.DAG.getDataLayout())) {
       uint64_t Size = PtrSD.getValueType().getStoreSize().getKnownMinValue();
-      int FI = Builder.FuncInfo.getArgumentValueHome(ArgValue->first,
-                                                     ArgValue->second, Size);
+      int FI = Builder.FuncInfo.getArgumentValueHome(ArgValue->Arg,
+                                                     ArgValue->Offset, Size);
+      if (FI == INT_MAX && ArgValue->Arg->hasPreallocatedAttr()) {
+        int HomeFI = Builder.FuncInfo.getArgumentFrameIndex(ArgValue->Arg);
+        MachineFrameInfo &MFI = Builder.DAG.getMachineFunction().getFrameInfo();
+        if (HomeFI != INT_MAX && MFI.isFixedObjectIndex(HomeFI) &&
+            ArgValue->Offset <= uint64_t(MFI.getObjectSize(HomeFI)) &&
+            Size <= uint64_t(MFI.getObjectSize(HomeFI)) - ArgValue->Offset) {
+          FI = HomeFI;
+          if (ArgValue->Offset != 0 ||
+              MFI.getObjectSize(HomeFI) != int64_t(Size)) {
+            // Stack maps name one exact frame object. Make a narrow aliasing
+            // view for this pointer field while retaining the complete typed
+            // preallocated object for ordinary parameter accesses.
+            int64_t ViewOffset = MFI.getObjectOffset(HomeFI) + ArgValue->Offset;
+            MFI.setIsImmutableObjectIndex(HomeFI, false);
+            MFI.setIsAliasedObjectIndex(HomeFI, true);
+            FI = MFI.CreateFixedObject(Size, ViewOffset,
+                                       /*IsImmutable=*/false,
+                                       /*IsAliased=*/true);
+          }
+          Builder.FuncInfo.addArgumentValueHome(ArgValue->Arg, ArgValue->Offset,
+                                                Size, FI);
+        }
+      }
       if (FI != INT_MAX) {
         MachineFrameInfo &MFI = Builder.DAG.getMachineFunction().getFrameInfo();
         MFI.setIsImmutableObjectIndex(FI, false);
@@ -1018,7 +1124,7 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
                isa<FrameIndexSDNode>(SDV) &&
                (isa<AllocaInst>(V) ||
                 (isa<Argument>(V) &&
-                 (cast<Argument>(V)->hasByValAttr() ||
+                 (cast<Argument>(V)->hasPreallocatedAttr() ||
                   cast<Argument>(V)->hasGoRetAttr()) &&
                  FuncInfo.getArgumentFrameIndex(cast<Argument>(V)) ==
                      cast<FrameIndexSDNode>(SDV)->getIndex()))) {

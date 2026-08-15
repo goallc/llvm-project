@@ -12,7 +12,7 @@ entry:
 }
 
 define goabiinternal i64 @large_home_offset(
-    ptr byval([4096 x i64]) align 8 %stackarg, i64 %regarg)
+    ptr preallocated([4096 x i64]) align 8 %stackarg, i64 %regarg)
     "frame-pointer"="non-leaf" {
 entry:
   call goabiinternal void @"runtime.GC"()
@@ -20,7 +20,7 @@ entry:
 }
 
 define goabiinternal i64 @large_home_boundary(
-    ptr byval([4094 x i64]) align 8 %stackarg, i64 %regarg)
+    ptr preallocated([4094 x i64]) align 8 %stackarg, i64 %regarg)
     "frame-pointer"="non-leaf" {
 entry:
   call goabiinternal void @"runtime.GC"()

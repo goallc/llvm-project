@@ -203,6 +203,7 @@ private:
   DenseMap<const Value *, size_t> PreallocatedIds;
   SmallVector<size_t, 0> PreallocatedStackSizes;
   SmallVector<SmallVector<size_t, 4>, 0> PreallocatedArgOffsets;
+  SmallVector<uint8_t, 0> PreallocatedUsesReservedCallFrame;
 
   // True if a function clobbers FP/BP according to its calling convention.
   bool FPClobberedByCall = false;
@@ -366,6 +367,7 @@ public:
     if (Insert.second) {
       PreallocatedStackSizes.push_back(0);
       PreallocatedArgOffsets.emplace_back();
+      PreallocatedUsesReservedCallFrame.push_back(false);
     }
     return Insert.first->second;
   }
@@ -386,6 +388,13 @@ public:
   ArrayRef<size_t> getPreallocatedArgOffsets(const size_t Id) {
     assert(!PreallocatedArgOffsets[Id].empty() && "arg offsets not set");
     return PreallocatedArgOffsets[Id];
+  }
+
+  void setPreallocatedUsesReservedCallFrame(size_t Id) {
+    PreallocatedUsesReservedCallFrame[Id] = true;
+  }
+  bool preallocatedUsesReservedCallFrame(size_t Id) const {
+    return PreallocatedUsesReservedCallFrame[Id];
   }
 
   bool getFPClobberedByCall() const { return FPClobberedByCall; }

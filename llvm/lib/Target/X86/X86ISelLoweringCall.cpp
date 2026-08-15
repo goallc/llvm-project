@@ -170,9 +170,21 @@ getX86GoCallArgTypes(const TargetLowering::ArgListTy &Args,
     if (Args[I].IsNest || Args[I].IsGoRet)
       continue;
     LayoutMap[I] = ArgTys.size();
-    ArgTys.push_back(Args[I].IsByVal ? Args[I].IndirectType : Args[I].OrigTy);
+    ArgTys.push_back(Args[I].IsPreallocated ? Args[I].IndirectType
+                                            : Args[I].OrigTy);
   }
   return ArgTys;
+}
+
+static SmallBitVector
+getX86GoCallMemoryArgMask(const TargetLowering::ArgListTy &Args) {
+  SmallBitVector MemoryArgs;
+  for (const TargetLowering::ArgListEntry &Arg : Args) {
+    if (Arg.IsNest || Arg.IsGoRet)
+      continue;
+    MemoryArgs.push_back(Arg.IsPreallocated);
+  }
+  return MemoryArgs;
 }
 
 static SmallVector<Type *, 8> getX86GoReturnTypes(const Function &F) {
@@ -247,10 +259,14 @@ static SDValue lowerX86GoFormalArguments(
 
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys = getX86GoArgTypes(F, LayoutMap);
+  SmallVector<Type *, 8> ResultTys = getX86GoReturnTypes(F);
+  SmallVector<goabi::MemoryResult, 4> MemoryResults = getX86GoMemoryResults(F);
   goabi::ABIConfig ABIConfig =
       getX86GoABIConfig(Subtarget, F.getCallingConv());
   goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgTys, getX86GoReturnTypes(F), DAG.getDataLayout(), ABIConfig);
+      ArgTys, ResultTys, goabi::getMemoryArgMask(F),
+      goabi::getMemoryResultMask(ResultTys.size(), MemoryResults),
+      DAG.getDataLayout(), ABIConfig);
 
   goabi::EntryArgsInfo EntryArgs = goabi::computeEntryArgsInfo(
       ArgTys, Layout, DAG.getDataLayout(), ABIConfig);
@@ -351,9 +367,10 @@ static SDValue lowerX86GoFormalArguments(
 
     unsigned LayoutIndex = LayoutMap[Group.Index];
     const goabi::ValueLayout &ArgLayout = Layout.Args[LayoutIndex];
-    bool IsByVal = Ins[Group.Start].Flags.isByVal();
-    bool MustBeByVal = !ArgLayout.InRegs && ArgLayout.Size != 0;
-    if (Arg->hasByValAttr() != IsByVal || IsByVal != MustBeByVal)
+    bool IsPreallocated = Ins[Group.Start].Flags.isPreallocated();
+    bool MustBePreallocated = !ArgLayout.InRegs && ArgLayout.Size != 0;
+    if (Arg->hasPreallocatedAttr() != IsPreallocated ||
+        IsPreallocated != MustBePreallocated)
       report_fatal_error(
           "X86 Go formal argument carrier disagrees with Go ABI layout");
     uint64_t LogicalHomeOffset =
@@ -363,7 +380,7 @@ static SDValue lowerX86GoFormalArguments(
     if (ArgLayout.InRegs)
       HomeFI = MFI.CreateFixedSpillStackObject(ArgLayout.Size, FixedHomeOffset,
                                                /*IsImmutable=*/false);
-    else if (IsByVal)
+    else if (IsPreallocated)
       HomeFI = MFI.CreateFixedObject(ArgLayout.Size, FixedHomeOffset,
                                      /*IsImmutable=*/false,
                                      /*isAliased=*/true);
@@ -381,10 +398,10 @@ static SDValue lowerX86GoFormalArguments(
     RecordPointerSlots(HomeFI, LogicalHomeOffset, ArgLayout.Size,
                        IsLiveAtEntry);
 
-    if (IsByVal) {
+    if (IsPreallocated) {
       if (Group.End != Group.Start + 1 ||
           Ins[Group.Start].Flags.getByValSize() != ArgLayout.Size)
-        report_fatal_error("invalid X86 Go byval formal argument");
+        report_fatal_error("invalid X86 Go preallocated formal argument");
       InVals.push_back(DAG.getFrameIndex(HomeFI, PtrVT));
       continue;
     }
@@ -446,11 +463,13 @@ static SDValue lowerX86GoReturn(const X86TargetLowering &TLI, SDValue Chain,
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys = getX86GoArgTypes(MF.getFunction(), LayoutMap);
   SmallVector<Type *, 8> ResultTys = getX86GoReturnTypes(MF.getFunction());
-  goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgTys, ResultTys, DAG.getDataLayout(),
-      getX86GoABIConfig(Subtarget, MF.getFunction().getCallingConv()));
   SmallVector<goabi::MemoryResult, 4> MemoryResults =
       getX86GoMemoryResults(MF.getFunction());
+  goabi::CallLayout Layout = goabi::computeCallLayout(
+      ArgTys, ResultTys, goabi::getMemoryArgMask(MF.getFunction()),
+      goabi::getMemoryResultMask(ResultTys.size(), MemoryResults),
+      DAG.getDataLayout(),
+      getX86GoABIConfig(Subtarget, MF.getFunction().getCallingConv()));
   SmallVector<unsigned, 8> DirectResultIndices = getX86GoDirectResultIndices(
       MemoryResults, Layout.Results.size() - MemoryResults.size());
 
@@ -541,15 +560,16 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
   AttributeList CallAttrs = CLI.CB ? CLI.CB->getAttributes() : AttributeList();
   SmallVector<Type *, 8> ResultTys =
       getX86GoCallReturnTypes(CLI.RetTy, CallAttrs, CLI.getArgs());
-  goabi::CallLayout Layout =
-      goabi::computeCallLayout(ArgTys, ResultTys, DAG.getDataLayout(),
-                               getX86GoABIConfig(Subtarget, CLI.CallConv));
+  SmallVector<goabi::MemoryResult, 4> MemoryResults =
+      getX86GoMemoryResults(CLI.getArgs());
+  goabi::CallLayout Layout = goabi::computeCallLayout(
+      ArgTys, ResultTys, getX86GoCallMemoryArgMask(CLI.getArgs()),
+      goabi::getMemoryResultMask(ResultTys.size(), MemoryResults),
+      DAG.getDataLayout(), getX86GoABIConfig(Subtarget, CLI.CallConv));
   SmallVector<Type *, 8> DirectResultTys;
   goabi::getReturnTypes(CLI.RetTy,
                         CLI.CB && goabi::hasTupleResultsAttr(*CLI.CB),
                         DirectResultTys);
-  SmallVector<goabi::MemoryResult, 4> MemoryResults =
-      getX86GoMemoryResults(CLI.getArgs());
   SmallVector<int, 8> MemoryResultMap(CLI.getArgs().size(), -1);
   for (unsigned I = 0; I != CLI.getArgs().size(); ++I)
     if (CLI.getArgs()[I].IsGoRet)
@@ -558,6 +578,25 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
       getX86GoDirectResultIndices(MemoryResults, DirectResultTys.size());
 
   unsigned NumBytes = Layout.TotalStackSize;
+  SmallVector<size_t, 4> PreallocatedOffsets;
+  for (unsigned I = 0; I != CLI.getArgs().size(); ++I) {
+    if (!CLI.getArgs()[I].IsPreallocated)
+      continue;
+    int LayoutIndex = ArgLayoutMap[I];
+    if (LayoutIndex < 0 || Layout.Args[LayoutIndex].InRegs)
+      report_fatal_error("X86 Go preallocated call argument has no stack home");
+    PreallocatedOffsets.push_back(Layout.Args[LayoutIndex].StackOffset);
+  }
+  if (CLI.IsPreallocated != !PreallocatedOffsets.empty())
+    report_fatal_error(
+        "X86 Go preallocated call bundle disagrees with its arguments");
+  if (CLI.IsPreallocated) {
+    auto *FuncInfo = MF.getInfo<X86MachineFunctionInfo>();
+    size_t PreallocatedId = FuncInfo->getPreallocatedIdForCallSite(CLI.CB);
+    FuncInfo->setPreallocatedStackSize(PreallocatedId, NumBytes);
+    FuncInfo->setPreallocatedArgOffsets(PreallocatedId, PreallocatedOffsets);
+    FuncInfo->setPreallocatedUsesReservedCallFrame(PreallocatedId);
+  }
   Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, DL);
 
   SDValue StackPtr;
@@ -596,26 +635,18 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
 
     const goabi::ValueLayout &ArgLayout =
         Layout.Args[ArgLayoutMap[Group.Index]];
-    bool IsByVal = CLI.getArgs()[Group.Index].IsByVal;
-    bool MustBeByVal = !ArgLayout.InRegs && ArgLayout.Size != 0;
-    if (Outs[Group.Start].Flags.isByVal() != IsByVal || IsByVal != MustBeByVal)
+    bool IsPreallocated = CLI.getArgs()[Group.Index].IsPreallocated;
+    bool MustBePreallocated = !ArgLayout.InRegs && ArgLayout.Size != 0;
+    if (Outs[Group.Start].Flags.isPreallocated() != IsPreallocated ||
+        IsPreallocated != MustBePreallocated)
       report_fatal_error(
           "X86 Go call argument carrier disagrees with Go ABI layout");
-    if (IsByVal) {
+    if (IsPreallocated) {
       if (Group.End != Group.Start + 1 ||
           Outs[Group.Start].Flags.getByValSize() != ArgLayout.Size)
-        report_fatal_error("invalid X86 Go byval call argument");
-      assert(StackPtr && "missing Go call stack pointer");
-      SDValue Addr =
-          DAG.getNode(ISD::ADD, DL, PtrVT, StackPtr,
-                      DAG.getIntPtrConstant(ArgLayout.StackOffset, DL));
-      Align Alignment = Outs[Group.Start].Flags.getNonZeroByValAlign();
-      MemOpChains.push_back(DAG.getMemcpy(
-          Chain, DL, Addr, OutVals[Group.Start],
-          DAG.getConstant(ArgLayout.Size, DL, PtrVT), Alignment, Alignment,
-          /*isVol=*/false, /*AlwaysInline=*/false, /*CI=*/nullptr, std::nullopt,
-          MachinePointerInfo::getStack(MF, ArgLayout.StackOffset),
-          MachinePointerInfo()));
+        report_fatal_error("invalid X86 Go preallocated call argument");
+      // llvm.call.preallocated.arg exposes the final outgoing home. The
+      // frontend has already initialized it before this call.
       continue;
     }
 
@@ -785,15 +816,16 @@ X86TargetLowering::getArgumentCopyElisionFrameInfo(const Argument &Arg,
                                                    MachineFunction &MF) const {
   if (!goabi::isGoCallingConv(MF.getFunction().getCallingConv()))
     return std::nullopt;
+  // Memory carriers already denote their canonical fixed ABI homes. This
+  // hook only redirects the frontend spill of a direct register parameter.
+  if (Arg.hasPreallocatedAttr() || Arg.hasGoRetAttr())
+    return std::nullopt;
   const auto *FuncInfo = MF.getInfo<X86MachineFunctionInfo>();
   uint64_t ArgSize = MF.getDataLayout().getTypeAllocSize(Arg.getType());
   for (const X86MachineFunctionInfo::GoArgHome &Home :
        FuncInfo->getGoArgHomes())
     if (!Home.valueAlreadyInFrame() && Home.ArgNo == Arg.getArgNo() &&
         MF.getFrameInfo().getObjectSize(Home.FrameIndex) == int64_t(ArgSize))
-      // Stack-assigned values use typed byval and are already bound directly
-      // to their fixed incoming objects. Only register parameters still need
-      // their frontend store redirected into the canonical spill home.
       return ArgumentCopyElisionFrameInfo{Home.FrameIndex,
                                           /*ValueAlreadyInFrame=*/false};
   return std::nullopt;
@@ -809,8 +841,12 @@ int X86TargetLowering::getGoABI0FrameIndex(MachineFunction &MF) const {
 
   SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys = getX86GoArgTypes(F, LayoutMap);
+  SmallVector<Type *, 8> ResultTys = getX86GoReturnTypes(F);
+  SmallVector<goabi::MemoryResult, 4> MemoryResults = getX86GoMemoryResults(F);
   goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgTys, getX86GoReturnTypes(F), MF.getDataLayout(),
+      ArgTys, ResultTys, goabi::getMemoryArgMask(F),
+      goabi::getMemoryResultMask(ResultTys.size(), MemoryResults),
+      MF.getDataLayout(),
       getX86GoABIConfig(MF.getSubtarget<X86Subtarget>(), F.getCallingConv()));
   if (Layout.ArgSize == 0)
     report_fatal_error("llvm.go.abi0.frame requires a non-empty ABI0 frame");

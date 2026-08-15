@@ -24,9 +24,9 @@ entry:
 }
 
 define goabi0 void @"abi0_pointer_arguments<ABI0>"(
-    ptr byval(ptr) align 8 %first.home,
-    ptr byval(ptr) align 8 %second.home,
-    ptr byval(ptr) align 8 %third.home)
+    ptr preallocated(ptr) align 8 %first.home,
+    ptr preallocated(ptr) align 8 %second.home,
+    ptr preallocated(ptr) align 8 %third.home)
     "frame-pointer"="non-leaf" {
 entry:
   %first = load ptr, ptr %first.home, align 8
@@ -59,11 +59,14 @@ entry:
 define goabiinternal ptr @scalar_stack_argument(
     i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5,
     i64 %a6, i64 %a7, i64 %a8,
-    ptr byval(i64) align 8 %a9, ptr byval(i64) align 8 %a10,
-    ptr byval(i64) align 8 %a11, ptr byval(i64) align 8 %a12,
-    ptr byval(i64) align 8 %a13, ptr byval(i64) align 8 %a14,
-    ptr byval(i64) align 8 %a15,
-    ptr byval(ptr) align 8 %pointer.home) {
+    ptr preallocated(i64) align 8 %a9,
+    ptr preallocated(i64) align 8 %a10,
+    ptr preallocated(i64) align 8 %a11,
+    ptr preallocated(i64) align 8 %a12,
+    ptr preallocated(i64) align 8 %a13,
+    ptr preallocated(i64) align 8 %a14,
+    ptr preallocated(i64) align 8 %a15,
+    ptr preallocated(ptr) align 8 %pointer.home) {
 entry:
   %pointer = load ptr, ptr %pointer.home, align 8
   %buf = alloca [5000 x i8], align 8
@@ -75,10 +78,12 @@ entry:
 define goabiinternal { ptr, ptr } @aggregate_stack_argument(
     i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5,
     i64 %a6, i64 %a7, i64 %a8,
-    ptr byval(i64) align 8 %a9, ptr byval(i64) align 8 %a10,
-    ptr byval(i64) align 8 %a11, ptr byval(i64) align 8 %a12,
-    ptr byval(i64) align 8 %a13,
-    ptr byval(%pointer.aggregate) align 8 %value.home)
+    ptr preallocated(i64) align 8 %a9,
+    ptr preallocated(i64) align 8 %a10,
+    ptr preallocated(i64) align 8 %a11,
+    ptr preallocated(i64) align 8 %a12,
+    ptr preallocated(i64) align 8 %a13,
+    ptr preallocated(%pointer.aggregate) align 8 %value.home)
  "go_results_tuple" {
 entry:
   %value = load %pointer.aggregate, ptr %value.home, align 8

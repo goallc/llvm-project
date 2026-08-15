@@ -74,7 +74,7 @@ entry:
 ; An aggregate assigned wholly to the stack reuses its caller-populated slot;
 ; the lifetime marker must not make SelectionDAG allocate and copy a local.
 define goabiinternal void @inactive_stack_aggregate(
-    ptr byval(%stack_aggregate) align 8 %value.home)
+    ptr preallocated(%stack_aggregate) align 8 %value.home)
     gc "statepoint-example" {
 entry:
   %token = call goabiinternal token (i64, i32, ptr, i32, i32, ...)

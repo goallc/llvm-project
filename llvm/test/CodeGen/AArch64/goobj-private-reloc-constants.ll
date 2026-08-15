@@ -22,7 +22,7 @@ entry:
 }
 
 !goobj.config = !{!0}
-!0 = !{!"goallc.goobj", !"darwin", !"arm64", !"go1.27", !"GOARM64", !"v8.0", !"", !"p", !"0", !"0", !1}
+!0 = !{!"goallc.goobj", !"darwin", !"arm64", !"go1.27", !"GOARM64", !"v8.0", !"", !"p", !"0", !"0", !"0", !1}
 !1 = !{!"regabiwrappers", !"regabiargs"}
 !2 = !{i1 true}
 !3 = !{i32 0}

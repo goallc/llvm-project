@@ -1,6 +1,9 @@
 ; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O0 < %s | FileCheck %s --check-prefix=A64
 ; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O2 < %s | FileCheck %s --check-prefix=A64-O2
 
+declare token @llvm.call.preallocated.setup(i32)
+declare ptr @llvm.call.preallocated.arg(token, i32)
+
 define goabiinternal i64 @second_int(i64 %a, i64 %b) {
 ; A64-LABEL: second_int:
 ; A64: mov x0, x1
@@ -54,8 +57,8 @@ entry:
 }
 
 define goabi0 i64 @abi0_second_int(
-    ptr byval(i64) align 8 %a.home,
-    ptr byval(i64) align 8 %b.home) {
+    ptr preallocated(i64) align 8 %a.home,
+    ptr preallocated(i64) align 8 %b.home) {
 ; A64-LABEL: abi0_second_int:
 ; Go's arm64 stack ABI reserves 0(SP) for the return PC.
 ; A64: ldr x[[REG:[0-9]+]], [sp, #16]
@@ -68,22 +71,27 @@ entry:
 
 define goabi0 i64 @abi0_call_second_int() {
 ; A64-LABEL: abi0_call_second_int:
-; A64: mov x[[BASE:[0-9]+]], sp
-; A64-DAG: str x{{[0-9]+}}, [x[[BASE]], #8]
-; A64-DAG: str x{{[0-9]+}}, [x[[BASE]], #16]
+; A64-DAG: add x[[AHOME:[0-9]+]], sp, #8
+; A64-DAG: add x[[BHOME:[0-9]+]], sp, #16
+; A64-DAG: str x{{[0-9]+}}, [x[[AHOME]]]
+; A64-DAG: str x{{[0-9]+}}, [x[[BHOME]]]
 ; A64: bl abi0_second_int
 ; A64: mov x[[BASE_RELOAD:[0-9]+]], sp
 ; A64: ldr x[[RET:[0-9]+]], [x[[BASE_RELOAD]], #24]
-; The 64-byte caller frame leaves this function's ABI0 result at entry SP+8.
-; A64: str x[[RET]], [sp, #72]
+; The 48-byte caller frame leaves this function's ABI0 result at entry SP+8.
+; A64: str x[[RET]], [sp, #56]
 entry:
-  %a.home = alloca i64, align 8
-  %b.home = alloca i64, align 8
+  %setup = call token @llvm.call.preallocated.setup(i32 2)
+  %a.home = call ptr @llvm.call.preallocated.arg(token %setup, i32 0)
+      preallocated(i64)
+  %b.home = call ptr @llvm.call.preallocated.arg(token %setup, i32 1)
+      preallocated(i64)
   store i64 11, ptr %a.home, align 8
   store i64 22, ptr %b.home, align 8
   %ret = call goabi0 i64 @abi0_second_int(
-      ptr byval(i64) align 8 %a.home,
-      ptr byval(i64) align 8 %b.home)
+      ptr preallocated(i64) align 8 %a.home,
+      ptr preallocated(i64) align 8 %b.home)
+      ["preallocated"(token %setup)]
   ret i64 %ret
 }
 
@@ -120,7 +128,7 @@ define goabiinternal i64 @stack_pair(
     i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4,
     i64 %a5, i64 %a6, i64 %a7, i64 %a8, i64 %a9,
     i64 %a10, i64 %a11, i64 %a12, i64 %a13, i64 %a14,
-    ptr byval(%pair) align 8 %value.home) {
+    ptr preallocated(%pair) align 8 %value.home) {
 ; A64-LABEL: stack_pair:
 ; A64: ldr x0, [sp, #16]
 ; A64: ret
@@ -132,23 +140,26 @@ entry:
 
 define goabiinternal i64 @call_stack_pair() {
 ; A64-LABEL: call_stack_pair:
-; A64: ldr q[[VALUE:[0-9]+]], [sp, #{{[0-9]+}}]
-; A64: mov x[[BASE:[0-9]+]], sp
-; A64: stur q[[VALUE]], [x[[BASE]], #8]
+; A64: add x[[BASE:[0-9]+]], sp, #8
+; A64-DAG: str x{{[0-9]+}}, [x[[BASE]]]
+; A64-DAG: str x{{[0-9]+}}, [x[[BASE]], #8]
 ; A64: bl stack_pair
 entry:
-  %value.home = alloca %pair, align 8
+  %setup = call token @llvm.call.preallocated.setup(i32 1)
+  %value.home = call ptr @llvm.call.preallocated.arg(token %setup, i32 0)
+      preallocated(%pair)
   store %pair { i64 13, i64 17 }, ptr %value.home, align 8
   %result = call goabiinternal i64 @stack_pair(
       i64 0, i64 1, i64 2, i64 3, i64 4,
       i64 5, i64 6, i64 7, i64 8, i64 9,
       i64 10, i64 11, i64 12, i64 13, i64 14,
-      ptr byval(%pair) align 8 %value.home)
+      ptr preallocated(%pair) align 8 %value.home)
+      ["preallocated"(token %setup)]
   ret i64 %result
 }
 
 define goabiinternal [8 x i8] @stack_bytes(
-    ptr byval([8 x i8]) align 1 %value.home) {
+    ptr preallocated([8 x i8]) align 1 %value.home) {
 ; A64-LABEL: stack_bytes:
 ; A64-DAG: ldrb w{{[0-9]+}}, [sp, #8]
 ; A64-DAG: ldrb w{{[0-9]+}}, [sp, #15]
@@ -162,9 +173,9 @@ entry:
 
 define goabiinternal i16 @call_stack_bytes() {
 ; A64-LABEL: call_stack_bytes:
-; A64: ldr x[[VALUE:[0-9]+]], [sp, #{{[0-9]+}}]
-; A64: mov x[[BASE:[0-9]+]], sp
-; A64: str x[[VALUE]], [x[[BASE]], #8]
+; A64: add x[[BASE:[0-9]+]], sp, #8
+; A64-DAG: strb w{{[0-9]+}}, [x[[BASE]]]
+; A64-DAG: strb w{{[0-9]+}}, [x[[BASE]], #7]
 ; A64: bl stack_bytes
 ; A64-DAG: ldrb w{{[0-9]+}}, [x{{[0-9]+}}, #16]
 ; A64-DAG: ldrb w{{[0-9]+}}, [x{{[0-9]+}}, #23]
@@ -174,11 +185,14 @@ define goabiinternal i16 @call_stack_bytes() {
 ; A64-O2:       ldrb w{{[0-9]+}}, [sp, #16]
 ; A64-O2:       add sp, sp, #{{[0-9]+}}
 entry:
-  %value.home = alloca [8 x i8], align 1
+  %setup = call token @llvm.call.preallocated.setup(i32 1)
+  %value.home = call ptr @llvm.call.preallocated.arg(token %setup, i32 0)
+      preallocated([8 x i8])
   store [8 x i8] [i8 1, i8 2, i8 3, i8 4, i8 5, i8 6, i8 7, i8 8],
       ptr %value.home, align 1
   %result = call goabiinternal [8 x i8] @stack_bytes(
-      ptr byval([8 x i8]) align 1 %value.home)
+      ptr preallocated([8 x i8]) align 1 %value.home)
+      ["preallocated"(token %setup)]
   %first = extractvalue [8 x i8] %result, 0
   %last = extractvalue [8 x i8] %result, 7
   %first.ext = zext i8 %first to i16
