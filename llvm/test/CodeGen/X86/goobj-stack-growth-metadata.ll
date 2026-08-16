@@ -35,10 +35,24 @@ entry:
 }
 
 declare goabiinternal void @many_stack_args(
-    i64, i64, i64, i64, i64, i64, i64, i64,
-    i64, i64, i64, i64, i64, i64, i64, i64,
-    i64, i64, i64, i64, i64, i64, i64, i64,
-    i64, i64, i64, i64, i64, i64, i64, i64)
+    i64, i64, i64, i64, i64, i64, i64, i64, i64,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8)
+@stack.args = private constant [23 x i64] [
+    i64 9, i64 10, i64 11, i64 12, i64 13, i64 14,
+    i64 15, i64 16, i64 17, i64 18, i64 19, i64 20,
+    i64 21, i64 22, i64 23, i64 24, i64 25, i64 26,
+    i64 27, i64 28, i64 29, i64 30, i64 31]
 @condition = external global i1
 
 ; X86 lowers the stack arguments below to push sequences instead of reserving
@@ -51,10 +65,30 @@ entry:
 
 call:
   call goabiinternal void @many_stack_args(
-      i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7,
-      i64 8, i64 9, i64 10, i64 11, i64 12, i64 13, i64 14, i64 15,
-      i64 16, i64 17, i64 18, i64 19, i64 20, i64 21, i64 22, i64 23,
-      i64 24, i64 25, i64 26, i64 27, i64 28, i64 29, i64 30, i64 31)
+      i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7, i64 8,
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 0),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 1),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 2),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 3),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 4),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 5),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 6),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 7),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 8),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 9),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 10),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 11),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 12),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 13),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 14),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 15),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 16),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 17),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 18),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 19),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 20),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 21),
+      ptr byval(i64) align 8 getelementptr inbounds ([23 x i64], ptr @stack.args, i64 0, i64 22))
   br label %join
 
 join:

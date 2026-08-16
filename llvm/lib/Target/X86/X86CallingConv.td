@@ -1057,6 +1057,40 @@ def CC_X86_64_Preserve_None : CallingConv<[
   CCDelegateTo<CC_X86_64_C>
 ]>;
 
+// Go's frontend is the source of truth for whole-value assignment. A direct
+// parameter is guaranteed to fit completely in the ABIInternal register
+// budget; a non-empty value assigned wholly to memory is represented by a
+// typed byval pointer. Do not add a stack fallback for direct values here: an
+// exhausted register list is an ABI carrier mismatch and must fail closed.
+let Entry = 1 in
+def CC_X86_64_Go : CallingConv<[
+  // The closure context is not part of the ordinary Go argument layout.
+  CCIfNest<CCIfType<[i64], CCAssignToReg<[RDX]>>>,
+
+  // Preserve the exact size and alignment carried by byval(T).
+  CCIfByVal<CCPassByVal<0, 1>>,
+
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i1], CCPromoteToType<i8>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i8], CCAssignToReg<[AL, BL, CL, DIL, SIL,
+                                  R8B, R9B, R10B, R11B]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i16], CCAssignToReg<[AX, BX, CX, DI, SI,
+                                   R8W, R9W, R10W, R11W]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i32], CCAssignToReg<[EAX, EBX, ECX, EDI, ESI,
+                                   R8D, R9D, R10D, R11D]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i64], CCAssignToReg<[RAX, RBX, RCX, RDI, RSI,
+                                   R8, R9, R10, R11]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[f32, f64],
+      CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4,
+                     XMM5, XMM6, XMM7, XMM8, XMM9,
+                     XMM10, XMM11, XMM12, XMM13, XMM14]>>>
+]>;
+
 //===----------------------------------------------------------------------===//
 // X86 Root Argument Calling Conventions
 //===----------------------------------------------------------------------===//
