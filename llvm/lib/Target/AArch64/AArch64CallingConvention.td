@@ -577,6 +577,43 @@ def CC_AArch64_Preserve_None : CallingConv<[
   CCDelegateTo<CC_AArch64_AAPCS>
 ]>;
 
+// Go's frontend has already made the whole-value register-or-memory decision.
+// Direct parameters are ABIInternal register values; typed byval parameters
+// are the only ordinary stack-input carrier. Leaving direct values unmatched
+// when the register list is exhausted keeps frontend/backend ABI drift
+// fail-closed instead of silently splitting one Go value across locations.
+let Entry = 1 in
+def CC_AArch64_Go : CallingConv<[
+  // The closure context is not part of the ordinary Go argument layout.
+  CCIfNest<CCIfType<[i64], CCAssignToReg<[X26]>>>,
+
+  // Preserve the exact size and alignment carried by byval(T).
+  CCIfByVal<CCPassByVal<0, 1>>,
+
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i1, i8, i16], CCPromoteToType<i32>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i32],
+      CCAssignToReg<[W0, W1, W2, W3, W4, W5, W6, W7,
+                     W8, W9, W10, W11, W12, W13, W14, W15]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i64],
+      CCAssignToReg<[X0, X1, X2, X3, X4, X5, X6, X7,
+                     X8, X9, X10, X11, X12, X13, X14, X15]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[f16, bf16],
+      CCAssignToReg<[H0, H1, H2, H3, H4, H5, H6, H7,
+                     H8, H9, H10, H11, H12, H13, H14, H15]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[f32],
+      CCAssignToReg<[S0, S1, S2, S3, S4, S5, S6, S7,
+                     S8, S9, S10, S11, S12, S13, S14, S15]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[f64],
+      CCAssignToReg<[D0, D1, D2, D3, D4, D5, D6, D7,
+                     D8, D9, D10, D11, D12, D13, D14, D15]>>>
+]>;
+
 // The order of the callee-saves in this file is important, because the
 // FrameLowering code will use this order to determine the layout the
 // callee-save area in the stack frame. As can be observed below, Darwin
