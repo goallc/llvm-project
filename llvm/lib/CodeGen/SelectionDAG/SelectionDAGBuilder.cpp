@@ -4778,6 +4778,29 @@ static std::optional<ConstantRange> getRange(const Instruction &I) {
   return std::nullopt;
 }
 
+static MachinePointerInfo getIRMemoryPointerInfo(
+    SelectionDAG &DAG, FunctionLoweringInfo &FuncInfo, const Value *Ptr,
+    int64_t Offset) {
+  // Argument-copy elision may remap an IR alloca to a fixed incoming argument
+  // home. Keep ordinary IR memory operations on that alloca in the same
+  // fixed-stack alias domain as target-generated accesses to the home.
+  int64_t BaseOffset = 0;
+  const Value *Base = GetPointerBaseWithConstantOffset(
+      Ptr, BaseOffset, DAG.getDataLayout());
+  if (const auto *AI = dyn_cast<AllocaInst>(Base)) {
+    auto I = FuncInfo.StaticAllocaMap.find(AI);
+    if (I != FuncInfo.StaticAllocaMap.end() &&
+        DAG.getMachineFunction().getFrameInfo().isFixedObjectIndex(I->second)) {
+      int64_t FixedOffset;
+      if (!AddOverflow(BaseOffset, Offset, FixedOffset))
+        return MachinePointerInfo::getFixedStack(DAG.getMachineFunction(),
+                                                 I->second, FixedOffset);
+      return MachinePointerInfo();
+    }
+  }
+  return MachinePointerInfo(Ptr, Offset);
+}
+
 static FPClassTest getNoFPClass(const Instruction &I) {
   if (const auto *CB = dyn_cast<CallBase>(&I))
     return CB->getRetNoFPClass();
@@ -4869,7 +4892,8 @@ void SelectionDAGBuilder::visitLoad(const LoadInst &I) {
     // TODO: MachinePointerInfo only supports a fixed length offset.
     MachinePointerInfo PtrInfo =
         !Offsets[i].isScalable() || Offsets[i].isZero()
-            ? MachinePointerInfo(SV, Offsets[i].getKnownMinValue())
+            ? getIRMemoryPointerInfo(DAG, FuncInfo, SV,
+                                     Offsets[i].getKnownMinValue())
             : MachinePointerInfo();
 
     SDValue A = DAG.getObjectPtrOffset(dl, Ptr, Offsets[i]);
@@ -5021,7 +5045,8 @@ void SelectionDAGBuilder::visitStore(const StoreInst &I) {
     // TODO: MachinePointerInfo only supports a fixed length offset.
     MachinePointerInfo PtrInfo =
         !Offsets[i].isScalable() || Offsets[i].isZero()
-            ? MachinePointerInfo(PtrV, Offsets[i].getKnownMinValue())
+            ? getIRMemoryPointerInfo(DAG, FuncInfo, PtrV,
+                                     Offsets[i].getKnownMinValue())
             : MachinePointerInfo();
 
     SDValue Add = DAG.getObjectPtrOffset(dl, Ptr, Offsets[i]);
