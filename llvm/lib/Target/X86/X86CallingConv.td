@@ -1147,8 +1147,6 @@ def CC_X86_64 : CallingConv<[
 let Entry = 1 in
 def CC_X86 : CallingConv<[
   CCIfCC<"CallingConv::Intel_OCL_BI", CCDelegateTo<CC_Intel_OCL_BI>>,
-  CCIfCC<"CallingConv::GoABIInternal", CCDelegateTo<CC_X86_64_Go>>,
-  CCIfCC<"CallingConv::GoABI0", CCDelegateTo<CC_X86_64_Go>>,
   CCIfSubtarget<"is64Bit()", CCDelegateTo<CC_X86_64>>,
   CCDelegateTo<CC_X86_32>
 ]>;
