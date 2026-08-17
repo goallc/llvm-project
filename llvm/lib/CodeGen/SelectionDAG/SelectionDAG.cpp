@@ -57,7 +57,6 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Casting.h"
@@ -9568,92 +9567,6 @@ getMemcpyLoadsAndStores(SelectionDAG &DAG, const SDLoc &dl, SDValue Chain,
   return DAG.getNode(ISD::TokenFactor, dl, MVT::Other, OutChains);
 }
 
-static bool isSingleByValCallCarrier(const AllocaInst *AI) {
-  SmallVector<const Value *, 8> Worklist = {AI};
-  SmallPtrSet<const Value *, 8> Visited;
-  SmallVector<const StoreInst *, 8> Stores;
-  SmallVector<const Instruction *, 8> AddressInsts;
-  SmallVector<const IntrinsicInst *, 2> Lifetimes;
-  const CallBase *ByValCall = nullptr;
-
-  while (!Worklist.empty()) {
-    const Value *V = Worklist.pop_back_val();
-    if (!Visited.insert(V).second)
-      continue;
-
-    for (const Use &U : V->uses()) {
-      const auto *I = dyn_cast<Instruction>(U.getUser());
-      if (!I)
-        return false;
-
-      if (const auto *GEP = dyn_cast<GetElementPtrInst>(I)) {
-        if (&U != &GEP->getOperandUse(0))
-          return false;
-        Worklist.push_back(GEP);
-        AddressInsts.push_back(GEP);
-        continue;
-      }
-      if (isa<BitCastInst, AddrSpaceCastInst>(I)) {
-        if (U.getOperandNo() != 0)
-          return false;
-        Worklist.push_back(I);
-        AddressInsts.push_back(I);
-        continue;
-      }
-      if (const auto *SI = dyn_cast<StoreInst>(I)) {
-        if (U.getOperandNo() != StoreInst::getPointerOperandIndex() ||
-            !SI->isSimple())
-          return false;
-        Stores.push_back(SI);
-        continue;
-      }
-      if (const auto *II = dyn_cast<IntrinsicInst>(I);
-          II && II->isLifetimeStartOrEnd()) {
-        Lifetimes.push_back(II);
-        continue;
-      }
-      if (const auto *CB = dyn_cast<CallBase>(I)) {
-        if (!CB->isArgOperand(&U))
-          return false;
-        unsigned ArgNo = CB->getArgOperandNo(&U);
-        if (!CB->paramHasAttr(ArgNo, Attribute::ByVal) || ByValCall)
-          return false;
-        ByValCall = CB;
-        continue;
-      }
-      return false;
-    }
-  }
-
-  if (!ByValCall || Stores.empty())
-    return false;
-
-  const BasicBlock *CallBB = ByValCall->getParent();
-  const StoreInst *FirstStore = Stores.front();
-  for (const StoreInst *SI : Stores)
-    if (SI->getParent() != CallBB || !SI->comesBefore(ByValCall))
-      return false;
-    else if (SI->comesBefore(FirstStore))
-      FirstStore = SI;
-  for (const Instruction *I : AddressInsts)
-    if (I->getParent() != CallBB || !I->comesBefore(ByValCall))
-      return false;
-  for (const IntrinsicInst *II : Lifetimes)
-    if (II->getParent() != CallBB || !II->comesBefore(ByValCall))
-      return false;
-
-  // A future call's outgoing argument area is not stable storage across an
-  // intervening call: that call can reuse it, and its stack map does not
-  // describe partially initialized arguments for a later call. Restrict this
-  // combine to the contiguous setup of the target byval call.
-  for (const Instruction *I = FirstStore->getNextNode(); I != ByValCall;
-       I = I->getNextNode())
-    if (isa<CallBase>(I) && !(isa<IntrinsicInst>(I) &&
-                              cast<IntrinsicInst>(I)->isLifetimeStartOrEnd()))
-      return false;
-  return true;
-}
-
 static SDValue tryForwardByValStores(SelectionDAG &DAG, const SDLoc &DL,
                                      SDValue Chain, SDValue Dst, SDValue Src,
                                      uint64_t Size, Align DstAlign,
@@ -9675,7 +9588,7 @@ static SDValue tryForwardByValStores(SelectionDAG &DAG, const SDLoc &DL,
   if (MFI.isFixedObjectIndex(FI))
     return SDValue();
   const AllocaInst *AI = MFI.getObjectAllocation(FI);
-  if (!AI || !isSingleByValCallCarrier(AI) ||
+  if (!AI || !isSingleByValCallCarrier(*AI, DAG.getDataLayout()) ||
       MFI.getObjectSize(FI) != static_cast<int64_t>(Size) ||
       MFI.getObjectAlign(FI) > DstAlign)
     return SDValue();
