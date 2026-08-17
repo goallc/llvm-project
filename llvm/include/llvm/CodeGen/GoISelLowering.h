@@ -18,18 +18,13 @@ class CCValAssign;
 
 namespace goabi {
 
-struct FormalArgLayout {
-  CallLayout Layout;
-  SmallVector<Type *, 8> ArgTypes;
-  SmallVector<int, 8> ArgToLayout;
-};
-
 /// Derive the logical Go function layout from LLVM formal arguments and the
 /// physical locations assigned by the target calling convention.
-FormalArgLayout
-computeFormalArgLayout(const Function &F, ArrayRef<ISD::InputArg> Ins,
-                       ArrayRef<CCValAssign> ArgLocs, uint64_t StackArgsSize,
-                       const DataLayout &DL, const ABIConfig &Config);
+CallLayout computeFormalArgLayout(const Function &F,
+                                  ArrayRef<ISD::InputArg> Ins,
+                                  ArrayRef<CCValAssign> ArgLocs,
+                                  uint64_t StackArgsSize, const DataLayout &DL,
+                                  const ABIConfig &Config);
 
 /// Derive the logical Go call layout from the original LLVM call operands and
 /// the physical locations assigned by the target calling convention.

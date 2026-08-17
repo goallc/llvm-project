@@ -115,15 +115,7 @@ CallLayout computeCallLayout(ArrayRef<ValueLayout> Args, uint64_t StackArgsSize,
                              ArrayRef<Type *> ResultTys, const DataLayout &DL,
                              const ABIConfig &Config);
 
-/// Collect the logical Go input type represented by each non-context IR
-/// argument. A typed byval pointer represents its pointee value; all other
-/// arguments represent their IR type directly. Physical register and stack
-/// locations come exclusively from the target calling-convention analysis.
-void getArgumentTypes(const Function &F, SmallVectorImpl<Type *> &ArgTys,
-                      SmallVectorImpl<int> &ArgToLayout);
-
-EntryArgsInfo computeEntryArgsInfo(ArrayRef<Type *> ArgTys,
-                                   const CallLayout &Layout,
+EntryArgsInfo computeEntryArgsInfo(const CallLayout &Layout,
                                    const DataLayout &DL,
                                    const ABIConfig &Config);
 

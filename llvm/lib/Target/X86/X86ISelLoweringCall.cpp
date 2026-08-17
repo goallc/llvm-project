@@ -111,7 +111,7 @@ static SmallVector<Type *, 8> getX86GoReturnTypes(Type *RetTy,
 }
 
 struct X86GoFormalArgInfo {
-  goabi::FormalArgLayout ABI;
+  goabi::CallLayout Layout;
   SmallVector<int, 8> HomeFIs;
 };
 
@@ -131,18 +131,18 @@ prepareX86GoFormalArguments(MachineFunction &MF, ArrayRef<ISD::InputArg> Ins,
 
   goabi::ABIConfig ABIConfig = getX86GoABIConfig(Subtarget, F.getCallingConv());
   X86GoFormalArgInfo Info;
-  Info.ABI = goabi::computeFormalArgLayout(F, Ins, ArgLocs, StackArgsSize,
-                                           DAG.getDataLayout(), ABIConfig);
-  const goabi::CallLayout &Layout = Info.ABI.Layout;
+  Info.Layout = goabi::computeFormalArgLayout(
+      F, Ins, ArgLocs, StackArgsSize, DAG.getDataLayout(), ABIConfig);
+  const goabi::CallLayout &Layout = Info.Layout;
   MFI.setGoABIArgSizes(Layout.StackArgsSize, Layout.ArgSize);
 
   goabi::EntryArgsInfo EntryArgs = goabi::computeEntryArgsInfo(
-      Info.ABI.ArgTypes, Layout, DAG.getDataLayout(), ABIConfig);
+      Layout, DAG.getDataLayout(), ABIConfig);
   SmallBitVector MatchedEntryArgWords(EntryArgs.NumBits);
 
-  SmallVector<uint64_t, 8> ArgSpillOffsets(Info.ABI.ArgTypes.size(), 0);
+  SmallVector<uint64_t, 8> ArgSpillOffsets(Layout.Args.size(), 0);
   uint64_t SpillOffset = Layout.SpillAreaOffset;
-  for (unsigned I = 0, E = Info.ABI.ArgTypes.size(); I != E; ++I) {
+  for (unsigned I = 0, E = Layout.Args.size(); I != E; ++I) {
     const goabi::ValueLayout &ArgLayout = Layout.Args[I];
     if (!ArgLayout.InRegs)
       continue;
@@ -197,13 +197,14 @@ prepareX86GoFormalArguments(MachineFunction &MF, ArrayRef<ISD::InputArg> Ins,
     }
   };
 
+  unsigned NextLayoutIndex = 0;
   for (const Argument &Arg : F.args()) {
     if (Arg.hasNestAttr())
       continue;
 
-    int LayoutIndex = Info.ABI.ArgToLayout[Arg.getArgNo()];
-    if (LayoutIndex < 0)
+    if (NextLayoutIndex >= Layout.Args.size())
       report_fatal_error("X86 Go argument has no logical layout");
+    unsigned LayoutIndex = NextLayoutIndex++;
     const goabi::ValueLayout &ArgLayout = Layout.Args[LayoutIndex];
     uint64_t LogicalHomeOffset =
         ArgLayout.InRegs ? ArgSpillOffsets[LayoutIndex] : ArgLayout.StackOffset;
@@ -243,6 +244,8 @@ prepareX86GoFormalArguments(MachineFunction &MF, ArrayRef<ISD::InputArg> Ins,
       Home.addRegisterPiece(PReg, In.PartOffset, Size, IsFP);
     }
   }
+  if (NextLayoutIndex != Layout.Args.size())
+    report_fatal_error("X86 Go ABI layout has unmatched arguments");
 
   for (uint32_t Word : EntryArgs.PointerWords)
     if (!MatchedEntryArgWords.test(Word))
@@ -2337,7 +2340,7 @@ SDValue X86TargetLowering::LowerFormalArguments(
   }
 
   unsigned StackSize =
-      IsGo ? GoInfo->ABI.Layout.TotalStackSize : CCInfo.getStackSize();
+      IsGo ? GoInfo->Layout.TotalStackSize : CCInfo.getStackSize();
   // Align stack specially for tail calls.
   if (shouldGuaranteeTCO(CallConv,
                          MF.getTarget().Options.GuaranteedTailCallOpt))

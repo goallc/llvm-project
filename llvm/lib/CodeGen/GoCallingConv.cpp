@@ -252,19 +252,6 @@ static uint64_t getDirectValueSize(Type *Ty, const DataLayout &DL) {
   return DL.getTypeAllocSize(Ty);
 }
 
-void getArgumentTypes(const Function &F, SmallVectorImpl<Type *> &ArgTys,
-                      SmallVectorImpl<int> &ArgToLayout) {
-  ArgTys.clear();
-  ArgToLayout.assign(F.arg_size(), -1);
-  for (const Argument &Arg : F.args()) {
-    if (Arg.hasNestAttr())
-      continue;
-    ArgToLayout[Arg.getArgNo()] = ArgTys.size();
-    ArgTys.push_back(Arg.hasByValAttr() ? Arg.getPointeeInMemoryValueType()
-                                        : Arg.getType());
-  }
-}
-
 CallLayout computeCallLayout(ArrayRef<ValueLayout> Args, uint64_t StackArgsSize,
                              ArrayRef<Type *> ResultTys, const DataLayout &DL,
                              const ABIConfig &Config) {
@@ -345,22 +332,18 @@ static void collectPointerOffsets(Type *Ty, uint64_t BaseOffset,
     report_fatal_error("Go entry argument maps do not support pointer vectors");
 }
 
-EntryArgsInfo computeEntryArgsInfo(ArrayRef<Type *> ArgTys,
-                                   const CallLayout &Layout,
+EntryArgsInfo computeEntryArgsInfo(const CallLayout &Layout,
                                    const DataLayout &DL,
                                    const ABIConfig &Config) {
   if (!Config.PtrSize || Layout.ArgSize % Config.PtrSize != 0 ||
       Layout.ArgSize / Config.PtrSize > std::numeric_limits<uint32_t>::max())
     report_fatal_error("invalid Go entry argument map dimensions");
-  if (ArgTys.size() != Layout.Args.size())
-    report_fatal_error("Go entry argument types do not match ABI layout");
-
   EntryArgsInfo Info;
   Info.PointerSize = Config.PtrSize;
   Info.ArgSize = Layout.ArgSize;
   Info.NumBits = static_cast<uint32_t>(Layout.ArgSize / Config.PtrSize);
 
-  SmallVector<uint64_t, 8> HomeOffsets(ArgTys.size());
+  SmallVector<uint64_t, 8> HomeOffsets(Layout.Args.size());
   uint64_t SpillOffset = Layout.SpillAreaOffset;
   for (auto [Index, ArgLayout] : llvm::enumerate(Layout.Args)) {
     if (ArgLayout.InRegs) {
@@ -375,8 +358,8 @@ EntryArgsInfo computeEntryArgsInfo(ArrayRef<Type *> ArgTys,
     report_fatal_error("Go entry argument homes do not match spill area");
 
   SmallVector<uint64_t, 16> PointerOffsets;
-  for (auto [Index, ArgTy] : llvm::enumerate(ArgTys))
-    collectPointerOffsets(ArgTy, HomeOffsets[Index], DL, PointerOffsets);
+  for (auto [Index, ArgLayout] : llvm::enumerate(Layout.Args))
+    collectPointerOffsets(ArgLayout.Ty, HomeOffsets[Index], DL, PointerOffsets);
   llvm::sort(PointerOffsets);
 
   for (uint64_t Offset : PointerOffsets) {
