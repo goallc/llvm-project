@@ -7,6 +7,14 @@
 declare goabiinternal void @consume(i64, i64, i64, i64, i64, i64, i64, i64,
                                     i64, i64, i64, i64, i64, i64, i64, i64,
                                     ptr byval(i64) align 8)
+declare goabiinternal void @consume_many(
+    i64, i64, i64, i64, i64, i64, i64, i64,
+    i64, i64, i64, i64, i64, i64, i64, i64,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8)
 declare goabiinternal void @consume_pair(
     i64, i64, i64, i64, i64, i64, i64, i64,
     i64, i64, i64, i64, i64, i64, i64,
@@ -52,6 +60,70 @@ entry:
       i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7,
       i64 8, i64 9, i64 10, i64 11, i64 12, i64 13, i64 14, i64 15,
       ptr byval(i64) align 8 %argument)
+  ret void
+}
+
+; Keep the stores which initialize register argument homes ordered before
+; outgoing byval copies that read those homes. The IR allocas below are
+; remapped to the incoming fixed homes by argument-copy elision.
+define goabiinternal void @register_arguments_byval_sources(
+    i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, i64 %h,
+    i64 %i, i64 %j, i64 %k, i64 %l, i64 %m, i64 %n, i64 %o, i64 %p,
+    ptr byval(i64) align 8 %q, ptr byval(i64) align 8 %r,
+    ptr byval(i64) align 8 %s, ptr byval(i64) align 8 %t,
+    ptr byval(i64) align 8 %u, ptr byval(i64) align 8 %v,
+    ptr byval(i64) align 8 %w, ptr byval(i64) align 8 %x,
+    ptr byval(i64) align 8 %y, ptr byval(i64) align 8 %z) {
+; CHECK-LABEL: register_arguments_byval_sources:
+; The loads at 352 and 368 read d/e and f/g respectively. Check that every
+; contributing fixed home is initialized first.
+; CHECK-DAG: stp x2, x3, [sp, #344]
+; CHECK-DAG: stp x4, x5, [sp, #360]
+; CHECK: ldp x0, x{{[0-9]+}}, [sp, #352]
+; CHECK: stp x6, x7, [sp, #376]
+; CHECK: ldp x0, x{{[0-9]+}}, [sp, #368]
+; CHECK: bl consume_many
+entry:
+  %a.home = alloca i64, align 8
+  %b.home = alloca i64, align 8
+  %c.home = alloca i64, align 8
+  %d.home = alloca i64, align 8
+  %e.home = alloca i64, align 8
+  %f.home = alloca i64, align 8
+  %g.home = alloca i64, align 8
+  %h.home = alloca i64, align 8
+  %i.home = alloca i64, align 8
+  %j.home = alloca i64, align 8
+  %q.value = load i64, ptr %q, align 8
+  %r.value = load i64, ptr %r, align 8
+  %s.value = load i64, ptr %s, align 8
+  %t.value = load i64, ptr %t, align 8
+  %u.value = load i64, ptr %u, align 8
+  %v.value = load i64, ptr %v, align 8
+  %w.value = load i64, ptr %w, align 8
+  %x.value = load i64, ptr %x, align 8
+  %y.value = load i64, ptr %y, align 8
+  %z.value = load i64, ptr %z, align 8
+  store i64 %j, ptr %j.home, align 8
+  store i64 %i, ptr %i.home, align 8
+  store i64 %h, ptr %h.home, align 8
+  store i64 %g, ptr %g.home, align 8
+  store i64 %f, ptr %f.home, align 8
+  store i64 %e, ptr %e.home, align 8
+  store i64 %d, ptr %d.home, align 8
+  store i64 %c, ptr %c.home, align 8
+  store i64 %b, ptr %b.home, align 8
+  store i64 %a, ptr %a.home, align 8
+  call goabiinternal void @consume_many(
+      i64 %z.value, i64 %y.value, i64 %x.value, i64 %w.value,
+      i64 %v.value, i64 %u.value, i64 %t.value, i64 %s.value,
+      i64 %r.value, i64 %q.value, i64 %p, i64 %o, i64 %n, i64 %m,
+      i64 %l, i64 %k,
+      ptr byval(i64) align 8 %j.home, ptr byval(i64) align 8 %i.home,
+      ptr byval(i64) align 8 %h.home, ptr byval(i64) align 8 %g.home,
+      ptr byval(i64) align 8 %f.home, ptr byval(i64) align 8 %e.home,
+      ptr byval(i64) align 8 %d.home, ptr byval(i64) align 8 %c.home,
+      ptr byval(i64) align 8 %b.home, ptr byval(i64) align 8 %a.home)
   ret void
 }
 
