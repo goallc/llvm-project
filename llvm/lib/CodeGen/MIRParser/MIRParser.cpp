@@ -944,6 +944,14 @@ bool MIRParserImpl::initializeFrameInfo(PerFunctionMIParsingState &PFS,
     MFI.setFramePointerPolicy(YamlMFI.FramePointerPolicy);
   if (YamlMFI.MaxCallFrameSize != ~0u)
     MFI.setMaxCallFrameSize(YamlMFI.MaxCallFrameSize);
+  if (YamlMFI.GoABIStackArgsSize != ~UINT64_C(0) ||
+      YamlMFI.GoABIArgSize != ~UINT64_C(0)) {
+    if (YamlMFI.GoABIStackArgsSize == ~UINT64_C(0) ||
+        YamlMFI.GoABIArgSize == ~UINT64_C(0))
+      return error(Twine("Go ABI frame info requires both input and total "
+                         "argument sizes"));
+    MFI.setGoABIArgSizes(YamlMFI.GoABIStackArgsSize, YamlMFI.GoABIArgSize);
+  }
   MFI.setCVBytesOfCalleeSavedRegisters(YamlMFI.CVBytesOfCalleeSavedRegisters);
   MFI.setHasOpaqueSPAdjustment(YamlMFI.HasOpaqueSPAdjustment);
   MFI.setHasVAStart(YamlMFI.HasVAStart);

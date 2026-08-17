@@ -115,20 +115,12 @@ CallLayout computeCallLayout(ArrayRef<ValueLayout> Args, uint64_t StackArgsSize,
                              ArrayRef<Type *> ResultTys, const DataLayout &DL,
                              const ABIConfig &Config);
 
-/// Construct the logical layout of one direct register input or one memory
-/// input whose stack offset was assigned by CCState.
-ValueLayout getRegisterValueLayout(Type *Ty, const DataLayout &DL);
-ValueLayout getMemoryValueLayout(Type *Ty, uint64_t StackOffset,
-                                 Align Alignment, const DataLayout &DL);
-
-/// Derive the logical Go input types and their carrier-defined locations from
-/// a function signature. Direct inputs are register-assigned; typed byval
-/// inputs are laid out in their canonical semantic stack area. Target
-/// lowering verifies these locations against CCState. Returns the stack input
-/// extent encoded by those carriers for consumers that do not have CCState.
-uint64_t getFunctionArgumentLayouts(const Function &F, const DataLayout &DL,
-                                    SmallVectorImpl<Type *> &ArgTys,
-                                    SmallVectorImpl<ValueLayout> &ArgLayouts);
+/// Collect the logical Go input type represented by each non-context IR
+/// argument. A typed byval pointer represents its pointee value; all other
+/// arguments represent their IR type directly. Physical register and stack
+/// locations come exclusively from the target calling-convention analysis.
+void getArgumentTypes(const Function &F, SmallVectorImpl<Type *> &ArgTys,
+                      SmallVectorImpl<int> &ArgToLayout);
 
 EntryArgsInfo computeEntryArgsInfo(ArrayRef<Type *> ArgTys,
                                    const CallLayout &Layout,
