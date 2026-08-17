@@ -22,12 +22,12 @@ entry:
 ; X86-LABEL: name: reg_scalar_home
 ; X86: fixedStack:
 ; X86-NEXT: - { id: 0, type: spill-slot, offset: 0, size: 8
-; X86: MOV64mr %fixed-stack.0{{.*}}%ir.home
+; X86: MOV64mr %fixed-stack.0{{.*}}store (s64) into %fixed-stack.0
 ; X86: LEA64r %fixed-stack.0
 ; A64-LABEL: name: reg_scalar_home
 ; A64: fixedStack:
 ; A64-NEXT: - { id: 0, type: spill-slot, offset: 8, size: 8
-; A64: STRXui {{.*}}%fixed-stack.0{{.*}}%ir.home
+; A64: STRXui {{.*}}%fixed-stack.0{{.*}}store (s64) into %fixed-stack.0
 ; A64: ADDXri %fixed-stack.0
 ; X86-ASM-LABEL: reg_scalar_home:
 ; X86-ASM: movq %rax, 8(%rsp)
@@ -48,14 +48,14 @@ entry:
 ; X86-LABEL: name: reg_padded_home
 ; X86: fixedStack:
 ; X86-NEXT: - { id: 0, type: spill-slot, offset: 0, size: 16
-; X86: MOV8mr %fixed-stack.0{{.*}}%ir.home
-; X86: MOV64mr %fixed-stack.0{{.*}}8{{.*}}%ir.home + 8
+; X86: MOV8mr %fixed-stack.0{{.*}}store (s8) into %fixed-stack.0
+; X86: MOV64mr %fixed-stack.0{{.*}}8{{.*}}store (s64) into %fixed-stack.0 + 8
 ; X86: LEA64r %fixed-stack.0
 ; A64-LABEL: name: reg_padded_home
 ; A64: fixedStack:
 ; A64-NEXT: - { id: 0, type: spill-slot, offset: 8, size: 16
-; A64-DAG: STRBBui {{.*}}%fixed-stack.0{{.*}}%ir.home
-; A64-DAG: STRXui {{.*}}%fixed-stack.0{{.*}}1{{.*}}%ir.home + 8
+; A64-DAG: STRBBui {{.*}}%fixed-stack.0{{.*}}store (s8) into %fixed-stack.0
+; A64-DAG: STRXui {{.*}}%fixed-stack.0{{.*}}1{{.*}}store (s64) into %fixed-stack.0 + 8
 ; A64: ADDXri %fixed-stack.0
 ; X86-ASM-LABEL: reg_padded_home:
 ; X86-ASM-DAG: movb %al, 8(%rsp)
