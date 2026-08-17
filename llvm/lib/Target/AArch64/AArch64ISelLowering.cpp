@@ -9018,7 +9018,7 @@ getAArch64GoReturnTypes(Type *RetTy, const AttributeList &Attrs) {
 }
 
 struct AArch64GoFormalArgInfo {
-  goabi::FormalArgLayout ABI;
+  goabi::CallLayout Layout;
   SmallVector<int, 8> HomeFIs;
 };
 
@@ -9033,18 +9033,18 @@ static AArch64GoFormalArgInfo prepareAArch64GoFormalArguments(
   goabi::ABIConfig ABIConfig =
       getAArch64GoABIConfig(TLI, Subtarget, F.getCallingConv());
   AArch64GoFormalArgInfo Info;
-  Info.ABI = goabi::computeFormalArgLayout(F, Ins, ArgLocs, StackArgsSize,
-                                           DAG.getDataLayout(), ABIConfig);
-  const goabi::CallLayout &Layout = Info.ABI.Layout;
+  Info.Layout = goabi::computeFormalArgLayout(F, Ins, ArgLocs, StackArgsSize,
+                                              DAG.getDataLayout(), ABIConfig);
+  const goabi::CallLayout &Layout = Info.Layout;
   MFI.setGoABIArgSizes(Layout.StackArgsSize, Layout.ArgSize);
 
-  goabi::EntryArgsInfo EntryArgs = goabi::computeEntryArgsInfo(
-      Info.ABI.ArgTypes, Layout, DAG.getDataLayout(), ABIConfig);
+  goabi::EntryArgsInfo EntryArgs =
+      goabi::computeEntryArgsInfo(Layout, DAG.getDataLayout(), ABIConfig);
   SmallBitVector MatchedEntryArgWords(EntryArgs.NumBits);
 
-  SmallVector<uint64_t, 8> ArgSpillOffsets(Info.ABI.ArgTypes.size(), 0);
+  SmallVector<uint64_t, 8> ArgSpillOffsets(Layout.Args.size(), 0);
   uint64_t SpillOffset = Layout.SpillAreaOffset;
-  for (unsigned I = 0, E = Info.ABI.ArgTypes.size(); I != E; ++I) {
+  for (unsigned I = 0, E = Layout.Args.size(); I != E; ++I) {
     const goabi::ValueLayout &ArgLayout = Layout.Args[I];
     if (!ArgLayout.InRegs)
       continue;
@@ -9088,13 +9088,14 @@ static AArch64GoFormalArgInfo prepareAArch64GoFormalArguments(
     }
   };
 
+  unsigned NextLayoutIndex = 0;
   for (const Argument &Arg : F.args()) {
     if (Arg.hasNestAttr())
       continue;
 
-    int LayoutIndex = Info.ABI.ArgToLayout[Arg.getArgNo()];
-    if (LayoutIndex < 0)
+    if (NextLayoutIndex >= Layout.Args.size())
       report_fatal_error("AArch64 Go argument has no logical layout");
+    unsigned LayoutIndex = NextLayoutIndex++;
     const goabi::ValueLayout &ArgLayout = Layout.Args[LayoutIndex];
     uint64_t LogicalHomeOffset =
         ArgLayout.InRegs ? ArgSpillOffsets[LayoutIndex] : ArgLayout.StackOffset;
@@ -9134,6 +9135,8 @@ static AArch64GoFormalArgInfo prepareAArch64GoFormalArguments(
                             isAArch64GoFloatPiece(In.OrigTy));
     }
   }
+  if (NextLayoutIndex != Layout.Args.size())
+    report_fatal_error("AArch64 Go ABI layout has unmatched arguments");
 
   for (uint32_t Word : EntryArgs.PointerWords)
     if (!MatchedEntryArgWords.test(Word))
@@ -9890,7 +9893,7 @@ SDValue AArch64TargetLowering::LowerFormalArguments(
   }
 
   unsigned StackArgSize =
-      IsGo ? GoInfo->ABI.Layout.TotalStackSize : CCInfo.getStackSize();
+      IsGo ? GoInfo->Layout.TotalStackSize : CCInfo.getStackSize();
   bool TailCallOpt = MF.getTarget().Options.GuaranteedTailCallOpt;
   if (DoesCalleeRestoreStack(CallConv, TailCallOpt)) {
     // This is a non-standard ABI so by fiat I say we're allowed to make full
