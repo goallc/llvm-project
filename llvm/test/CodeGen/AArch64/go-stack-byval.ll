@@ -114,6 +114,10 @@ define goabiinternal i64 @read_stack_argument(
 ; CHECK-LABEL: read_stack_argument:
 ; CHECK: ldr x0, [sp, #8]
 ; CHECK-NEXT: ret
+; MIR-LABEL: name: read_stack_argument
+; MIR: frameInfo:
+; MIR: goABIStackArgsSize: 8
+; MIR: goABIArgSize: 136
 entry:
   %result = load i64, ptr %value, align 8
   ret i64 %result

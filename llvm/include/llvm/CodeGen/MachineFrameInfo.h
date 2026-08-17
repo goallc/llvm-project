@@ -294,6 +294,13 @@ private:
   /// It is only valid during and after prolog/epilog code insertion.
   uint64_t MaxCallFrameSize = ~UINT64_C(0);
 
+  /// Logical Go ABI input stack extent and complete argument/home area size.
+  /// Target formal-argument lowering records the values after CCState has
+  /// assigned every input. Late GoObj emission and return lowering consume the
+  /// cached result instead of reconstructing the calling convention from IR.
+  uint64_t GoABIStackArgsSize = ~UINT64_C(0);
+  uint64_t GoABIArgSize = ~UINT64_C(0);
+
   /// The number of bytes of callee saved registers that the target wants to
   /// report for the current function in the CodeView S_FRAMEPROC record.
   unsigned CVBytesOfCalleeSavedRegisters = 0;
@@ -702,6 +709,22 @@ public:
     return MaxCallFrameSize != ~UINT64_C(0);
   }
   void setMaxCallFrameSize(uint64_t S) { MaxCallFrameSize = S; }
+
+  bool hasGoABIArgSizes() const {
+    return GoABIStackArgsSize != ~UINT64_C(0) && GoABIArgSize != ~UINT64_C(0);
+  }
+  uint64_t getGoABIStackArgsSize() const {
+    assert(hasGoABIArgSizes() && "Go ABI argument sizes are not initialized");
+    return GoABIStackArgsSize;
+  }
+  uint64_t getGoABIArgSize() const {
+    assert(hasGoABIArgSizes() && "Go ABI argument sizes are not initialized");
+    return GoABIArgSize;
+  }
+  void setGoABIArgSizes(uint64_t StackArgsSize, uint64_t ArgSize) {
+    GoABIStackArgsSize = StackArgsSize;
+    GoABIArgSize = ArgSize;
+  }
 
   /// Returns how many bytes of callee-saved registers the target pushed in the
   /// prologue. Only used for debug info.

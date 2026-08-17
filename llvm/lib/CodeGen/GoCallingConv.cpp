@@ -252,51 +252,17 @@ static uint64_t getDirectValueSize(Type *Ty, const DataLayout &DL) {
   return DL.getTypeAllocSize(Ty);
 }
 
-ValueLayout getRegisterValueLayout(Type *Ty, const DataLayout &DL) {
-  ValueLayout Layout;
-  Layout.Ty = Ty;
-  Layout.InRegs = true;
-  Layout.Size = getDirectValueSize(Ty, DL);
-  Layout.Alignment = DL.getABITypeAlign(Ty);
-  return Layout;
-}
-
-ValueLayout getMemoryValueLayout(Type *Ty, uint64_t StackOffset,
-                                 Align Alignment, const DataLayout &DL) {
-  ValueLayout Layout;
-  Layout.Ty = Ty;
-  Layout.StackOffset = StackOffset;
-  Layout.Size = DL.getTypeAllocSize(Ty);
-  Layout.Alignment = Alignment;
-  return Layout;
-}
-
-uint64_t getFunctionArgumentLayouts(const Function &F, const DataLayout &DL,
-                                    SmallVectorImpl<Type *> &ArgTys,
-                                    SmallVectorImpl<ValueLayout> &ArgLayouts) {
+void getArgumentTypes(const Function &F, SmallVectorImpl<Type *> &ArgTys,
+                      SmallVectorImpl<int> &ArgToLayout) {
   ArgTys.clear();
-  ArgLayouts.clear();
-  uint64_t StackOffset = 0;
+  ArgToLayout.assign(F.arg_size(), -1);
   for (const Argument &Arg : F.args()) {
     if (Arg.hasNestAttr())
       continue;
-    if (!Arg.hasByValAttr()) {
-      ArgTys.push_back(Arg.getType());
-      ArgLayouts.push_back(getRegisterValueLayout(Arg.getType(), DL));
-      continue;
-    }
-
-    Type *Ty = Arg.getPointeeInMemoryValueType();
-    MaybeAlign ParamAlignment = Arg.getParamStackAlign();
-    if (!ParamAlignment)
-      ParamAlignment = Arg.getParamAlign();
-    Align Alignment = ParamAlignment.value_or(DL.getABITypeAlign(Ty));
-    StackOffset = alignToValue(StackOffset, Alignment);
-    ArgTys.push_back(Ty);
-    ArgLayouts.push_back(getMemoryValueLayout(Ty, StackOffset, Alignment, DL));
-    StackOffset += DL.getTypeAllocSize(Ty);
+    ArgToLayout[Arg.getArgNo()] = ArgTys.size();
+    ArgTys.push_back(Arg.hasByValAttr() ? Arg.getPointeeInMemoryValueType()
+                                        : Arg.getType());
   }
-  return StackOffset;
 }
 
 CallLayout computeCallLayout(ArrayRef<ValueLayout> Args, uint64_t StackArgsSize,
@@ -307,15 +273,19 @@ CallLayout computeCallLayout(ArrayRef<ValueLayout> Args, uint64_t StackArgsSize,
   Layout.Results.reserve(ResultTys.size());
   Layout.StackArgsSize = StackArgsSize;
 
-  for (const ValueLayout &Arg : Args) {
+  for (ValueLayout &Arg : Layout.Args) {
     if (!Arg.Ty)
       report_fatal_error("Go ABI argument layout has no logical type");
     uint64_t ExpectedSize = Arg.InRegs ? getDirectValueSize(Arg.Ty, DL)
                                        : DL.getTypeAllocSize(Arg.Ty);
-    if (Arg.Size != ExpectedSize || Arg.Alignment < DL.getABITypeAlign(Arg.Ty))
-      report_fatal_error("invalid preassigned Go ABI argument layout");
-    if (Arg.InRegs)
+    Arg.Size = ExpectedSize;
+    Align ABIAlignment = DL.getABITypeAlign(Arg.Ty);
+    if (Arg.InRegs) {
+      Arg.Alignment = ABIAlignment;
       continue;
+    }
+    if (Arg.Alignment < ABIAlignment)
+      report_fatal_error("invalid preassigned Go ABI argument layout");
     if (Arg.StackOffset % Arg.Alignment.value() != 0 ||
         Arg.StackOffset > StackArgsSize ||
         Arg.Size > StackArgsSize - Arg.StackOffset)
