@@ -452,48 +452,33 @@ static SDValue lowerX86GoReturn(const X86TargetLowering &TLI, SDValue Chain,
   return DAG.getNode(X86ISD::RET_GLUE, DL, MVT::Other, RetOps);
 }
 
-static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
-                              TargetLowering::CallLoweringInfo &CLI,
-                              SmallVectorImpl<SDValue> &InVals) {
+static goabi::CallLayout
+computeX86GoCallLayout(const X86TargetLowering &TLI,
+                       TargetLowering::CallLoweringInfo &CLI,
+                       ArrayRef<CCValAssign> ArgLocs, uint64_t StackArgsSize) {
   SelectionDAG &DAG = CLI.DAG;
-  SDLoc &DL = CLI.DL;
-  auto &Outs = CLI.Outs;
-  auto &OutVals = CLI.OutVals;
-  auto &Ins = CLI.Ins;
-  SDValue Chain = CLI.Chain;
-  SDValue Callee = CLI.Callee;
-  MachineFunction &MF = DAG.getMachineFunction();
-  const X86Subtarget &Subtarget = MF.getSubtarget<X86Subtarget>();
-  const X86RegisterInfo *RegInfo = Subtarget.getRegisterInfo();
-  MVT PtrVT = TLI.getPointerTy(DAG.getDataLayout());
+  const X86Subtarget &Subtarget =
+      DAG.getMachineFunction().getSubtarget<X86Subtarget>();
+  ArrayRef<ISD::OutputArg> Outs = CLI.Outs;
 
-  CLI.IsTailCall = false;
-  if (CLI.IsVarArg)
-    report_fatal_error("Go calling convention does not support varargs");
-
-  SmallVector<CCValAssign, 16> ArgLocs;
-  CCState CCInfo(CLI.CallConv, CLI.IsVarArg, MF, ArgLocs, *DAG.getContext());
-  CCInfo.AnalyzeArguments(Outs, CC_X86_64_Go);
   if (ArgLocs.size() != Outs.size())
     report_fatal_error("X86 Go call argument assignment count mismatch");
   for (auto [Index, VA] : llvm::enumerate(ArgLocs))
     if (VA.getValNo() != Index)
       report_fatal_error("X86 Go call argument assignments are not ordered");
 
-  SmallVector<int, 8> ArgLayoutMap;
+  SmallVector<int, 8> LayoutMap;
   SmallVector<Type *, 8> ArgTys =
-      getX86GoCallArgTypes(CLI.getArgs(), ArgLayoutMap);
+      getX86GoCallArgTypes(CLI.getArgs(), LayoutMap);
   SmallVector<goabi::ValueLayout, 8> ArgLayouts(ArgTys.size());
   for (unsigned I = 0; I != CLI.getArgs().size(); ++I) {
     if (CLI.getArgs()[I].IsNest)
       continue;
-    goabi::ValueLayout &ArgLayout = ArgLayouts[ArgLayoutMap[I]];
-    ArgLayout.Ty = ArgTys[ArgLayoutMap[I]];
+    goabi::ValueLayout &ArgLayout = ArgLayouts[LayoutMap[I]];
+    ArgLayout.Ty = ArgTys[LayoutMap[I]];
     ArgLayout.InRegs = !CLI.getArgs()[I].IsByVal;
   }
-  SmallVector<GoArgGroup<ISD::OutputArg>, 8> ArgGroups =
-      groupGoArgs(ArrayRef(Outs));
-  for (const GoArgGroup<ISD::OutputArg> &Group : ArgGroups) {
+  for (const GoArgGroup<ISD::OutputArg> &Group : groupGoArgs(Outs)) {
     if (Group.Index >= CLI.getArgs().size())
       continue;
     const TargetLowering::ArgListEntry &Arg = CLI.getArgs()[Group.Index];
@@ -502,15 +487,14 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
         report_fatal_error("invalid X86 Go closure-context call assignment");
       continue;
     }
-    unsigned LayoutIndex = ArgLayoutMap[Group.Index];
+    unsigned LayoutIndex = LayoutMap[Group.Index];
     bool IsByVal = Arg.IsByVal;
     if (Outs[Group.Start].Flags.isByVal() != IsByVal)
       report_fatal_error(
           "X86 Go call argument carrier disagrees with CC assignment");
-    for (unsigned I = Group.Start; I != Group.End; ++I) {
+    for (unsigned I = Group.Start; I != Group.End; ++I)
       if (IsByVal ? !ArgLocs[I].isMemLoc() : !ArgLocs[I].isRegLoc())
         report_fatal_error("invalid X86 Go call argument location");
-    }
     if (!IsByVal)
       continue;
     if (Group.End != Group.Start + 1 ||
@@ -522,102 +506,29 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
     ArgLayouts[LayoutIndex].Alignment =
         Outs[Group.Start].Flags.getNonZeroByValAlign();
   }
+
   SmallVector<Type *, 8> ResultTys;
-  goabi::getReturnTypes(CLI.RetTy,
-                        goabi::isGoCallingConv(CLI.CallConv) && CLI.CB &&
-                            goabi::hasTupleResultsAttr(*CLI.CB),
-                        ResultTys);
-  goabi::CallLayout Layout = goabi::computeCallLayout(
-      ArgLayouts, CCInfo.getStackSize(), ResultTys, DAG.getDataLayout(),
-      getX86GoABIConfig(Subtarget, CLI.CallConv));
+  goabi::getReturnTypes(
+      CLI.RetTy, CLI.CB && goabi::hasTupleResultsAttr(*CLI.CB), ResultTys);
+  return goabi::computeCallLayout(ArgLayouts, StackArgsSize, ResultTys,
+                                  DAG.getDataLayout(),
+                                  getX86GoABIConfig(Subtarget, CLI.CallConv));
+}
 
-  unsigned NumBytes = Layout.TotalStackSize;
-  Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, DL);
-
-  SDValue StackPtr;
-  if (NumBytes != 0)
-    StackPtr = DAG.getCopyFromReg(Chain, DL, RegInfo->getStackRegister(), PtrVT);
-
-  SmallVector<SDValue, 8> MemOpChains;
-  SmallVector<std::pair<Register, SDValue>, 8> RegsToPass;
-  MachineFunction::CallSiteInfo CSInfo;
-
-  for (const GoArgGroup<ISD::OutputArg> &Group : ArgGroups) {
-    if (Group.Index >= CLI.getArgs().size())
-      continue;
-
-    if (CLI.getArgs()[Group.Index].IsNest) {
-      assert(Group.End == Group.Start + 1 && "unexpected split nest arg");
-      RegsToPass.emplace_back(ArgLocs[Group.Start].getLocReg(),
-                              OutVals[Group.Start]);
-      continue;
-    }
-
-    const goabi::ValueLayout &ArgLayout = Layout.Args[ArgLayoutMap[Group.Index]];
-    bool IsByVal = CLI.getArgs()[Group.Index].IsByVal;
-    if (IsByVal) {
-      assert(StackPtr && "missing Go call stack pointer");
-      SDValue Addr =
-          DAG.getNode(ISD::ADD, DL, PtrVT, StackPtr,
-                      DAG.getIntPtrConstant(ArgLayout.StackOffset, DL));
-      Align Alignment = Outs[Group.Start].Flags.getNonZeroByValAlign();
-      MemOpChains.push_back(DAG.getMemcpy(
-          Chain, DL, Addr, OutVals[Group.Start],
-          DAG.getConstant(ArgLayout.Size, DL, PtrVT), Alignment, Alignment,
-          /*isVol=*/false, /*AlwaysInline=*/true, /*CI=*/nullptr, std::nullopt,
-          MachinePointerInfo::getStack(MF, ArgLayout.StackOffset),
-          MachinePointerInfo()));
-      continue;
-    }
-
-    for (unsigned I = Group.Start; I != Group.End; ++I) {
-      SDValue Arg = OutVals[I];
-      const CCValAssign &VA = ArgLocs[I];
-      MVT CopyVT = VA.getLocVT();
-      if (Arg.getSimpleValueType() != CopyVT)
-        Arg = DAG.getNode(ISD::ZERO_EXTEND, DL, CopyVT, Arg);
-      MCPhysReg PReg = VA.getLocReg();
-      RegsToPass.emplace_back(PReg, Arg);
-      if (DAG.getTarget().Options.EmitCallSiteInfo)
-        CSInfo.ArgRegPairs.emplace_back(PReg, I);
-    }
-  }
-
-  if (!MemOpChains.empty())
-    Chain = DAG.getNode(ISD::TokenFactor, DL, MVT::Other, MemOpChains);
-
-  bool IsImpCall = false;
-  if (DAG.getTarget().getCodeModel() != CodeModel::Large &&
-      (Callee->getOpcode() == ISD::GlobalAddress ||
-       Callee->getOpcode() == ISD::ExternalSymbol))
-    Callee =
-        TLI.lowerGlobalOrExternalForCall(Callee, DAG, /*IsImpCall=*/&IsImpCall);
-  else if (Subtarget.isTarget64BitILP32() && Callee.getValueType() == MVT::i32)
-    Callee = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i64, Callee);
-
-  SDValue InGlue;
-  for (const auto &[Reg, Val] : RegsToPass) {
-    Chain = DAG.getCopyToReg(Chain, DL, Reg, Val, InGlue);
-    InGlue = Chain.getValue(1);
-  }
-
-  SmallVector<SDValue, 16> Ops;
-  Ops.push_back(Chain);
-  Ops.push_back(Callee);
-  for (const auto &[Reg, Val] : RegsToPass)
-    Ops.push_back(DAG.getRegister(Reg, Val.getValueType()));
-  Ops.push_back(DAG.getRegisterMask(RegInfo->getCallPreservedMask(MF, CLI.CallConv)));
-  if (InGlue.getNode())
-    Ops.push_back(InGlue);
-
-  SDVTList NodeTys = DAG.getVTList(MVT::Other, MVT::Glue);
-  Chain = DAG.getNode(IsImpCall ? X86ISD::IMP_CALL : X86ISD::CALL, DL, NodeTys,
-                      Ops);
-  DAG.addCallSiteInfo(Chain.getNode(), std::move(CSInfo));
-  InGlue = Chain.getValue(1);
-
+static SDValue lowerX86GoCallResults(const X86TargetLowering &TLI,
+                                     SDValue Chain, SDValue InGlue,
+                                     ArrayRef<ISD::InputArg> Ins,
+                                     const goabi::CallLayout &Layout,
+                                     unsigned NumBytes, const SDLoc &DL,
+                                     SelectionDAG &DAG,
+                                     SmallVectorImpl<SDValue> &InVals) {
+  MachineFunction &MF = DAG.getMachineFunction();
+  const X86Subtarget &Subtarget = MF.getSubtarget<X86Subtarget>();
+  const X86RegisterInfo *RegInfo = Subtarget.getRegisterInfo();
+  MVT PtrVT = TLI.getPointerTy(DAG.getDataLayout());
   SmallVector<SDValue, 8> ResultVals(Ins.size());
-  for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
+
+  for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(Ins)) {
     const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
     if (!ResultLayout.InRegs)
       continue;
@@ -636,26 +547,17 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
         ++FPPiece;
       else
         ++IntPiece;
-      if (In.VT != CopyVT)
-        ResultVals[I] = DAG.getNode(ISD::TRUNCATE, DL, In.VT, Val);
-      else
-        ResultVals[I] = Val;
+      ResultVals[I] =
+          In.VT == CopyVT ? Val : DAG.getNode(ISD::TRUNCATE, DL, In.VT, Val);
     }
   }
 
-  // Read every register result before introducing stack loads into the chain.
-  // A result that does not fit in the remaining register budget is placed on
-  // the stack without consuming that budget, so a later result can still be
-  // register-assigned. Interleaving stack loads with glued physical-register
-  // copies can create a cyclic scheduler dependency at statepoints.
-  //
-  // Keep the call sequence active while reading stack results. The load chain
-  // is after the call, so the physical SP is the current post-growth Go stack;
-  // CALLSEQ_END cannot release the outgoing frame until every result is read.
-  bool HasStackResults =
-      llvm::any_of(groupGoArgs(ArrayRef(Ins)), [&](const auto &Group) {
-        return !Layout.Results[Group.Index].InRegs;
-      });
+  // Register results must be read before stack result loads. Keeping the call
+  // sequence active also keeps the outgoing Go frame, and therefore the
+  // post-growth result addresses, valid until every stack result is consumed.
+  bool HasStackResults = llvm::any_of(groupGoArgs(Ins), [&](const auto &Group) {
+    return !Layout.Results[Group.Index].InRegs;
+  });
   SDValue ResultStackPtr;
   if (HasStackResults) {
     ResultStackPtr = DAG.getCopyFromReg(Chain, DL, RegInfo->getStackRegister(),
@@ -663,20 +565,18 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
     Chain = ResultStackPtr.getValue(1);
     InGlue = ResultStackPtr.getValue(2);
   }
-  for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(ArrayRef(Ins))) {
+  for (const GoArgGroup<ISD::InputArg> &Group : groupGoArgs(Ins)) {
     const goabi::ValueLayout &ResultLayout = Layout.Results[Group.Index];
     if (ResultLayout.InRegs)
       continue;
     for (unsigned I = Group.Start; I != Group.End; ++I) {
       const ISD::InputArg &In = Ins[I];
-      SDValue Addr =
-          DAG.getNode(ISD::ADD, DL, PtrVT, ResultStackPtr,
-                      DAG.getIntPtrConstant(ResultLayout.StackOffset + In.PartOffset,
-                                            DL));
-      SDValue Load = loadX86GoStackPiece(
-          DAG, Chain, DL, In.VT, In.ArgVT, Addr,
-          MachinePointerInfo::getStack(
-              MF, ResultLayout.StackOffset + In.PartOffset));
+      uint64_t Offset = ResultLayout.StackOffset + In.PartOffset;
+      SDValue Addr = DAG.getNode(ISD::ADD, DL, PtrVT, ResultStackPtr,
+                                 DAG.getIntPtrConstant(Offset, DL));
+      SDValue Load =
+          loadX86GoStackPiece(DAG, Chain, DL, In.VT, In.ArgVT, Addr,
+                              MachinePointerInfo::getStack(MF, Offset));
       Chain = Load.getValue(1);
       ResultVals[I] = Load;
     }
@@ -684,7 +584,6 @@ static SDValue lowerX86GoCall(const X86TargetLowering &TLI,
 
   Chain = DAG.getCALLSEQ_END(Chain, NumBytes, 0,
                              HasStackResults ? SDValue() : InGlue, DL);
-
   InVals.append(ResultVals.begin(), ResultVals.end());
   return Chain;
 }
@@ -1977,14 +1876,16 @@ static bool hasCalleePopSRet(const SmallVectorImpl<T> &Args,
 /// Make a copy of an aggregate at address specified by "Src" to address
 /// "Dst" with size and alignment information specified by the specific
 /// parameter attribute. The copy will be passed as a byval function parameter.
-static SDValue CreateCopyOfByValArgument(SDValue Src, SDValue Dst,
-                                         SDValue Chain, ISD::ArgFlagsTy Flags,
-                                         SelectionDAG &DAG, const SDLoc &dl) {
+static SDValue
+CreateCopyOfByValArgument(SDValue Src, SDValue Dst, SDValue Chain,
+                          ISD::ArgFlagsTy Flags, SelectionDAG &DAG,
+                          const SDLoc &dl,
+                          MachinePointerInfo DstInfo = MachinePointerInfo()) {
   SDValue SizeNode = DAG.getIntPtrConstant(Flags.getByValSize(), dl);
   Align Alignment = Flags.getNonZeroByValAlign();
   return DAG.getMemcpy(Chain, dl, Dst, Src, SizeNode, Alignment, Alignment,
                        /*isVolatile*/ false, /*AlwaysInline=*/true,
-                       /*CI=*/nullptr, std::nullopt, MachinePointerInfo(),
+                       /*CI=*/nullptr, std::nullopt, DstInfo,
                        MachinePointerInfo());
 }
 
@@ -2692,7 +2593,9 @@ SDValue X86TargetLowering::LowerMemOpCallTo(SDValue Chain, SDValue StackPtr,
   PtrOff = DAG.getNode(ISD::ADD, dl, getPointerTy(DAG.getDataLayout()),
                        StackPtr, PtrOff);
   if (isByVal)
-    return CreateCopyOfByValArgument(Arg, PtrOff, Chain, Flags, DAG, dl);
+    return CreateCopyOfByValArgument(
+        Arg, PtrOff, Chain, Flags, DAG, dl,
+        MachinePointerInfo::getStack(DAG.getMachineFunction(), LocMemOffset));
 
   MaybeAlign Alignment;
   if (Subtarget.isTargetWindowsMSVC() && !Subtarget.is64Bit() &&
@@ -2792,13 +2695,10 @@ X86TargetLowering::ByValCopyKind X86TargetLowering::ByValNeedsCopyForTailCall(
     return CopyViaTemp;
 }
 
-SDValue
-X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
-                             SmallVectorImpl<SDValue> &InVals) const {
-  if (goabi::isGoCallingConv(CLI.CallConv))
-    return lowerX86GoCall(*this, CLI, InVals);
-  SelectionDAG &DAG                     = CLI.DAG;
-  SDLoc &dl                             = CLI.DL;
+SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
+                                     SmallVectorImpl<SDValue> &InVals) const {
+  SelectionDAG &DAG = CLI.DAG;
+  SDLoc &dl = CLI.DL;
   SmallVectorImpl<ISD::OutputArg> &Outs = CLI.Outs;
   SmallVectorImpl<SDValue> &OutVals     = CLI.OutVals;
   SmallVectorImpl<ISD::InputArg> &Ins   = CLI.Ins;
@@ -2810,7 +2710,15 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   const auto *CB                        = CLI.CB;
 
   MachineFunction &MF = DAG.getMachineFunction();
-  bool Is64Bit        = Subtarget.is64Bit();
+  bool Is64Bit = Subtarget.is64Bit();
+  bool IsGo = goabi::isGoCallingConv(CallConv);
+  if (IsGo) {
+    isTailCall = false;
+    if (!Is64Bit)
+      report_fatal_error("Go calling convention requires x86-64");
+    if (isVarArg)
+      report_fatal_error("Go calling convention does not support varargs");
+  }
   bool IsWin64 = Subtarget.isCallingConvWin64(CallConv);
   bool ShouldGuaranteeTCO = shouldGuaranteeTCO(
       CallConv, MF.getTarget().Options.GuaranteedTailCallOpt);
@@ -2853,6 +2761,11 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
 
   CCInfo.AnalyzeArguments(Outs, CC_X86);
 
+  goabi::CallLayout GoLayout;
+  if (IsGo)
+    GoLayout =
+        computeX86GoCallLayout(*this, CLI, ArgLocs, CCInfo.getStackSize());
+
   // In vectorcall calling convention a second pass is required for the HVA
   // types.
   if (CallingConv::X86_VectorCall == CallConv) {
@@ -2887,7 +2800,8 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
          "Var args not supported with calling convention fastcc, ghc or hipe");
 
   // Get a count of how many bytes are to be pushed on the stack.
-  unsigned NumBytes = CCInfo.getAlignedCallFrameSize();
+  unsigned NumBytes =
+      IsGo ? GoLayout.TotalStackSize : CCInfo.getAlignedCallFrameSize();
   if (IsSibcall)
     // This is a sibcall. The memory operands are available in caller's
     // own caller's stack.
@@ -3468,6 +3382,10 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   if (CLI.CB)
     if (MDNode *HeapAlloc = CLI.CB->getMetadata("heapallocsite"))
       DAG.addHeapAllocSite(Chain.getNode(), HeapAlloc);
+
+  if (IsGo)
+    return lowerX86GoCallResults(*this, Chain, InGlue, Ins, GoLayout, NumBytes,
+                                 dl, DAG, InVals);
 
   // Create the CALLSEQ_END node.
   unsigned NumBytesForCalleeToPop = 0; // Callee pops nothing.
