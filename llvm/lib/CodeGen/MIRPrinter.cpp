@@ -374,6 +374,10 @@ static void convertMFI(ModuleSlotTracker &MST, yaml::MachineFrameInfo &YamlMFI,
   YamlMFI.FramePointerPolicy = MFI.getFramePointerPolicy();
   YamlMFI.MaxCallFrameSize = MFI.isMaxCallFrameSizeComputed()
     ? MFI.getMaxCallFrameSize() : ~0u;
+  if (MFI.hasGoABIArgSizes()) {
+    YamlMFI.GoABIStackArgsSize = MFI.getGoABIStackArgsSize();
+    YamlMFI.GoABIArgSize = MFI.getGoABIArgSize();
+  }
   YamlMFI.CVBytesOfCalleeSavedRegisters =
       MFI.getCVBytesOfCalleeSavedRegisters();
   YamlMFI.HasOpaqueSPAdjustment = MFI.hasOpaqueSPAdjustment();

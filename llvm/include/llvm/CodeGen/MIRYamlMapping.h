@@ -732,6 +732,8 @@ struct MachineFrameInfo {
   StringValue StackProtector;
   StringValue FunctionContext;
   unsigned MaxCallFrameSize = ~0u; ///< ~0u means: not computed yet.
+  uint64_t GoABIStackArgsSize = ~UINT64_C(0);
+  uint64_t GoABIArgSize = ~UINT64_C(0);
   unsigned CVBytesOfCalleeSavedRegisters = 0;
   bool HasOpaqueSPAdjustment = false;
   bool HasVAStart = false;
@@ -755,6 +757,8 @@ struct MachineFrameInfo {
            StackProtector == Other.StackProtector &&
            FunctionContext == Other.FunctionContext &&
            MaxCallFrameSize == Other.MaxCallFrameSize &&
+           GoABIStackArgsSize == Other.GoABIStackArgsSize &&
+           GoABIArgSize == Other.GoABIArgSize &&
            CVBytesOfCalleeSavedRegisters ==
                Other.CVBytesOfCalleeSavedRegisters &&
            HasOpaqueSPAdjustment == Other.HasOpaqueSPAdjustment &&
@@ -785,6 +789,9 @@ template <> struct MappingTraits<MachineFrameInfo> {
     YamlIO.mapOptional("functionContext", MFI.FunctionContext,
                        StringValue()); // Don't print it out when it's empty.
     YamlIO.mapOptional("maxCallFrameSize", MFI.MaxCallFrameSize, (unsigned)~0);
+    YamlIO.mapOptional("goABIStackArgsSize", MFI.GoABIStackArgsSize,
+                       ~UINT64_C(0));
+    YamlIO.mapOptional("goABIArgSize", MFI.GoABIArgSize, ~UINT64_C(0));
     YamlIO.mapOptional("cvBytesOfCalleeSavedRegisters",
                        MFI.CVBytesOfCalleeSavedRegisters, 0U);
     YamlIO.mapOptional("hasOpaqueSPAdjustment", MFI.HasOpaqueSPAdjustment,
