@@ -9033,8 +9033,8 @@ static AArch64GoFormalArgInfo prepareAArch64GoFormalArguments(
   goabi::ABIConfig ABIConfig =
       getAArch64GoABIConfig(TLI, Subtarget, F.getCallingConv());
   AArch64GoFormalArgInfo Info;
-  Info.ABI = goabi::computeFormalArgLayout(
-      F, Ins, ArgLocs, StackArgsSize, DAG.getDataLayout(), ABIConfig);
+  Info.ABI = goabi::computeFormalArgLayout(F, Ins, ArgLocs, StackArgsSize,
+                                           DAG.getDataLayout(), ABIConfig);
   const goabi::CallLayout &Layout = Info.ABI.Layout;
   MFI.setGoABIArgSizes(Layout.StackArgsSize, Layout.ArgSize);
 
@@ -9177,8 +9177,7 @@ static SDValue lowerAArch64GoReturn(const AArch64TargetLowering &TLI,
       unsigned Piece =
           IsFP ? FPPieces[ResultIndex]++ : IntPieces[ResultIndex]++;
       unsigned PReg = getAArch64GoPhysReg(
-          Out.VT, Out.OrigTy,
-          ResultLayout.IntRegStart + (IsFP ? 0 : Piece),
+          Out.VT, Out.OrigTy, ResultLayout.IntRegStart + (IsFP ? 0 : Piece),
           ResultLayout.FPRegStart + (IsFP ? Piece : 0));
       RetRegs.emplace_back(PReg, Val);
       continue;
@@ -9191,8 +9190,7 @@ static SDValue lowerAArch64GoReturn(const AArch64TargetLowering &TLI,
         /*IsImmutable=*/false);
     if (MF.getInfo<AArch64FunctionInfo>()->hasGoABI0FrameIndex())
       MFI.setIsAliasedObjectIndex(FI, true);
-    SDValue Addr =
-        DAG.getFrameIndex(FI, TLI.getPointerTy(DAG.getDataLayout()));
+    SDValue Addr = DAG.getFrameIndex(FI, TLI.getPointerTy(DAG.getDataLayout()));
     MemOps.push_back(
         storeAArch64GoStackPiece(DAG, Chain, DL, Val, Out.ArgVT, Addr,
                                  MachinePointerInfo::getFixedStack(MF, FI)));
@@ -9237,11 +9235,9 @@ static SDValue lowerAArch64GoCallResults(const AArch64TargetLowering &TLI,
       continue;
     MVT CopyVT = getAArch64GoCopyVT(In.VT);
     bool IsFP = isAArch64GoFloatPiece(In.OrigTy);
-    unsigned Piece =
-        IsFP ? FPPieces[ResultIndex]++ : IntPieces[ResultIndex]++;
+    unsigned Piece = IsFP ? FPPieces[ResultIndex]++ : IntPieces[ResultIndex]++;
     unsigned PReg = getAArch64GoPhysReg(
-        In.VT, In.OrigTy,
-        ResultLayout.IntRegStart + (IsFP ? 0 : Piece),
+        In.VT, In.OrigTy, ResultLayout.IntRegStart + (IsFP ? 0 : Piece),
         ResultLayout.FPRegStart + (IsFP ? Piece : 0));
     SDValue Val = DAG.getCopyFromReg(Chain, DL, PReg, CopyVT, InGlue);
     Chain = Val.getValue(1);
@@ -9553,8 +9549,8 @@ SDValue AArch64TargetLowering::LowerFormalArguments(
 
   std::optional<AArch64GoFormalArgInfo> GoInfo;
   if (IsGo)
-    GoInfo = prepareAArch64GoFormalArguments(
-        *this, MF, Ins, ArgLocs, CCInfo.getStackSize(), DAG);
+    GoInfo = prepareAArch64GoFormalArguments(*this, MF, Ins, ArgLocs,
+                                             CCInfo.getStackSize(), DAG);
 
   SMEAttrs Attrs = FuncInfo->getSMEFnAttrs();
   bool IsLocallyStreaming =
@@ -9573,8 +9569,8 @@ SDValue AArch64TargetLowering::LowerFormalArguments(
             ArgIndex >= GoInfo->HomeFIs.size() ||
             GoInfo->HomeFIs[ArgIndex] == INT_MAX)
           report_fatal_error("AArch64 Go byval argument has no incoming home");
-        InVals.push_back(DAG.getFrameIndex(
-            GoInfo->HomeFIs[ArgIndex], getPointerTy(DAG.getDataLayout())));
+        InVals.push_back(DAG.getFrameIndex(GoInfo->HomeFIs[ArgIndex],
+                                           getPointerTy(DAG.getDataLayout())));
         continue;
       }
       // Byval is used for HFAs in the PCS, but the system should work in a
@@ -9893,8 +9889,8 @@ SDValue AArch64TargetLowering::LowerFormalArguments(
     }
   }
 
-  unsigned StackArgSize = IsGo ? GoInfo->ABI.Layout.TotalStackSize
-                               : CCInfo.getStackSize();
+  unsigned StackArgSize =
+      IsGo ? GoInfo->ABI.Layout.TotalStackSize : CCInfo.getStackSize();
   bool TailCallOpt = MF.getTarget().Options.GuaranteedTailCallOpt;
   if (DoesCalleeRestoreStack(CallConv, TailCallOpt)) {
     // This is a non-standard ABI so by fiat I say we're allowed to make full

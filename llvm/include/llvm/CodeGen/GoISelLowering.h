@@ -26,17 +26,16 @@ struct FormalArgLayout {
 
 /// Derive the logical Go function layout from LLVM formal arguments and the
 /// physical locations assigned by the target calling convention.
-FormalArgLayout computeFormalArgLayout(
-    const Function &F, ArrayRef<ISD::InputArg> Ins,
-    ArrayRef<CCValAssign> ArgLocs, uint64_t StackArgsSize,
-    const DataLayout &DL, const ABIConfig &Config);
+FormalArgLayout
+computeFormalArgLayout(const Function &F, ArrayRef<ISD::InputArg> Ins,
+                       ArrayRef<CCValAssign> ArgLocs, uint64_t StackArgsSize,
+                       const DataLayout &DL, const ABIConfig &Config);
 
 /// Derive the logical Go call layout from the original LLVM call operands and
 /// the physical locations assigned by the target calling convention.
 CallLayout computeCallLayout(TargetLowering::CallLoweringInfo &CLI,
                              ArrayRef<CCValAssign> ArgLocs,
-                             uint64_t StackArgsSize,
-                             const ABIConfig &Config);
+                             uint64_t StackArgsSize, const ABIConfig &Config);
 
 } // namespace goabi
 } // namespace llvm

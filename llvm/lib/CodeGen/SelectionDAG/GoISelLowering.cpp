@@ -17,11 +17,11 @@ using namespace llvm;
 namespace {
 
 template <typename ArgT, typename GetLogicalArg>
-static void applyArgumentAssignments(
-    ArrayRef<ArgT> Pieces, ArrayRef<CCValAssign> ArgLocs,
-    MutableArrayRef<goabi::ValueLayout> ArgLayouts,
-    MutableArrayRef<int> ArgToLayout, GetLogicalArg GetArg,
-    const DataLayout &DL) {
+static void
+applyArgumentAssignments(ArrayRef<ArgT> Pieces, ArrayRef<CCValAssign> ArgLocs,
+                         MutableArrayRef<goabi::ValueLayout> ArgLayouts,
+                         MutableArrayRef<int> ArgToLayout, GetLogicalArg GetArg,
+                         const DataLayout &DL) {
   if (ArgLocs.size() != Pieces.size())
     report_fatal_error("Go argument assignment count mismatch");
 
@@ -32,8 +32,7 @@ static void applyArgumentAssignments(
 
     const ArgT &Piece = Pieces[PieceIndex];
     unsigned ArgIndex = Piece.OrigArgIndex;
-    if (ArgIndex == ISD::InputArg::NoArgIndex ||
-        ArgIndex >= ArgToLayout.size())
+    if (ArgIndex == ISD::InputArg::NoArgIndex || ArgIndex >= ArgToLayout.size())
       report_fatal_error("Go argument piece has no logical argument");
 
     const auto &Arg = GetArg(ArgIndex);
@@ -80,10 +79,11 @@ struct LogicalArgView {
 
 } // namespace
 
-goabi::FormalArgLayout goabi::computeFormalArgLayout(
-    const Function &F, ArrayRef<ISD::InputArg> Ins,
-    ArrayRef<CCValAssign> ArgLocs, uint64_t StackArgsSize,
-    const DataLayout &DL, const ABIConfig &Config) {
+goabi::FormalArgLayout
+goabi::computeFormalArgLayout(const Function &F, ArrayRef<ISD::InputArg> Ins,
+                              ArrayRef<CCValAssign> ArgLocs,
+                              uint64_t StackArgsSize, const DataLayout &DL,
+                              const ABIConfig &Config) {
   FormalArgLayout Info;
   getArgumentTypes(F, Info.ArgTypes, Info.ArgToLayout);
 
@@ -110,10 +110,10 @@ goabi::FormalArgLayout goabi::computeFormalArgLayout(
   return Info;
 }
 
-goabi::CallLayout goabi::computeCallLayout(
-    TargetLowering::CallLoweringInfo &CLI,
-    ArrayRef<CCValAssign> ArgLocs, uint64_t StackArgsSize,
-    const ABIConfig &Config) {
+goabi::CallLayout
+goabi::computeCallLayout(TargetLowering::CallLoweringInfo &CLI,
+                         ArrayRef<CCValAssign> ArgLocs, uint64_t StackArgsSize,
+                         const ABIConfig &Config) {
   const TargetLowering::ArgListTy &Args = CLI.getArgs();
   SmallVector<int, 8> ArgToLayout(Args.size(), -1);
   SmallVector<ValueLayout, 8> ArgLayouts;
@@ -133,12 +133,12 @@ goabi::CallLayout goabi::computeCallLayout(
     const TargetLowering::ArgListEntry &Arg = Args[I];
     return LogicalArgView{Arg.IsNest, Arg.IsByVal};
   };
-  applyArgumentAssignments(ArrayRef(CLI.Outs), ArgLocs, ArgLayouts,
-                           ArgToLayout, GetArg, CLI.DAG.getDataLayout());
+  applyArgumentAssignments(ArrayRef(CLI.Outs), ArgLocs, ArgLayouts, ArgToLayout,
+                           GetArg, CLI.DAG.getDataLayout());
 
   SmallVector<Type *, 8> ResultTys;
-  getReturnTypes(CLI.RetTy,
-                 CLI.CB && goabi::hasTupleResultsAttr(*CLI.CB), ResultTys);
+  getReturnTypes(CLI.RetTy, CLI.CB && goabi::hasTupleResultsAttr(*CLI.CB),
+                 ResultTys);
   return goabi::computeCallLayout(ArgLayouts, StackArgsSize, ResultTys,
                                   CLI.DAG.getDataLayout(), Config);
 }
