@@ -23,9 +23,15 @@ entry:
   ret i64 %value
 }
 
-define goabi0 void @"abi0_pointer_arguments<ABI0>"(ptr %first, ptr %second, ptr %third)
+define goabi0 void @"abi0_pointer_arguments<ABI0>"(
+    ptr byval(ptr) align 8 %first.home,
+    ptr byval(ptr) align 8 %second.home,
+    ptr byval(ptr) align 8 %third.home)
     "frame-pointer"="non-leaf" {
 entry:
+  %first = load ptr, ptr %first.home, align 8
+  %second = load ptr, ptr %second.home, align 8
+  %third = load ptr, ptr %third.home, align 8
   call goabiinternal void @use_three_pointers(
       ptr %first, ptr %second, ptr %third)
   ret void
@@ -52,10 +58,17 @@ entry:
 
 define goabiinternal ptr @scalar_stack_argument(
     i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5,
-    i64 %a6, i64 %a7, i64 %a8, i64 %a9, i64 %a10,
-    i64 %a11, i64 %a12, i64 %a13, i64 %a14, i64 %a15,
-    ptr %pointer) {
+    i64 %a6, i64 %a7, i64 %a8,
+    ptr byval(i64) align 8 %a9.home,
+    ptr byval(i64) align 8 %a10.home,
+    ptr byval(i64) align 8 %a11.home,
+    ptr byval(i64) align 8 %a12.home,
+    ptr byval(i64) align 8 %a13.home,
+    ptr byval(i64) align 8 %a14.home,
+    ptr byval(i64) align 8 %a15.home,
+    ptr byval(ptr) align 8 %pointer.home) {
 entry:
+  %pointer = load ptr, ptr %pointer.home, align 8
   %buf = alloca [5000 x i8], align 8
   %slot = getelementptr inbounds [5000 x i8], ptr %buf, i64 0, i64 4999
   store volatile i8 1, ptr %slot, align 1
@@ -64,10 +77,16 @@ entry:
 
 define goabiinternal { ptr, ptr } @aggregate_stack_argument(
     i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5,
-    i64 %a6, i64 %a7, i64 %a8, i64 %a9, i64 %a10,
-    i64 %a11, i64 %a12, i64 %a13, %pointer.aggregate %value)
+    i64 %a6, i64 %a7, i64 %a8,
+    ptr byval(i64) align 8 %a9.home,
+    ptr byval(i64) align 8 %a10.home,
+    ptr byval(i64) align 8 %a11.home,
+    ptr byval(i64) align 8 %a12.home,
+    ptr byval(i64) align 8 %a13.home,
+    ptr byval(%pointer.aggregate) align 8 %value.home)
  "go_results_tuple" {
 entry:
+  %value = load %pointer.aggregate, ptr %value.home, align 8
   %buf = alloca [5000 x i8], align 8
   %slot = getelementptr inbounds [5000 x i8], ptr %buf, i64 0, i64 4999
   store volatile i8 1, ptr %slot, align 1

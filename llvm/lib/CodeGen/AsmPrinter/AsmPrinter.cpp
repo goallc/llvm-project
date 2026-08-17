@@ -226,54 +226,14 @@ public:
   void allUsesReplacedWith(Value *V2) override;
 };
 
-static uint32_t getGoObjArgSize(const Function &F, const DataLayout &DL,
-                                const Triple &TT) {
+static uint32_t getGoObjArgSize(const MachineFunction &MF) {
+  const Function &F = MF.getFunction();
   if (!goabi::isGoCallingConv(F.getCallingConv()))
     return 0;
-
-  goabi::ABIConfig Config;
-  if (TT.getArch() == Triple::x86_64) {
-    static constexpr unsigned X86GoIntRegs[] = {0, 1, 2, 3, 4, 5, 6, 7, 8};
-    static constexpr unsigned X86GoFPRegs[] = {0, 1, 2,  3,  4,  5,  6, 7,
-                                               8, 9, 10, 11, 12, 13, 14};
-    if (goabi::isGoABI0CallingConv(F.getCallingConv()))
-      Config = {ArrayRef<unsigned>(),
-                ArrayRef<unsigned>(),
-                8,
-                Align(8),
-                Align(8),
-                false};
-    else
-      Config = {X86GoIntRegs, X86GoFPRegs, 8, Align(8), Align(8), false};
-  } else if (TT.getArch() == Triple::aarch64) {
-    static constexpr unsigned AArch64GoIntRegs[] = {
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
-    static constexpr unsigned AArch64GoFPRegs[] = {
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
-    if (goabi::isGoABI0CallingConv(F.getCallingConv()))
-      Config = {ArrayRef<unsigned>(),
-                ArrayRef<unsigned>(),
-                8,
-                Align(8),
-                Align(16),
-                false};
-    else
-      Config = {AArch64GoIntRegs, AArch64GoFPRegs, 8,
-                Align(8),         Align(16),       false};
-  } else {
-    return 0;
-  }
-
-  SmallVector<Type *, 8> ArgTys;
-  for (const Argument &Arg : F.args())
-    if (!Arg.hasNestAttr())
-      ArgTys.push_back(Arg.getType());
-
-  SmallVector<Type *, 8> ResultTys;
-  goabi::getReturnTypes(F.getReturnType(), goabi::hasTupleResultsAttr(F),
-                        ResultTys);
-  uint64_t Size =
-      goabi::computeCallLayout(ArgTys, ResultTys, DL, Config).ArgSize;
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+  if (!MFI.hasGoABIArgSizes())
+    report_fatal_error("GoObj function is missing lowered Go ABI frame info");
+  uint64_t Size = MFI.getGoABIArgSize();
   if (Size > std::numeric_limits<uint32_t>::max())
     report_fatal_error("GoObj function argument size exceeds uint32 limit");
   return static_cast<uint32_t>(Size);
@@ -1076,8 +1036,7 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
       continue;
     bool HasABI0Suffix = F.getName().ends_with(GoObj::ABI0SymbolSuffix);
     bool IsABI0 = goabi::isGoABI0CallingConv(F.getCallingConv());
-    bool IsABIInternal =
-        goabi::isGoABIInternalCallingConv(F.getCallingConv());
+    bool IsABIInternal = goabi::isGoABIInternalCallingConv(F.getCallingConv());
     if (HasABI0Suffix != IsABI0)
       report_fatal_error(
           "Go ABI0 calling convention and <ABI0> symbol suffix disagree");
@@ -3766,9 +3725,7 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
       report_fatal_error("GoObj function stack size exceeds uint32 limit");
     OutContext.setGoObjSymbolStackSize(CurrentFnSym,
                                        static_cast<uint32_t>(StackSize));
-    OutContext.setGoObjSymbolArgSize(
-        CurrentFnSym,
-        getGoObjArgSize(F, MF.getDataLayout(), TM.getTargetTriple()));
+    OutContext.setGoObjSymbolArgSize(CurrentFnSym, getGoObjArgSize(MF));
     OutContext.setGoObjSymbolHasFramePointer(
         CurrentFnSym, MF.getSubtarget().getFrameLowering()->hasFP(MF));
     OutContext.setGoObjSymbolAsyncUnsafe(CurrentFnSym,

@@ -106,12 +106,16 @@ SmallBitVector getPaddingPieces(Type *Ty);
 void getReturnTypes(Type *ReturnType, bool TupleResults,
                     SmallVectorImpl<Type *> &ResultTys);
 
-CallLayout computeCallLayout(ArrayRef<Type *> ArgTys,
+/// Complete the Go ABI frame layout after the target calling-convention rules
+/// have assigned every input to either registers or a stack offset and
+/// computed the input stack extent. This helper does not classify inputs.
+/// Result classification remains here until stack results have an explicit IR
+/// carrier of their own.
+CallLayout computeCallLayout(ArrayRef<ValueLayout> Args, uint64_t StackArgsSize,
                              ArrayRef<Type *> ResultTys, const DataLayout &DL,
                              const ABIConfig &Config);
 
-EntryArgsInfo computeEntryArgsInfo(ArrayRef<Type *> ArgTys,
-                                   const CallLayout &Layout,
+EntryArgsInfo computeEntryArgsInfo(const CallLayout &Layout,
                                    const DataLayout &DL,
                                    const ABIConfig &Config);
 

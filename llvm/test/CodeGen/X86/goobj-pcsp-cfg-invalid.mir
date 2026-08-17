@@ -22,6 +22,8 @@
 name: inconsistent
 tracksRegLiveness: true
 frameInfo:
+  goABIStackArgsSize: 0
+  goABIArgSize: 0
   stackSize: 16
   adjustsStack: true
   hasCalls: true
@@ -58,6 +60,9 @@ body: |
 ---
 name: unreachable
 tracksRegLiveness: true
+frameInfo:
+  goABIStackArgsSize: 0
+  goABIArgSize: 0
 body: |
   bb.0:
     RET64

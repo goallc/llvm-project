@@ -105,6 +105,25 @@ getArgumentValueOffset(const Value *V, const DataLayout &DL) {
   return std::pair(Arg, Offset);
 }
 
+static SDValue getStatepointGCValue(const Value *V,
+                                    SelectionDAGBuilder &Builder) {
+  // A typed byval argument denotes its incoming Go stack home, not a heap
+  // pointer stored in that home. Always use the canonical fixed frame index
+  // for this address. In particular, do not let an earlier gc.relocate or a
+  // larger live set turn the address into an ordinary pointer spill: stack
+  // growth rematerializes frame-index addresses, while the separate object
+  // layout describes which words in the home are GC roots.
+  if (const auto *Arg = dyn_cast<Argument>(V);
+      Arg && Arg->hasByValAttr() &&
+      goabi::isGoCallingConv(
+          Builder.DAG.getMachineFunction().getFunction().getCallingConv())) {
+    int FI = Builder.FuncInfo.getArgumentFrameIndex(Arg);
+    if (FI != INT_MAX)
+      return Builder.DAG.getFrameIndex(FI, Builder.getFrameIndexTy());
+  }
+  return Builder.getValue(V);
+}
+
 static void pushStackMapConstant(SmallVectorImpl<SDValue>& Ops,
                                  SelectionDAGBuilder &Builder, uint64_t Value) {
   SDLoc L = Builder.getCurSDLoc();
@@ -489,7 +508,7 @@ lowerIncomingStatepointValue(SDValue Incoming, bool RequireSpillSlot,
                              SmallVectorImpl<SDValue> &Ops,
                              SmallVectorImpl<MachineMemOperand *> &MemRefs,
                              SelectionDAGBuilder &Builder) {
-  
+
   if (willLowerDirectly(Incoming)) {
     if (FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(Incoming)) {
       // This handles allocas as arguments to the statepoint (this is only
@@ -507,7 +526,7 @@ lowerIncomingStatepointValue(SDValue Incoming, bool RequireSpillSlot,
     }
 
     assert(Incoming.getValueType().getSizeInBits() <= 64);
-    
+
     if (Incoming.isUndef()) {
       // Put an easily recognized constant that's unlikely to be a valid
       // value so that uses of undef by the consumer of the stackmap is
@@ -533,8 +552,6 @@ lowerIncomingStatepointValue(SDValue Incoming, bool RequireSpillSlot,
     llvm_unreachable("unhandled direct lowering case");
   }
 
-
-
   if (!RequireSpillSlot) {
     // If this value is live in (not live-on-return, or live-through), we can
     // treat it the same way patchpoint treats it's "live in" values.  We'll
@@ -549,7 +566,7 @@ lowerIncomingStatepointValue(SDValue Incoming, bool RequireSpillSlot,
     // found by the runtime later.  Note: We know all of these spills are
     // independent, but don't bother to exploit that chain wise.  DAGCombine
     // will happily do so as needed, so doing it here would be a small compile
-    // time win at most. 
+    // time win at most.
     SDValue Chain = Builder.getRoot();
     auto Res = spillIncomingStatepointValue(Incoming, Chain, Builder);
     Ops.push_back(std::get<0>(Res));
@@ -558,7 +575,6 @@ lowerIncomingStatepointValue(SDValue Incoming, bool RequireSpillSlot,
     Chain = std::get<1>(Res);
     Builder.DAG.setRoot(Chain);
   }
-
 }
 
 /// Return true if value V represents the GC value. The behavior is conservative
@@ -615,8 +631,10 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
       LandingPadInst *LPI = StInvoke->getLandingPadInst();
       for (const auto *Relocate : SI.GCRelocates)
         if (Relocate->getOperand(0) == LPI) {
-          LPadPointers.insert(Builder.getValue(Relocate->getBasePtr()));
-          LPadPointers.insert(Builder.getValue(Relocate->getDerivedPtr()));
+          LPadPointers.insert(
+              getStatepointGCValue(Relocate->getBasePtr(), Builder));
+          LPadPointers.insert(
+              getStatepointGCValue(Relocate->getDerivedPtr(), Builder));
         }
     }
 
@@ -638,13 +656,14 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
   };
 
   auto processGCPtr = [&](const Value *V) {
-    SDValue PtrSD = Builder.getValue(V);
+    SDValue PtrSD = getStatepointGCValue(V, Builder);
     if (!LoweredGCPtrs.insert(PtrSD))
       return; // skip duplicates
     GCPtrIndexMap[PtrSD] = LoweredGCPtrs.size() - 1;
 
-    if (auto ArgValue =
-            getArgumentValueOffset(V, Builder.DAG.getDataLayout())) {
+    if (auto ArgValue = getArgumentValueOffset(V, Builder.DAG.getDataLayout());
+        ArgValue &&
+        !(V == ArgValue->first && ArgValue->first->hasByValAttr())) {
       uint64_t Size = PtrSD.getValueType().getStoreSize().getKnownMinValue();
       int FI = Builder.FuncInfo.getArgumentValueHome(ArgValue->first,
                                                      ArgValue->second, Size);
@@ -700,13 +719,13 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
   }
 
   for (const Value *V : SI.Ptrs) {
-    SDValue SDV = Builder.getValue(V);
+    SDValue SDV = getStatepointGCValue(V, Builder);
     if (!LowerAsVReg.count(SDV))
       reservePreviousStackSlotForValue(V, Builder);
   }
 
   for (const Value *V : SI.Bases) {
-    SDValue SDV = Builder.getValue(V);
+    SDValue SDV = getStatepointGCValue(V, Builder);
     if (!LowerAsVReg.count(SDV))
       reservePreviousStackSlotForValue(V, Builder);
   }
@@ -753,7 +772,7 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
   // the alloca
   SmallVector<SDValue, 4> Allocas;
   for (Value *V : SI.GCLives) {
-    SDValue Incoming = Builder.getValue(V);
+    SDValue Incoming = getStatepointGCValue(V, Builder);
     if (FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(Incoming)) {
       // This handles allocas as arguments to the statepoint
       assert(Incoming.getValueType() == Builder.getFrameIndexTy() &&
@@ -773,11 +792,11 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
   pushStackMapConstant(Ops, Builder, SI.Ptrs.size());
   SDLoc L = Builder.getCurSDLoc();
   for (unsigned i = 0; i < SI.Ptrs.size(); ++i) {
-    SDValue Base = Builder.getValue(SI.Bases[i]);
+    SDValue Base = getStatepointGCValue(SI.Bases[i], Builder);
     assert(GCPtrIndexMap.count(Base) && "base not found in index map");
     Ops.push_back(
         Builder.DAG.getTargetConstant(GCPtrIndexMap[Base], L, MVT::i64));
-    SDValue Derived = Builder.getValue(SI.Ptrs[i]);
+    SDValue Derived = getStatepointGCValue(SI.Ptrs[i], Builder);
     assert(GCPtrIndexMap.count(Derived) && "derived not found in index map");
     Ops.push_back(
         Builder.DAG.getTargetConstant(GCPtrIndexMap[Derived], L, MVT::i64));
@@ -950,7 +969,7 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
   DenseMap<SDValue, Register> VirtRegs;
   for (const auto *Relocate : SI.GCRelocates) {
     Value *Derived = Relocate->getDerivedPtr();
-    SDValue SD = getValue(Derived);
+    SDValue SD = getStatepointGCValue(Derived, *this);
     auto It = LowerAsVReg.find(SD);
     if (It == LowerAsVReg.end())
       continue;
@@ -990,7 +1009,7 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
   auto &RelocationMap = FuncInfo.StatepointRelocationMaps[StatepointInstr];
   for (const GCRelocateInst *Relocate : SI.GCRelocates) {
     const Value *V = Relocate->getDerivedPtr();
-    SDValue SDV = getValue(V);
+    SDValue SDV = getStatepointGCValue(V, *this);
     SDValue Loc = StatepointLowering.getLocation(SDV);
 
     bool IsLocal = (Relocate->getParent() == StatepointInstr->getParent());
@@ -1008,7 +1027,11 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
       }
     } else if (goabi::isGoCallingConv(
                    DAG.getMachineFunction().getFunction().getCallingConv()) &&
-               isa<AllocaInst>(V) && isa<FrameIndexSDNode>(SDV)) {
+               isa<FrameIndexSDNode>(SDV) &&
+               (isa<AllocaInst>(V) ||
+                (isa<Argument>(V) && cast<Argument>(V)->hasByValAttr() &&
+                 FuncInfo.getArgumentFrameIndex(cast<Argument>(V)) ==
+                     cast<FrameIndexSDNode>(SDV)->getIndex()))) {
       Record.type = RecordType::FrameIndexRemat;
       Record.payload.FI = cast<FrameIndexSDNode>(SDV)->getIndex();
     } else if (Loc.getNode()) {
@@ -1025,8 +1048,6 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
     }
     RelocationMap[Relocate] = Record;
   }
-
-  
 
   SDNode *SinkNode = StatepointMCNode;
 
@@ -1168,11 +1189,14 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
   // pointers passed to deopt are base pointers; relaxing that assumption
   // would require relatively large changes to how we represent relocations.
   for (Value *V : I.deopt_operands()) {
-    // GoALLC uses direct static alloca deopt operands as frame-layout carriers
-    // for its per-alloca pointer maps. The alloca is a GC root only when it is
-    // also present in the explicit gc-live bundle; treating the deopt carrier
-    // as a root would make an inactive lifetime scan uninitialized storage.
-    if (GFI->getStrategy().getName() == "goallc" && isa<AllocaInst>(V))
+    // GoALLC uses direct static allocas and typed byval parameters as
+    // frame-layout carriers for its per-object pointer maps. The object is a
+    // GC root only when its base is also present in the explicit gc-live
+    // bundle; treating the deopt carrier as a root would make an inactive
+    // lifetime scan uninitialized or dead storage.
+    const auto *Arg = dyn_cast<Argument>(V);
+    if (GFI->getStrategy().getName() == "goallc" &&
+        (isa<AllocaInst>(V) || (Arg && Arg->hasByValAttr())))
       continue;
     if (!isGCValue(V, *this))
       continue;
@@ -1207,7 +1231,7 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
   if (GCResultLocality.first) {
     // Result value will be used in a same basic block. Don't export it or
     // perform any explicit register copies. The gc_result will simply grab
-    // this value. 
+    // this value.
     setValue(&I, ReturnValue);
   }
 
@@ -1227,7 +1251,7 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
                    DAG.getDataLayout(), Reg, RetTy,
                    I.getCallingConv());
   SDValue Chain = DAG.getEntryNode();
-  
+
   RFV.getCopyToRegs(ReturnValue, DAG, getCurSDLoc(), Chain, nullptr);
   PendingExports.push_back(Chain);
   FuncInfo.ValueMap[&I] = Reg;
@@ -1297,7 +1321,7 @@ void SelectionDAGBuilder::visitGCResult(const GCResultInst &CI) {
   // which is always i32 in our case.
   Type *RetTy = CI.getType();
   SDValue CopyFromReg = getCopyFromRegs(SI, RetTy);
-  
+
   assert(CopyFromReg.getNode());
   setValue(&CI, CopyFromReg);
 }

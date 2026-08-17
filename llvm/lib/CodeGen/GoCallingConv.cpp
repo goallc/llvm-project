@@ -245,28 +245,44 @@ void getReturnTypes(Type *ReturnType, bool TupleResults,
   ResultTys.push_back(ReturnType);
 }
 
-CallLayout computeCallLayout(ArrayRef<Type *> ArgTys,
+static uint64_t getDirectValueSize(Type *Ty, const DataLayout &DL) {
+  SmallBitVector PaddingPieces = getPaddingPieces(Ty);
+  if (PaddingPieces.any() && PaddingPieces.count() == PaddingPieces.size())
+    return 0;
+  return DL.getTypeAllocSize(Ty);
+}
+
+CallLayout computeCallLayout(ArrayRef<ValueLayout> Args, uint64_t StackArgsSize,
                              ArrayRef<Type *> ResultTys, const DataLayout &DL,
                              const ABIConfig &Config) {
   CallLayout Layout;
-  Layout.Args.reserve(ArgTys.size());
+  Layout.Args.append(Args.begin(), Args.end());
   Layout.Results.reserve(ResultTys.size());
+  Layout.StackArgsSize = StackArgsSize;
+
+  for (ValueLayout &Arg : Layout.Args) {
+    if (!Arg.Ty)
+      report_fatal_error("Go ABI argument layout has no logical type");
+    uint64_t ExpectedSize = Arg.InRegs ? getDirectValueSize(Arg.Ty, DL)
+                                       : DL.getTypeAllocSize(Arg.Ty);
+    Arg.Size = ExpectedSize;
+    Align ABIAlignment = DL.getABITypeAlign(Arg.Ty);
+    if (Arg.InRegs) {
+      Arg.Alignment = ABIAlignment;
+      continue;
+    }
+    if (Arg.Alignment < ABIAlignment)
+      report_fatal_error("invalid preassigned Go ABI argument layout");
+    if (Arg.StackOffset % Arg.Alignment.value() != 0 ||
+        Arg.StackOffset > StackArgsSize ||
+        Arg.Size > StackArgsSize - Arg.StackOffset)
+      report_fatal_error(
+          "Go ABI stack argument is outside its assigned input area");
+  }
 
   unsigned NextInt = 0;
   unsigned NextFP = 0;
-  uint64_t StackArgsEnd = 0;
-  for (Type *ArgTy : ArgTys) {
-    ValueLayout ArgLayout =
-        computeValueLayout(ArgTy, DL, Config, NextInt, NextFP);
-    if (!ArgLayout.InRegs)
-      StackArgsEnd = layoutStackValue(StackArgsEnd, ArgLayout);
-    Layout.Args.push_back(ArgLayout);
-  }
-  Layout.StackArgsSize = StackArgsEnd;
-
-  NextInt = 0;
-  NextFP = 0;
-  uint64_t StackResultsEnd = alignToValue(StackArgsEnd, Config.PtrAlign);
+  uint64_t StackResultsEnd = alignToValue(StackArgsSize, Config.PtrAlign);
   uint64_t StackResultsStart = StackResultsEnd;
   for (Type *ResultTy : ResultTys) {
     ValueLayout ResultLayout =
@@ -316,22 +332,18 @@ static void collectPointerOffsets(Type *Ty, uint64_t BaseOffset,
     report_fatal_error("Go entry argument maps do not support pointer vectors");
 }
 
-EntryArgsInfo computeEntryArgsInfo(ArrayRef<Type *> ArgTys,
-                                   const CallLayout &Layout,
+EntryArgsInfo computeEntryArgsInfo(const CallLayout &Layout,
                                    const DataLayout &DL,
                                    const ABIConfig &Config) {
   if (!Config.PtrSize || Layout.ArgSize % Config.PtrSize != 0 ||
       Layout.ArgSize / Config.PtrSize > std::numeric_limits<uint32_t>::max())
     report_fatal_error("invalid Go entry argument map dimensions");
-  if (ArgTys.size() != Layout.Args.size())
-    report_fatal_error("Go entry argument types do not match ABI layout");
-
   EntryArgsInfo Info;
   Info.PointerSize = Config.PtrSize;
   Info.ArgSize = Layout.ArgSize;
   Info.NumBits = static_cast<uint32_t>(Layout.ArgSize / Config.PtrSize);
 
-  SmallVector<uint64_t, 8> HomeOffsets(ArgTys.size());
+  SmallVector<uint64_t, 8> HomeOffsets(Layout.Args.size());
   uint64_t SpillOffset = Layout.SpillAreaOffset;
   for (auto [Index, ArgLayout] : llvm::enumerate(Layout.Args)) {
     if (ArgLayout.InRegs) {
@@ -346,8 +358,8 @@ EntryArgsInfo computeEntryArgsInfo(ArrayRef<Type *> ArgTys,
     report_fatal_error("Go entry argument homes do not match spill area");
 
   SmallVector<uint64_t, 16> PointerOffsets;
-  for (auto [Index, ArgTy] : llvm::enumerate(ArgTys))
-    collectPointerOffsets(ArgTy, HomeOffsets[Index], DL, PointerOffsets);
+  for (auto [Index, ArgLayout] : llvm::enumerate(Layout.Args))
+    collectPointerOffsets(ArgLayout.Ty, HomeOffsets[Index], DL, PointerOffsets);
   llvm::sort(PointerOffsets);
 
   for (uint64_t Offset : PointerOffsets) {

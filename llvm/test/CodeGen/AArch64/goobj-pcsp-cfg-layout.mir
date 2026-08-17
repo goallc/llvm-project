@@ -72,6 +72,8 @@ liveins:
   - { reg: '$x0', virtual-reg: '' }
   - { reg: '$w1', virtual-reg: '' }
 frameInfo:
+  goABIStackArgsSize: 0
+  goABIArgSize: 16
   isFrameAddressTaken: false
   isReturnAddressTaken: false
   hasStackMap:     false

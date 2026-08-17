@@ -11,8 +11,11 @@ entry:
   ret i64 %sum
 }
 
-define goabi0 i64 @"stackadd<ABI0>"(i64 %a, i64 %b) #0 {
+define goabi0 i64 @"stackadd<ABI0>"(
+    ptr byval(i64) align 8 %a.home, ptr byval(i64) align 8 %b.home) #0 {
 entry:
+  %a = load i64, ptr %a.home, align 8
+  %b = load i64, ptr %b.home, align 8
   %sum = add i64 %a, %b
   ret i64 %sum
 }
