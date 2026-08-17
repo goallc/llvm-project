@@ -11,6 +11,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/Analysis.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
@@ -25,7 +27,120 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
 
+#include <optional>
+
 using namespace llvm;
+
+bool llvm::isSingleByValCallCarrier(const AllocaInst &Alloca,
+                                    const DataLayout &DL) {
+  auto *Count = dyn_cast<ConstantInt>(Alloca.getArraySize());
+  std::optional<TypeSize> AllocationSize = Alloca.getAllocationSize(DL);
+  if (!Alloca.isStaticAlloca() || !Count || !Count->isOne() ||
+      !AllocationSize || AllocationSize->isScalable())
+    return false;
+  uint64_t ByteSize = AllocationSize->getFixedValue();
+
+  SmallVector<const Value *, 8> Worklist = {&Alloca};
+  SmallPtrSet<const Value *, 8> Visited;
+  SmallVector<const StoreInst *, 8> Stores;
+  SmallVector<const Instruction *, 8> AddressInsts;
+  SmallVector<const IntrinsicInst *, 2> Lifetimes;
+  const CallBase *ByValCall = nullptr;
+
+  while (!Worklist.empty()) {
+    const Value *V = Worklist.pop_back_val();
+    if (!Visited.insert(V).second)
+      continue;
+
+    for (const Use &U : V->uses()) {
+      const auto *I = dyn_cast<Instruction>(U.getUser());
+      if (!I)
+        return false;
+
+      if (const auto *GEP = dyn_cast<GetElementPtrInst>(I)) {
+        int64_t Offset = 0;
+        if (&U != &GEP->getOperandUse(0) ||
+            GetPointerBaseWithConstantOffset(GEP, Offset, DL) != &Alloca ||
+            Offset < 0 || static_cast<uint64_t>(Offset) > ByteSize)
+          return false;
+        Worklist.push_back(GEP);
+        AddressInsts.push_back(GEP);
+        continue;
+      }
+      if (isa<BitCastInst, AddrSpaceCastInst>(I)) {
+        if (U.getOperandNo() != 0)
+          return false;
+        Worklist.push_back(I);
+        AddressInsts.push_back(I);
+        continue;
+      }
+      if (const auto *SI = dyn_cast<StoreInst>(I)) {
+        int64_t Offset = 0;
+        TypeSize StoreSize =
+            DL.getTypeStoreSize(SI->getValueOperand()->getType());
+        if (U.getOperandNo() != StoreInst::getPointerOperandIndex() ||
+            !SI->isSimple() || StoreSize.isScalable() ||
+            GetPointerBaseWithConstantOffset(SI->getPointerOperand(), Offset,
+                                             DL) != &Alloca ||
+            Offset < 0 || static_cast<uint64_t>(Offset) > ByteSize ||
+            StoreSize.getFixedValue() >
+                ByteSize - static_cast<uint64_t>(Offset))
+          return false;
+        Stores.push_back(SI);
+        continue;
+      }
+      if (const auto *II = dyn_cast<IntrinsicInst>(I);
+          II && II->isLifetimeStartOrEnd()) {
+        Lifetimes.push_back(II);
+        continue;
+      }
+      if (const auto *CB = dyn_cast<CallBase>(I)) {
+        if (!CB->isArgOperand(&U))
+          return false;
+        unsigned ArgNo = CB->getArgOperandNo(&U);
+        int64_t Offset = 0;
+        if (ByValCall || !CB->paramHasAttr(ArgNo, Attribute::ByVal) ||
+            GetPointerBaseWithConstantOffset(V, Offset, DL) != &Alloca ||
+            Offset != 0 ||
+            CB->getParamByValType(ArgNo) != Alloca.getAllocatedType())
+          return false;
+        if (std::optional<Align> ParamAlign = CB->getParamAlign(ArgNo);
+            !ParamAlign || Alloca.getAlign() < *ParamAlign)
+          return false;
+        ByValCall = CB;
+        continue;
+      }
+      return false;
+    }
+  }
+
+  if (!ByValCall || Stores.empty())
+    return false;
+
+  const BasicBlock *CallBB = ByValCall->getParent();
+  const StoreInst *FirstStore = Stores.front();
+  for (const StoreInst *SI : Stores)
+    if (SI->getParent() != CallBB || !SI->comesBefore(ByValCall))
+      return false;
+    else if (SI->comesBefore(FirstStore))
+      FirstStore = SI;
+  for (const Instruction *I : AddressInsts)
+    if (I->getParent() != CallBB || !I->comesBefore(ByValCall))
+      return false;
+  for (const IntrinsicInst *II : Lifetimes)
+    if (II->getParent() != CallBB || !II->comesBefore(ByValCall))
+      return false;
+
+  // A future call's outgoing argument area is not stable storage across an
+  // intervening call: that call can reuse it, and its stack map does not
+  // describe partially initialized arguments for a later call.
+  for (const Instruction *I = FirstStore->getNextNode(); I != ByValCall;
+       I = I->getNextNode())
+    if (isa<CallBase>(I) && !(isa<IntrinsicInst>(I) &&
+                              cast<IntrinsicInst>(I)->isLifetimeStartOrEnd()))
+      return false;
+  return true;
+}
 
 /// Compute the linearized index of a member in a nested aggregate/struct/array
 /// by recursing and accumulating CurIndex as long as there are indices in the
