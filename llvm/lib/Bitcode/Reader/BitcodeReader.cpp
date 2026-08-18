@@ -2302,6 +2302,8 @@ static Attribute::AttrKind getAttrFromCode(uint64_t Code) {
     return Attribute::NoUndef;
   case bitc::ATTR_KIND_BYREF:
     return Attribute::ByRef;
+  case bitc::ATTR_KIND_GORET:
+    return Attribute::GoRet;
   case bitc::ATTR_KIND_MUSTPROGRESS:
     return Attribute::MustProgress;
   case bitc::ATTR_KIND_HOT:
@@ -5659,8 +5661,8 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
       break;
     }
 
-    case bitc::FUNC_CODE_INST_CMP:   // CMP: [opty, opval, opval, pred]
-      // Old form of ICmp/FCmp returning bool
+    case bitc::FUNC_CODE_INST_CMP: // CMP: [opty, opval, opval, pred]
+                                   // Old form of ICmp/FCmp returning bool
       // Existed to differentiate between icmp/fcmp and vicmp/vfcmp which were
       // both legal on vectors but had different behaviour.
     case bitc::FUNC_CODE_INST_CMP2: { // CMP2: [opty, opval, opval, pred]

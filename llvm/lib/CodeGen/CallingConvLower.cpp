@@ -58,6 +58,21 @@ void CCState::HandleByVal(unsigned ValNo, MVT ValVT, MVT LocVT,
   addLoc(CCValAssign::getMem(ValNo, ValVT, Offset, LocVT, LocInfo));
 }
 
+void CCState::HandleGoRet(unsigned ValNo, MVT ValVT, MVT LocVT,
+                          CCValAssign::LocInfo LocInfo, int MinSize,
+                          Align MinAlign, ISD::ArgFlagsTy ArgFlags) {
+  if (!GoRetStackStart) {
+    Align ResultAreaAlign = MF.getDataLayout().getPointerABIAlignment(/*AS=*/0);
+    StackSize = alignTo(StackSize, ResultAreaAlign);
+    GoRetStackStart = StackSize;
+  }
+
+  unsigned Size = std::max<unsigned>(ArgFlags.getGoRetSize(), MinSize);
+  Align Alignment = std::max(ArgFlags.getNonZeroMemAlign(), MinAlign);
+  uint64_t Offset = AllocateStack(Size, Alignment);
+  addLoc(CCValAssign::getMem(ValNo, ValVT, Offset, LocVT, LocInfo));
+}
+
 /// Mark a register and all of its aliases as allocated.
 void CCState::MarkAllocated(MCPhysReg Reg) {
   for (MCRegAliasIterator AI(Reg, &TRI, true); AI.isValid(); ++AI)

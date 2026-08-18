@@ -68,10 +68,6 @@ struct ABIConfig {
 struct ValueLayout {
   Type *Ty = nullptr;
   bool InRegs = false;
-  unsigned IntRegStart = 0;
-  unsigned IntRegCount = 0;
-  unsigned FPRegStart = 0;
-  unsigned FPRegCount = 0;
   uint64_t StackOffset = 0;
   uint64_t Size = 0;
   Align Alignment = Align(1);
@@ -79,7 +75,6 @@ struct ValueLayout {
 
 struct CallLayout {
   SmallVector<ValueLayout, 8> Args;
-  SmallVector<ValueLayout, 8> Results;
   uint64_t StackArgsSize = 0;
   uint64_t StackResultsSize = 0;
   uint64_t SpillAreaOffset = 0;
@@ -97,6 +92,11 @@ struct EntryArgsInfo {
   SmallVector<uint32_t, 8> PointerWords;
 };
 
+struct ResultCarrier {
+  unsigned Index = 0;
+  Type *Ty = nullptr;
+};
+
 bool hasTupleResultsAttr(const AttributeList &Attrs);
 bool hasTupleResultsAttr(const Function &F);
 bool hasTupleResultsAttr(const CallBase &CB);
@@ -106,21 +106,24 @@ SmallBitVector getPaddingPieces(Type *Ty);
 void getReturnTypes(Type *ReturnType, bool TupleResults,
                     SmallVectorImpl<Type *> &ResultTys);
 
+/// Check that the IR-level direct/goret split matches Go's whole-value result
+/// allocation. This validates the frontend decision; target TD rules remain
+/// the authority for the physical register and stack locations.
+void validateResultCarriers(Type *DirectReturnType, bool TupleResults,
+                            ArrayRef<ResultCarrier> MemoryResults,
+                            CallingConv::ID CC, const DataLayout &DL,
+                            const ABIConfig &Config);
+
 /// Complete the Go ABI frame layout after the target calling-convention rules
-/// have assigned every input to either registers or a stack offset and
-/// computed the input stack extent. This helper does not classify inputs.
-/// Result classification remains here until stack results have an explicit IR
-/// carrier of their own.
+/// have assigned every input and goret carrier. This helper does not classify
+/// values or choose physical locations.
 CallLayout computeCallLayout(ArrayRef<ValueLayout> Args, uint64_t StackArgsSize,
-                             ArrayRef<Type *> ResultTys, const DataLayout &DL,
+                             uint64_t StackResultsEnd, const DataLayout &DL,
                              const ABIConfig &Config);
 
 EntryArgsInfo computeEntryArgsInfo(const CallLayout &Layout,
                                    const DataLayout &DL,
                                    const ABIConfig &Config);
-
-bool isIntegerPiece(Type *Ty);
-bool isFloatingPiece(Type *Ty);
 
 /// Add a late target-inserted call operand for the ABI0 form of \p SymbolName.
 /// ABI0 identity is encoded directly in the MC symbol name; the GoObj writer

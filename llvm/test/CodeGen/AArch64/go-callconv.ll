@@ -53,8 +53,9 @@ entry:
   ret { i64, %go.empty.carrier, i64 } %r1
 }
 
-define goabi0 i64 @abi0_second_int(
-    ptr byval(i64) align 8 %a.home, ptr byval(i64) align 8 %b.home) {
+define goabi0 void @abi0_second_int(
+    ptr byval(i64) align 8 %a.home, ptr byval(i64) align 8 %b.home,
+    ptr goret(i64) align 8 "goretindex"="0" %result.home) {
 ; A64-LABEL: abi0_second_int:
 ; Go's arm64 stack ABI reserves 0(SP) for the return PC.
 ; A64: ldr x[[REG:[0-9]+]], [sp, #16]
@@ -62,10 +63,11 @@ define goabi0 i64 @abi0_second_int(
 ; A64: ret
 entry:
   %b = load i64, ptr %b.home, align 8
-  ret i64 %b
+  store i64 %b, ptr %result.home, align 8
+  ret void
 }
 
-define goabi0 i64 @abi0_call_second_int() {
+define goabiinternal i64 @abi0_call_second_int() {
 ; A64-LABEL: abi0_call_second_int:
 ; A64: mov x[[BASE:[0-9]+]], sp
 ; A64-DAG: str x{{[0-9]+}}, [x[[BASE]], #8]
@@ -73,20 +75,22 @@ define goabi0 i64 @abi0_call_second_int() {
 ; A64: bl abi0_second_int
 ; A64: mov x[[BASE_RELOAD:[0-9]+]], sp
 ; A64: ldr x[[RET:[0-9]+]], [x[[BASE_RELOAD]], #24]
-; The ordinary source allocas make this a 64-byte caller frame. This function's
-; ABI0 result still resides at entry SP+8.
-; A64: str x[[RET]], [sp, #72]
 entry:
   %a.home = alloca i64, align 8
   %b.home = alloca i64, align 8
+  %result.home = alloca i64, align 8
   store i64 11, ptr %a.home, align 8
   store i64 22, ptr %b.home, align 8
-  %ret = call goabi0 i64 @abi0_second_int(
-      ptr byval(i64) align 8 %a.home, ptr byval(i64) align 8 %b.home)
+  call goabi0 void @abi0_second_int(
+      ptr byval(i64) align 8 %a.home, ptr byval(i64) align 8 %b.home,
+      ptr goret(i64) align 8 "goretindex"="0" %result.home)
+  %ret = load i64, ptr %result.home, align 8
   ret i64 %ret
 }
 
-define goabiinternal { i64, [2 x i64] } @tuple_stackret(i64 %a, i64 %b, i64 %c) #0 {
+define goabiinternal i64 @tuple_stackret(
+    i64 %a, i64 %b, i64 %c,
+    ptr goret([2 x i64]) align 8 "goretindex"="1" %array.result) {
 ; A64-LABEL: tuple_stackret:
 ; A64-DAG: str x1, [sp, #8]
 ; A64-DAG: str x2, [sp, #16]
@@ -94,12 +98,15 @@ define goabiinternal { i64, [2 x i64] } @tuple_stackret(i64 %a, i64 %b, i64 %c) 
 entry:
   %arr0 = insertvalue [2 x i64] poison, i64 %b, 0
   %arr1 = insertvalue [2 x i64] %arr0, i64 %c, 1
-  %ret0 = insertvalue { i64, [2 x i64] } poison, i64 %a, 0
-  %ret1 = insertvalue { i64, [2 x i64] } %ret0, [2 x i64] %arr1, 1
-  ret { i64, [2 x i64] } %ret1
+  store [2 x i64] %arr1, ptr %array.result, align 8
+  ret i64 %a
 }
 
-define goabiinternal { i64, [2 x i64] } @single_struct_stackret(i64 %a, i64 %b, i64 %c) {
+%single.result = type { i64, [2 x i64] }
+
+define goabiinternal void @single_struct_stackret(
+    i64 %a, i64 %b, i64 %c,
+    ptr goret(%single.result) align 8 "goretindex"="0" %result.home) {
 ; A64-LABEL: single_struct_stackret:
 ; A64-DAG: str x0, [sp, #8]
 ; A64-DAG: str x1, [sp, #16]
@@ -108,9 +115,10 @@ define goabiinternal { i64, [2 x i64] } @single_struct_stackret(i64 %a, i64 %b, 
 entry:
   %arr0 = insertvalue [2 x i64] poison, i64 %b, 0
   %arr1 = insertvalue [2 x i64] %arr0, i64 %c, 1
-  %ret0 = insertvalue { i64, [2 x i64] } poison, i64 %a, 0
-  %ret1 = insertvalue { i64, [2 x i64] } %ret0, [2 x i64] %arr1, 1
-  ret { i64, [2 x i64] } %ret1
+  %ret0 = insertvalue %single.result poison, i64 %a, 0
+  %ret1 = insertvalue %single.result %ret0, [2 x i64] %arr1, 1
+  store %single.result %ret1, ptr %result.home, align 8
+  ret void
 }
 
 %pair = type { i64, i64 }
@@ -144,8 +152,9 @@ entry:
   ret i64 %result
 }
 
-define goabiinternal [8 x i8] @stack_bytes(
-    ptr byval([8 x i8]) align 1 %value.home) {
+define goabiinternal void @stack_bytes(
+    ptr byval([8 x i8]) align 1 %value.home,
+    ptr goret([8 x i8]) align 1 "goretindex"="0" %result.home) {
 ; A64-LABEL: stack_bytes:
 ; A64-DAG: ldrb w{{[0-9]+}}, [sp, #8]
 ; A64-DAG: ldrb w{{[0-9]+}}, [sp, #15]
@@ -154,26 +163,28 @@ define goabiinternal [8 x i8] @stack_bytes(
 ; A64: ret
 entry:
   %value = load [8 x i8], ptr %value.home, align 1
-  ret [8 x i8] %value
+  store [8 x i8] %value, ptr %result.home, align 1
+  ret void
 }
 
 define goabiinternal i16 @call_stack_bytes() {
 ; A64-LABEL: call_stack_bytes:
 ; A64: str x{{[0-9]+}}, [x{{[0-9]+}}, #8]
 ; A64: bl stack_bytes
-; A64-DAG: ldrb w{{[0-9]+}}, [x{{[0-9]+}}, #16]
-; A64-DAG: ldrb w{{[0-9]+}}, [x{{[0-9]+}}, #23]
+; A64: ldr x{{[0-9]+}}, [x{{[0-9]+}}, #16]
 ; A64-O2-LABEL: call_stack_bytes:
 ; A64-O2:       bl stack_bytes
-; A64-O2-NEXT:  ldrb w{{[0-9]+}}, [sp, #23]
-; A64-O2:       ldrb w{{[0-9]+}}, [sp, #16]
+; A64-O2-NEXT:  ldr x{{[0-9]+}}, [sp, #16]
 ; A64-O2:       add sp, sp, #{{[0-9]+}}
 entry:
   %value.home = alloca [8 x i8], align 1
+  %result.home = alloca [8 x i8], align 1
   store [8 x i8] [i8 1, i8 2, i8 3, i8 4, i8 5, i8 6, i8 7, i8 8],
       ptr %value.home, align 1
-  %result = call goabiinternal [8 x i8] @stack_bytes(
-      ptr byval([8 x i8]) align 1 %value.home)
+  call goabiinternal void @stack_bytes(
+      ptr byval([8 x i8]) align 1 %value.home,
+      ptr goret([8 x i8]) align 1 "goretindex"="0" %result.home)
+  %result = load [8 x i8], ptr %result.home, align 1
   %first = extractvalue [8 x i8] %result, 0
   %last = extractvalue [8 x i8] %result, 7
   %first.ext = zext i8 %first to i16

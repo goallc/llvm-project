@@ -55,6 +55,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
@@ -459,6 +460,9 @@ private:
   bool verifyAttributeCount(AttributeList Attrs, unsigned Params);
   void verifyAttributeTypes(AttributeSet Attrs, const Value *V);
   void verifyParameterAttrs(AttributeSet Attrs, Type *Ty, const Value *V);
+  void verifyGoRetAttrs(FunctionType *FT, AttributeList Attrs,
+                        CallingConv::ID CC, const Value *V,
+                        unsigned ParamOffset = 0);
   void checkUnsignedBaseTenFuncAttr(AttributeList Attrs, StringRef Attr,
                                     const Value *V);
   void verifyFunctionAttrs(FunctionType *FT, AttributeList Attrs,
@@ -2098,6 +2102,16 @@ void Verifier::verifyParameterAttrs(AttributeSet Attrs, Type *Ty,
         "'byref', and 'sret' are incompatible!",
         V);
 
+  if (Attrs.hasAttribute(Attribute::GoRet))
+    Check(AttrCount == 0,
+          "Attribute 'goret' is incompatible with other ABI parameter "
+          "attributes!",
+          V);
+
+  Check(Attrs.hasAttribute(Attribute::GoRet) ==
+            Attrs.hasAttribute("goretindex"),
+        "Attributes 'goret' and 'goretindex' must be used together!", V);
+
   Check(!(Attrs.hasAttribute(Attribute::InAlloca) &&
           Attrs.hasAttribute(Attribute::ReadOnly)),
         "Attributes "
@@ -2184,6 +2198,16 @@ void Verifier::verifyParameterAttrs(AttributeSet Attrs, Type *Ty,
                 (1ULL << 32),
             "huge 'byref' arguments are unsupported", V);
     }
+    if (Attrs.hasAttribute(Attribute::GoRet)) {
+      Type *GoRetTy = Attrs.getAttribute(Attribute::GoRet).getValueAsType();
+      SmallPtrSet<Type *, 4> Visited;
+      Check(GoRetTy->isSized(&Visited),
+            "Attribute 'goret' does not support unsized types!", V);
+      Check(!GoRetTy->containsNonLocalTargetExtType(),
+            "'goret' argument has illegal target extension type", V);
+      Check(DL.getTypeAllocSize(GoRetTy).getKnownMinValue() < (1ULL << 32),
+            "huge 'goret' arguments are unsupported", V);
+    }
     if (Attrs.hasAttribute(Attribute::InAlloca)) {
       SmallPtrSet<Type *, 4> Visited;
       Check(Attrs.getInAllocaType()->isSized(&Visited),
@@ -2223,6 +2247,61 @@ void Verifier::verifyParameterAttrs(AttributeSet Attrs, Type *Ty,
         Attrs.getAttribute(Attribute::Range).getValueAsConstantRange();
     Check(Ty->isIntOrIntVectorTy(CR.getBitWidth()),
           "Range bit width must match type bit width!", V);
+  }
+}
+
+void Verifier::verifyGoRetAttrs(FunctionType *FT, AttributeList Attrs,
+                                CallingConv::ID CC, const Value *V,
+                                unsigned ParamOffset) {
+  unsigned MemoryResultCount = 0;
+  for (unsigned I = 0; I != FT->getNumParams(); ++I)
+    MemoryResultCount += Attrs.hasParamAttr(ParamOffset + I, Attribute::GoRet);
+  if (MemoryResultCount == 0)
+    return;
+
+  Check(CC == CallingConv::GoABIInternal || CC == CallingConv::GoABI0,
+        "'goret' is only valid with a Go calling convention", V);
+
+  unsigned DirectResultCount = 0;
+  if (!FT->getReturnType()->isVoidTy()) {
+    if (Attrs.hasFnAttr("go_results_tuple")) {
+      auto *ST = dyn_cast<StructType>(FT->getReturnType());
+      Check(ST, "'go_results_tuple' requires a struct return type", V);
+      if (!ST)
+        return;
+      DirectResultCount = ST->getNumElements();
+    } else {
+      DirectResultCount = 1;
+    }
+  }
+
+  unsigned TotalResultCount = DirectResultCount + MemoryResultCount;
+  SmallBitVector Seen(TotalResultCount);
+  std::optional<uint64_t> Previous;
+  bool SeenGoRetParam = false;
+  for (unsigned I = 0; I != FT->getNumParams(); ++I) {
+    AttributeSet ParamAttrs = Attrs.getParamAttrs(ParamOffset + I);
+    if (!ParamAttrs.hasAttribute(Attribute::GoRet)) {
+      Check(!SeenGoRetParam || ParamAttrs.hasAttribute(Attribute::Nest),
+            "ordinary Go parameters must precede 'goret' parameters", V);
+      continue;
+    }
+    SeenGoRetParam = true;
+    StringRef IndexValue =
+        ParamAttrs.getAttribute("goretindex").getValueAsString();
+    uint64_t Index;
+    Check(!IndexValue.getAsInteger(10, Index),
+          "'goretindex' must be an unsigned decimal integer", V);
+    if (IndexValue.getAsInteger(10, Index))
+      continue;
+    Check(Index < TotalResultCount, "'goretindex' is out of range", V);
+    if (Index >= TotalResultCount)
+      continue;
+    Check(!Seen.test(Index), "duplicate 'goretindex'", V);
+    Check(!Previous || *Previous < Index,
+          "'goretindex' values must be in increasing parameter order", V);
+    Seen.set(Index);
+    Previous = Index;
   }
 }
 
@@ -2895,6 +2974,9 @@ void Verifier::verifyStatepoint(const CallBase &Call) {
     }
   }
 
+  verifyGoRetAttrs(TargetFuncType, Attrs, Call.getCallingConv(), &Call,
+                   /*ParamOffset=*/5);
+
   const int EndCallArgsInx = 4 + NumCallArgs;
 
   const Value *NumTransitionArgsV = Call.getArgOperand(EndCallArgsInx + 1);
@@ -3056,6 +3138,7 @@ void Verifier::visitFunction(const Function &F) {
 
   // Check function attributes.
   verifyFunctionAttrs(FT, Attrs, &F, IsIntrinsic, /* IsInlineAsm */ false);
+  verifyGoRetAttrs(FT, Attrs, F.getCallingConv(), &F);
 
   // On function declarations/definitions, we do not support the builtin
   // attribute. We do not check this in VerifyFunctionAttrs since that is
@@ -3889,6 +3972,7 @@ void Verifier::visitCallBase(CallBase &Call) {
 
   // Verify call attributes.
   verifyFunctionAttrs(FTy, Attrs, &Call, IsIntrinsic, Call.isInlineAsm());
+  verifyGoRetAttrs(FTy, Attrs, Call.getCallingConv(), &Call);
 
   // Conservatively check the inalloca argument.
   // We have a bug if we can find that there is an underlying alloca without
@@ -4137,6 +4221,10 @@ void Verifier::verifyTailCCMustTailAttrs(const AttrBuilder &Attrs,
         Twine("preallocated attribute not allowed in ") + Context);
   Check(!Attrs.contains(Attribute::ByRef),
         Twine("byref attribute not allowed in ") + Context);
+  Check(!Attrs.contains(Attribute::GoRet),
+        Twine("goret attribute not allowed in ") + Context);
+  Check(!Attrs.contains("goretindex"),
+        Twine("goretindex attribute not allowed in ") + Context);
 }
 
 static AttrBuilder getParameterABIAttributes(LLVMContext& C, unsigned I, AttributeList Attrs) {
@@ -4144,18 +4232,22 @@ static AttrBuilder getParameterABIAttributes(LLVMContext& C, unsigned I, Attribu
       Attribute::StructRet,  Attribute::ByVal,          Attribute::InAlloca,
       Attribute::InReg,      Attribute::StackAlignment, Attribute::SwiftSelf,
       Attribute::SwiftAsync, Attribute::SwiftError,     Attribute::Preallocated,
-      Attribute::ByRef};
+      Attribute::ByRef,      Attribute::GoRet};
   AttrBuilder Copy(C);
   for (auto AK : ABIAttrs) {
     Attribute Attr = Attrs.getParamAttrs(I).getAttribute(AK);
     if (Attr.isValid())
       Copy.addAttribute(Attr);
   }
+  Attribute GoRetIndex = Attrs.getParamAttrs(I).getAttribute("goretindex");
+  if (GoRetIndex.isValid())
+    Copy.addAttribute(GoRetIndex);
 
-  // `align` is ABI-affecting only in combination with `byval` or `byref`.
+  // `align` is ABI-affecting only in combination with an indirect ABI value.
   if (Attrs.hasParamAttr(I, Attribute::Alignment) &&
       (Attrs.hasParamAttr(I, Attribute::ByVal) ||
-       Attrs.hasParamAttr(I, Attribute::ByRef)))
+       Attrs.hasParamAttr(I, Attribute::ByRef) ||
+       Attrs.hasParamAttr(I, Attribute::GoRet)))
     Copy.addAlignmentAttr(Attrs.getParamAlignment(I));
   return Copy;
 }

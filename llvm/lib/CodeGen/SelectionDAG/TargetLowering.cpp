@@ -126,6 +126,7 @@ void TargetLoweringBase::ArgListEntry::setAttributes(const CallBase *Call,
   IsSRet = Call->paramHasAttr(ArgIdx, Attribute::StructRet);
   IsNest = Call->paramHasAttr(ArgIdx, Attribute::Nest);
   IsByVal = Call->paramHasAttr(ArgIdx, Attribute::ByVal);
+  IsGoRet = Call->paramHasAttr(ArgIdx, Attribute::GoRet);
   IsPreallocated = Call->paramHasAttr(ArgIdx, Attribute::Preallocated);
   IsInAlloca = Call->paramHasAttr(ArgIdx, Attribute::InAlloca);
   IsReturned = Call->paramHasAttr(ArgIdx, Attribute::Returned);
@@ -134,10 +135,23 @@ void TargetLoweringBase::ArgListEntry::setAttributes(const CallBase *Call,
   IsSwiftError = Call->paramHasAttr(ArgIdx, Attribute::SwiftError);
   Alignment = Call->getParamStackAlign(ArgIdx);
   IndirectType = nullptr;
-  assert(IsByVal + IsPreallocated + IsInAlloca + IsSRet <= 1 &&
+  assert(IsByVal + IsGoRet + IsPreallocated + IsInAlloca + IsSRet <= 1 &&
          "multiple ABI attributes?");
   if (IsByVal) {
     IndirectType = Call->getParamByValType(ArgIdx);
+    if (!Alignment)
+      Alignment = Call->getParamAlign(ArgIdx);
+  }
+  if (IsGoRet) {
+    IndirectType = Call->getParamGoRetType(ArgIdx);
+    Attribute IndexAttr =
+        Call->getAttributes().getParamAttrs(ArgIdx).getAttribute("goretindex");
+    uint64_t Index;
+    if (!IndexAttr.isStringAttribute() ||
+        IndexAttr.getValueAsString().getAsInteger(10, Index) ||
+        Index > std::numeric_limits<unsigned>::max())
+      report_fatal_error("invalid goretindex call attribute");
+    GoRetIndex = static_cast<unsigned>(Index);
     if (!Alignment)
       Alignment = Call->getParamAlign(ArgIdx);
   }

@@ -205,6 +205,7 @@ public:
   LLVM_ABI static Attribute getWithStructRetType(LLVMContext &Context,
                                                  Type *Ty);
   LLVM_ABI static Attribute getWithByRefType(LLVMContext &Context, Type *Ty);
+  LLVM_ABI static Attribute getWithGoRetType(LLVMContext &Context, Type *Ty);
   LLVM_ABI static Attribute getWithPreallocatedType(LLVMContext &Context,
                                                     Type *Ty);
   LLVM_ABI static Attribute getWithInAllocaType(LLVMContext &Context, Type *Ty);
@@ -497,6 +498,7 @@ public:
   LLVM_ABI Type *getByValType() const;
   LLVM_ABI Type *getStructRetType() const;
   LLVM_ABI Type *getByRefType() const;
+  LLVM_ABI Type *getGoRetType() const;
   LLVM_ABI Type *getPreallocatedType() const;
   LLVM_ABI Type *getInAllocaType() const;
   LLVM_ABI Type *getElementType() const;
@@ -975,6 +977,9 @@ public:
   /// Return the byref type for the specified function parameter.
   LLVM_ABI Type *getParamByRefType(unsigned ArgNo) const;
 
+  /// Return the goret type for the specified function parameter.
+  LLVM_ABI Type *getParamGoRetType(unsigned ArgNo) const;
+
   /// Return the preallocated type for the specified function parameter.
   LLVM_ABI Type *getParamPreallocatedType(unsigned ArgNo) const;
 
@@ -1224,6 +1229,9 @@ public:
 
   /// Retrieve the byref type.
   Type *getByRefType() const { return getTypeAttr(Attribute::ByRef); }
+
+  /// Retrieve the goret type.
+  Type *getGoRetType() const { return getTypeAttr(Attribute::GoRet); }
 
   /// Retrieve the preallocated type.
   Type *getPreallocatedType() const {

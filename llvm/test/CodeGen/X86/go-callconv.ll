@@ -61,20 +61,23 @@ entry:
   ret { i64, %go.empty.carrier, i64 } %r1
 }
 
-define goabi0 i64 @"abi0_second_int<ABI0>"(
-    ptr byval(i64) align 8 %a.home, ptr byval(i64) align 8 %b.home) {
+define goabi0 void @"abi0_second_int<ABI0>"(
+    ptr byval(i64) align 8 %a.home, ptr byval(i64) align 8 %b.home,
+    ptr goret(i64) align 8 "goretindex"="0" %result.home) {
 ; X86-LABEL: "abi0_second_int<ABI0>":
+; X86: leaq 24(%rsp), %[[RESULT_HOME:r[a-z0-9]+]]
 ; X86: leaq 16(%rsp), %[[B_HOME:r[a-z0-9]+]]
-; X86-NEXT: movq (%[[B_HOME]]), %rax
-; X86: movq %rax, 24(%rsp)
+; X86-NEXT: movq (%[[B_HOME]]), %[[VALUE:r[a-z0-9]+]]
+; X86: movq %[[VALUE]], (%[[RESULT_HOME]])
 ; X86: retq
 entry:
   %b = load i64, ptr %b.home, align 8
-  ret i64 %b
+  store i64 %b, ptr %result.home, align 8
+  ret void
 }
 
-define goabi0 i64 @"abi0_call_second_int<ABI0>"() {
-; X86-LABEL: "abi0_call_second_int<ABI0>":
+define goabiinternal i64 @abi0_call_second_int() {
+; X86-LABEL: abi0_call_second_int:
 ; X86: movq %rsp, %[[BASE:r[a-z0-9]+]]
 ; X86: movq %{{r[a-z0-9]+}}, 8(%[[BASE]])
 ; X86: movq %{{r[a-z0-9]+}}, (%[[BASE]])
@@ -86,66 +89,80 @@ entry:
   %b.home = alloca i64, align 8
   store i64 11, ptr %a.home, align 8
   store i64 22, ptr %b.home, align 8
-  %ret = call goabi0 i64 @"abi0_second_int<ABI0>"(
-      ptr byval(i64) align 8 %a.home, ptr byval(i64) align 8 %b.home)
+  %result.home = alloca i64, align 8
+  call goabi0 void @"abi0_second_int<ABI0>"(
+      ptr byval(i64) align 8 %a.home, ptr byval(i64) align 8 %b.home,
+      ptr goret(i64) align 8 "goretindex"="0" %result.home)
+  %ret = load i64, ptr %result.home, align 8
   ret i64 %ret
 }
 
-define goabiinternal { i64, [2 x i64] } @tuple_stackret(i64 %a, i64 %b, i64 %c) #0 {
+define goabiinternal i64 @tuple_stackret(
+    i64 %a, i64 %b, i64 %c,
+    ptr goret([2 x i64]) align 8 "goretindex"="1" %array.result) {
 ; X86-LABEL: tuple_stackret:
-; X86-DAG: movq %rbx, 8(%rsp)
-; X86-DAG: movq %rcx, 16(%rsp)
+; X86: leaq 8(%rsp), %[[RESULT_HOME:r[a-z0-9]+]]
+; X86-DAG: movq %rbx, (%[[RESULT_HOME]])
+; X86-DAG: movq %{{r[a-z0-9]+}}, 8(%[[RESULT_HOME]])
 ; X86: retq
 entry:
   %arr0 = insertvalue [2 x i64] poison, i64 %b, 0
   %arr1 = insertvalue [2 x i64] %arr0, i64 %c, 1
-  %ret0 = insertvalue { i64, [2 x i64] } poison, i64 %a, 0
-  %ret1 = insertvalue { i64, [2 x i64] } %ret0, [2 x i64] %arr1, 1
-  ret { i64, [2 x i64] } %ret1
+  store [2 x i64] %arr1, ptr %array.result, align 8
+  ret i64 %a
 }
 
-define goabiinternal { i64, [2 x i64] } @single_struct_stackret(i64 %a, i64 %b, i64 %c) {
+%single.result = type { i64, [2 x i64] }
+
+define goabiinternal void @single_struct_stackret(
+    i64 %a, i64 %b, i64 %c,
+    ptr goret(%single.result) align 8 "goretindex"="0" %result.home) {
 ; X86-LABEL: single_struct_stackret:
-; X86-DAG: movq %rax, 8(%rsp)
-; X86-DAG: movq %rbx, 16(%rsp)
-; X86-DAG: movq %rcx, 24(%rsp)
+; X86: leaq 8(%rsp), %[[RESULT_HOME:r[a-z0-9]+]]
+; X86-DAG: movq %{{r[a-z0-9]+}}, (%[[RESULT_HOME]])
+; X86-DAG: movq %rbx, 8(%[[RESULT_HOME]])
+; X86-DAG: movq %{{r[a-z0-9]+}}, 16(%[[RESULT_HOME]])
 ; X86: retq
 entry:
   %arr0 = insertvalue [2 x i64] poison, i64 %b, 0
   %arr1 = insertvalue [2 x i64] %arr0, i64 %c, 1
-  %ret0 = insertvalue { i64, [2 x i64] } poison, i64 %a, 0
-  %ret1 = insertvalue { i64, [2 x i64] } %ret0, [2 x i64] %arr1, 1
-  ret { i64, [2 x i64] } %ret1
+  %ret0 = insertvalue %single.result poison, i64 %a, 0
+  %ret1 = insertvalue %single.result %ret0, [2 x i64] %arr1, 1
+  store %single.result %ret1, ptr %result.home, align 8
+  ret void
 }
 
 %pair = type { i64, i64 }
-%method.results = type { i64, i64, [2 x i64], double, [2 x double] }
-
 ; Aggregate arguments and results can share one outgoing call frame. Read stack
 ; results from the post-call SP before releasing that frame.
 define goabiinternal i64 @call_method_results(ptr %callee, ptr %recv,
                                                ptr nest %ctxt) {
 ; X86-O2-LABEL: call_method_results:
 ; X86-O2:       callq *
-; X86-O2:       addq 32(%rsp), %rax
-; X86-O2:       addq 40(%rsp), %rax
-; X86-O2:       addq 48(%rsp), %rax
-; X86-O2:       addq 56(%rsp), %rax
+; X86-O2:       movq 32(%rsp), %{{r[a-z0-9]+}}
+; X86-O2:       movq 40(%rsp), %{{r[a-z0-9]+}}
+; X86-O2:       movq 48(%rsp), %{{r[a-z0-9]+}}
+; X86-O2:       movq 56(%rsp), %{{r[a-z0-9]+}}
 ; X86-O2:       addq ${{[0-9]+}}, %rsp
 entry:
   %x.home = alloca [2 x i64], align 8
   %y.home = alloca [2 x double], align 8
+  %x.result = alloca [2 x i64], align 8
+  %y.result = alloca [2 x double], align 8
   store [2 x i64] [i64 456, i64 789], ptr %x.home, align 8
   store [2 x double] [double 3.4, double 5.6], ptr %y.home, align 8
-  %result = call goabiinternal %method.results %callee(
+  %result = call goabiinternal { i64, i64, double } %callee(
       ptr %recv, i64 123, ptr byval([2 x i64]) align 8 %x.home,
-      double 1.2, ptr byval([2 x double]) align 8 %y.home, ptr nest %ctxt) #0
-  %s = extractvalue %method.results %result, 0
-  %a = extractvalue %method.results %result, 1
-  %x = extractvalue %method.results %result, 2
+      double 1.2, ptr byval([2 x double]) align 8 %y.home,
+      ptr goret([2 x i64]) align 8 "goretindex"="2" %x.result,
+      ptr goret([2 x double]) align 8 "goretindex"="4" %y.result,
+      ptr nest %ctxt) #0
+  %s = extractvalue { i64, i64, double } %result, 0
+  %a = extractvalue { i64, i64, double } %result, 1
+  %x = load [2 x i64], ptr %x.result, align 8
   %x0 = extractvalue [2 x i64] %x, 0
   %x1 = extractvalue [2 x i64] %x, 1
-  %y = extractvalue %method.results %result, 4
+  %y = load [2 x double], ptr %y.result, align 8
   %y0 = extractvalue [2 x double] %y, 0
   %y1 = extractvalue [2 x double] %y, 1
   %y0i = bitcast double %y0 to i64
@@ -191,18 +208,21 @@ entry:
   ret i64 %result
 }
 
-define goabiinternal [8 x i8] @stack_bytes(
-    ptr byval([8 x i8]) align 1 %value.home) {
+define goabiinternal void @stack_bytes(
+    ptr byval([8 x i8]) align 1 %value.home,
+    ptr goret([8 x i8]) align 1 "goretindex"="0" %result.home) {
 ; X86-LABEL: stack_bytes:
+; X86: leaq 16(%rsp), %[[RESULT_HOME:r[a-z0-9]+]]
 ; X86: leaq 8(%rsp), %[[BYTES_HOME:r[a-z0-9]+]]
 ; X86-DAG: movb (%[[BYTES_HOME]]), %{{[a-z0-9]+}}
 ; X86-DAG: movb 7(%[[BYTES_HOME]]), %{{[a-z0-9]+}}
-; X86-DAG: movb %{{[a-z0-9]+}}, 16(%rsp)
-; X86-DAG: movb %{{[a-z0-9]+}}, 23(%rsp)
+; X86-DAG: movb %{{[a-z0-9]+}}, (%[[RESULT_HOME]])
+; X86-DAG: movb %{{[a-z0-9]+}}, 7(%[[RESULT_HOME]])
 ; X86: retq
 entry:
   %value = load [8 x i8], ptr %value.home, align 1
-  ret [8 x i8] %value
+  store [8 x i8] %value, ptr %result.home, align 1
+  ret void
 }
 
 define goabiinternal i16 @call_stack_bytes() {
@@ -210,14 +230,16 @@ define goabiinternal i16 @call_stack_bytes() {
 ; X86: movq %{{r[a-z0-9]+}}, (%[[BASE:r[a-z0-9]+]])
 ; X86: callq stack_bytes
 ; X86: movq %rsp, %[[RESULT_BASE:r[a-z0-9]+]]
-; X86-DAG: movzbl 8(%[[RESULT_BASE]]), %{{[a-z0-9]+}}
-; X86-DAG: movzbl 15(%[[RESULT_BASE]]), %{{[a-z0-9]+}}
+; X86: movq 8(%[[RESULT_BASE]]), %{{r[a-z0-9]+}}
 entry:
   %value.home = alloca [8 x i8], align 1
+  %result.home = alloca [8 x i8], align 1
   store [8 x i8] [i8 1, i8 2, i8 3, i8 4, i8 5, i8 6, i8 7, i8 8],
       ptr %value.home, align 1
-  %result = call goabiinternal [8 x i8] @stack_bytes(
-      ptr byval([8 x i8]) align 1 %value.home)
+  call goabiinternal void @stack_bytes(
+      ptr byval([8 x i8]) align 1 %value.home,
+      ptr goret([8 x i8]) align 1 "goretindex"="0" %result.home)
+  %result = load [8 x i8], ptr %result.home, align 1
   %first = extractvalue [8 x i8] %result, 0
   %last = extractvalue [8 x i8] %result, 7
   %first.ext = zext i8 %first to i16

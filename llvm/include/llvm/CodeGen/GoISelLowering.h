@@ -20,17 +20,18 @@ namespace goabi {
 
 /// Derive the logical Go function layout from LLVM formal arguments and the
 /// physical locations assigned by the target calling convention.
-CallLayout computeFormalArgLayout(const Function &F,
-                                  ArrayRef<ISD::InputArg> Ins,
-                                  ArrayRef<CCValAssign> ArgLocs,
-                                  uint64_t StackArgsSize, const DataLayout &DL,
-                                  const ABIConfig &Config);
+CallLayout
+computeFormalArgLayout(const Function &F, ArrayRef<ISD::InputArg> Ins,
+                       ArrayRef<CCValAssign> ArgLocs, uint64_t StackArgsSize,
+                       uint64_t StackResultsEnd, const DataLayout &DL,
+                       const ABIConfig &Config);
 
 /// Derive the logical Go call layout from the original LLVM call operands and
 /// the physical locations assigned by the target calling convention.
 CallLayout computeCallLayout(TargetLowering::CallLoweringInfo &CLI,
                              ArrayRef<CCValAssign> ArgLocs,
-                             uint64_t StackArgsSize, const ABIConfig &Config);
+                             uint64_t StackArgsSize, uint64_t StackResultsEnd,
+                             const ABIConfig &Config);
 
 } // namespace goabi
 } // namespace llvm

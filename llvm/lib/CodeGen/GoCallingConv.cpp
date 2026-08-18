@@ -117,101 +117,8 @@ SmallBitVector getPaddingPieces(Type *Ty) {
   return Pieces;
 }
 
-static bool classifyType(Type *Ty, const DataLayout &DL,
-                         const ABIConfig &Config, unsigned &IntRegs,
-                         unsigned &FPRegs) {
-  if (isPaddingType(Ty))
-    return true;
-
-  if (Ty->isVoidTy())
-    return true;
-
-  if (DL.getTypeAllocSize(Ty) == 0)
-    return true;
-
-  if (auto *AT = dyn_cast<ArrayType>(Ty)) {
-    uint64_t Len = AT->getNumElements();
-    if (Len == 0)
-      return true;
-    if (Len == 1)
-      return classifyType(AT->getElementType(), DL, Config, IntRegs, FPRegs);
-    return false;
-  }
-
-  if (auto *ST = dyn_cast<StructType>(Ty)) {
-    for (Type *EltTy : ST->elements())
-      if (!classifyType(EltTy, DL, Config, IntRegs, FPRegs))
-        return false;
-    return true;
-  }
-
-  if (Ty->isPointerTy()) {
-    ++IntRegs;
-    return IntRegs <= Config.IntRegs.size();
-  }
-
-  if (Ty->isIntegerTy()) {
-    unsigned Bits = Ty->getIntegerBitWidth();
-    unsigned PtrBits = Config.PtrSize * 8;
-    if (Bits <= PtrBits) {
-      ++IntRegs;
-      return IntRegs <= Config.IntRegs.size();
-    }
-    if (Bits <= PtrBits * 2) {
-      IntRegs += 2;
-      return IntRegs <= Config.IntRegs.size();
-    }
-    return false;
-  }
-
-  if (Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||
-      Ty->isDoubleTy()) {
-    if (Config.SoftFloat)
-      return false;
-    ++FPRegs;
-    return FPRegs <= Config.FPRegs.size();
-  }
-
-  return false;
-}
-
 static uint64_t alignToValue(uint64_t Value, Align Alignment) {
   return alignTo(Value, Alignment.value());
-}
-
-static ValueLayout computeValueLayout(Type *Ty, const DataLayout &DL,
-                                      const ABIConfig &Config, unsigned &IntReg,
-                                      unsigned &FPReg) {
-  ValueLayout Layout;
-  Layout.Ty = Ty;
-  Layout.Size = DL.getTypeAllocSize(Ty);
-  Layout.Alignment = DL.getABITypeAlign(Ty);
-  Layout.IntRegStart = IntReg;
-  Layout.FPRegStart = FPReg;
-
-  SmallBitVector PaddingPieces = getPaddingPieces(Ty);
-  if (PaddingPieces.any() && PaddingPieces.count() == PaddingPieces.size()) {
-    Layout.Size = 0;
-    return Layout;
-  }
-
-  unsigned IntAfter = IntReg;
-  unsigned FPAfter = FPReg;
-  if (classifyType(Ty, DL, Config, IntAfter, FPAfter)) {
-    Layout.InRegs = true;
-    Layout.IntRegCount = IntAfter - IntReg;
-    Layout.FPRegCount = FPAfter - FPReg;
-    IntReg = IntAfter;
-    FPReg = FPAfter;
-  }
-
-  return Layout;
-}
-
-static uint64_t layoutStackValue(uint64_t Offset, ValueLayout &Layout) {
-  Offset = alignToValue(Offset, Layout.Alignment);
-  Layout.StackOffset = Offset;
-  return Offset + Layout.Size;
 }
 
 bool hasTupleResultsAttr(const AttributeList &Attrs) {
@@ -245,6 +152,112 @@ void getReturnTypes(Type *ReturnType, bool TupleResults,
   ResultTys.push_back(ReturnType);
 }
 
+static bool classifyRegisterResult(Type *Ty, const DataLayout &DL,
+                                   const ABIConfig &Config, unsigned &IntRegs,
+                                   unsigned &FPRegs) {
+  if (isPaddingType(Ty) || Ty->isVoidTy() || DL.getTypeAllocSize(Ty) == 0)
+    return true;
+
+  if (auto *AT = dyn_cast<ArrayType>(Ty)) {
+    if (AT->getNumElements() == 0)
+      return true;
+    if (AT->getNumElements() == 1)
+      return classifyRegisterResult(AT->getElementType(), DL, Config, IntRegs,
+                                    FPRegs);
+    return false;
+  }
+
+  if (auto *ST = dyn_cast<StructType>(Ty)) {
+    for (Type *EltTy : ST->elements())
+      if (!classifyRegisterResult(EltTy, DL, Config, IntRegs, FPRegs))
+        return false;
+    return true;
+  }
+
+  if (Ty->isPointerTy()) {
+    ++IntRegs;
+    return IntRegs <= Config.IntRegs.size();
+  }
+
+  if (Ty->isIntegerTy()) {
+    unsigned Bits = Ty->getIntegerBitWidth();
+    unsigned PtrBits = Config.PtrSize * 8;
+    if (Bits <= PtrBits)
+      ++IntRegs;
+    else if (Bits <= PtrBits * 2)
+      IntRegs += 2;
+    else
+      return false;
+    return IntRegs <= Config.IntRegs.size();
+  }
+
+  if (Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||
+      Ty->isDoubleTy()) {
+    if (Config.SoftFloat)
+      return false;
+    ++FPRegs;
+    return FPRegs <= Config.FPRegs.size();
+  }
+
+  if (isa<FixedVectorType>(Ty)) {
+    if (Config.SoftFloat)
+      return false;
+    ++FPRegs;
+    return FPRegs <= Config.FPRegs.size();
+  }
+
+  return false;
+}
+
+void validateResultCarriers(Type *DirectReturnType, bool TupleResults,
+                            ArrayRef<ResultCarrier> MemoryResults,
+                            CallingConv::ID CC, const DataLayout &DL,
+                            const ABIConfig &Config) {
+  if (!isGoCallingConv(CC))
+    report_fatal_error("Go result validation requires a Go calling convention");
+
+  SmallVector<Type *, 8> DirectResults;
+  getReturnTypes(DirectReturnType, TupleResults, DirectResults);
+  unsigned ResultCount = DirectResults.size() + MemoryResults.size();
+  SmallVector<Type *, 8> LogicalResults(ResultCount, nullptr);
+  SmallBitVector IsMemory(ResultCount);
+  for (const ResultCarrier &Carrier : MemoryResults) {
+    if (!Carrier.Ty || Carrier.Index >= ResultCount ||
+        LogicalResults[Carrier.Index])
+      report_fatal_error("invalid goret logical result mapping");
+    LogicalResults[Carrier.Index] = Carrier.Ty;
+    IsMemory.set(Carrier.Index);
+  }
+
+  auto DirectIt = DirectResults.begin();
+  for (Type *&Ty : LogicalResults)
+    if (!Ty) {
+      if (DirectIt == DirectResults.end())
+        report_fatal_error("invalid direct Go result mapping");
+      Ty = *DirectIt++;
+    }
+  if (DirectIt != DirectResults.end())
+    report_fatal_error("invalid direct Go result count");
+
+  unsigned IntRegs = 0;
+  unsigned FPRegs = 0;
+  for (auto [Index, Ty] : llvm::enumerate(LogicalResults)) {
+    unsigned IntAfter = IntRegs;
+    unsigned FPAfter = FPRegs;
+    bool InRegs =
+        classifyRegisterResult(Ty, DL, Config, IntAfter, FPAfter);
+    if (InRegs) {
+      IntRegs = IntAfter;
+      FPRegs = FPAfter;
+    }
+    if (InRegs == IsMemory.test(Index))
+      report_fatal_error("Go result " + Twine(Index) +
+                         (InRegs ? " is register-assigned but uses goret"
+                                 : " is memory-assigned but uses a direct "
+                                   "LLVM return; use goret"));
+  }
+}
+
 static uint64_t getDirectValueSize(Type *Ty, const DataLayout &DL) {
   SmallBitVector PaddingPieces = getPaddingPieces(Ty);
   if (PaddingPieces.any() && PaddingPieces.count() == PaddingPieces.size())
@@ -253,11 +266,10 @@ static uint64_t getDirectValueSize(Type *Ty, const DataLayout &DL) {
 }
 
 CallLayout computeCallLayout(ArrayRef<ValueLayout> Args, uint64_t StackArgsSize,
-                             ArrayRef<Type *> ResultTys, const DataLayout &DL,
+                             uint64_t StackResultsEnd, const DataLayout &DL,
                              const ABIConfig &Config) {
   CallLayout Layout;
   Layout.Args.append(Args.begin(), Args.end());
-  Layout.Results.reserve(ResultTys.size());
   Layout.StackArgsSize = StackArgsSize;
 
   for (ValueLayout &Arg : Layout.Args) {
@@ -280,17 +292,11 @@ CallLayout computeCallLayout(ArrayRef<ValueLayout> Args, uint64_t StackArgsSize,
           "Go ABI stack argument is outside its assigned input area");
   }
 
-  unsigned NextInt = 0;
-  unsigned NextFP = 0;
-  uint64_t StackResultsEnd = alignToValue(StackArgsSize, Config.PtrAlign);
-  uint64_t StackResultsStart = StackResultsEnd;
-  for (Type *ResultTy : ResultTys) {
-    ValueLayout ResultLayout =
-        computeValueLayout(ResultTy, DL, Config, NextInt, NextFP);
-    if (!ResultLayout.InRegs)
-      StackResultsEnd = layoutStackValue(StackResultsEnd, ResultLayout);
-    Layout.Results.push_back(ResultLayout);
-  }
+  uint64_t StackResultsStart = alignToValue(StackArgsSize, Config.PtrAlign);
+  if (StackResultsEnd == StackArgsSize)
+    StackResultsEnd = StackResultsStart;
+  else if (StackResultsEnd < StackResultsStart)
+    report_fatal_error("Go ABI result area overlaps the input stack area");
   Layout.StackResultsSize = StackResultsEnd - StackResultsStart;
 
   uint64_t SpillEnd = alignToValue(StackResultsEnd, Config.PtrAlign);
@@ -379,13 +385,6 @@ EntryArgsInfo computeEntryArgsInfo(const CallLayout &Layout,
   // ordinary Go GC pointers. Treat them conservatively until the frontend
   // gives those words a distinct IR type or signature attribute.
   return Info;
-}
-
-bool isIntegerPiece(Type *Ty) { return Ty->isPointerTy() || Ty->isIntegerTy(); }
-
-bool isFloatingPiece(Type *Ty) {
-  return Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||
-         Ty->isDoubleTy();
 }
 
 } // namespace llvm::goabi
