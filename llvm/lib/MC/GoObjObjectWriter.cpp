@@ -1728,8 +1728,14 @@ uint64_t GoObjObjectWriter::writeObject() {
     // uncovered section gap. Materialize only referenced, exact-sized,
     // read-only temporaries. This includes zero-sized constants: their empty
     // ranges can never be found by FindContainingSymbol, so relocations must
-    // refer to their directly indexed symbols. This is the MC equivalent of
-    // the Go compiler's local, content-addressable string/constant symbols.
+    // refer to their directly indexed symbols.
+    //
+    // Relocation-free constants are the MC equivalent of the Go compiler's
+    // local, content-addressable strings and scalar constants. A private
+    // constant with relocations is instead analogous to a native Go static
+    // lookup or jump table: keep it as an object-local package definition.
+    // Hashing only its zero-filled fixup placeholders would incorrectly merge
+    // tables that refer to different symbols.
     if (getGoObjSymbolType(&Section) != GoObj::SRODATA)
       continue;
     for (const MCSymbol *MCSym : PrivateRelocationTargets) {
@@ -1766,12 +1772,21 @@ uint64_t GoObjObjectWriter::writeObject() {
         Data = ArrayRef<char>(Contents.data() + Begin, *ExactSize);
       uint32_t Align =
           Asm->getContext().getGoObjSymbolAlignment(MCSym).value_or(1);
+      bool HasRelocations = llvm::any_of(
+          Relocations, [&](const GoObjRelocationEntry &Reloc) {
+            return Reloc.Section == &Section && Begin <= Reloc.Offset &&
+                   Reloc.Offset < End;
+          });
       addDefinedSymbol(Symbols, MCSym, &Section, Begin, End,
-                       GoObj::DefinedSymbolBlock::Hasheddef, MCSym->getName(),
-                       GoObj::SRODATA,
-                       GoObj::SymFlagDupok | GoObj::SymFlagLocal, 0,
-                       GoObj::SymABI0, *ExactSize, Align, Data);
-      Symbols.back().ContentHash = makeGoObjContentHash(0, Data);
+                       HasRelocations ? Config.DefaultDefinedSymbolBlock
+                                      : GoObj::DefinedSymbolBlock::Hasheddef,
+                       MCSym->getName(), GoObj::SRODATA,
+                       HasRelocations
+                           ? 0
+                           : GoObj::SymFlagDupok | GoObj::SymFlagLocal,
+                       0, GoObj::SymABI0, *ExactSize, Align, Data);
+      if (!HasRelocations)
+        Symbols.back().ContentHash = makeGoObjContentHash(0, Data);
     }
   }
 
