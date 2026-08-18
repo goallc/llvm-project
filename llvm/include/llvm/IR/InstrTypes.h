@@ -1861,6 +1861,15 @@ public:
     return nullptr;
   }
 
+  /// Extract the goret type for a call or parameter.
+  Type *getParamGoRetType(unsigned ArgNo) const {
+    if (auto *Ty = Attrs.getParamGoRetType(ArgNo))
+      return Ty;
+    if (const Function *F = getCalledFunction())
+      return F->getAttributes().getParamGoRetType(ArgNo);
+    return nullptr;
+  }
+
   /// Extract the byval type for a call or parameter.
   Type *getParamByValType(unsigned ArgNo) const {
     if (auto *Ty = Attrs.getParamByValType(ArgNo))

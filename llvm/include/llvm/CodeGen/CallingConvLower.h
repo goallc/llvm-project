@@ -21,6 +21,7 @@
 #include "llvm/IR/CallingConv.h"
 #include "llvm/Support/Alignment.h"
 #include "llvm/Support/Compiler.h"
+#include <optional>
 #include <variant>
 
 namespace llvm {
@@ -181,6 +182,7 @@ private:
   bool NegativeOffsets;
 
   uint64_t StackSize;
+  std::optional<uint64_t> GoRetStackStart;
   Align MaxStackArgAlign;
   SmallVector<uint32_t, 16> UsedRegs;
   SmallVector<CCValAssign, 4> PendingLocs;
@@ -244,6 +246,12 @@ public:
 
   /// Returns the size of the currently allocated portion of the stack.
   uint64_t getStackSize() const { return StackSize; }
+
+  /// Return the input-stack extent before the first goret result carrier.
+  /// Without goret carriers, the entire allocated area contains inputs.
+  uint64_t getGoStackArgsSize() const {
+    return GoRetStackStart.value_or(StackSize);
+  }
 
   /// getAlignedCallFrameSize - Return the size of the call frame needed to
   /// be able to store all arguments and such that the alignment requirement
@@ -434,6 +442,11 @@ public:
   // value. The size and alignment information of the argument is encoded in its
   // parameter attribute.
   LLVM_ABI void HandleByVal(unsigned ValNo, MVT ValVT, MVT LocVT,
+                            CCValAssign::LocInfo LocInfo, int MinSize,
+                            Align MinAlign, ISD::ArgFlagsTy ArgFlags);
+
+  /// Allocate the physical Go result object described by a goret carrier.
+  LLVM_ABI void HandleGoRet(unsigned ValNo, MVT ValVT, MVT LocVT,
                             CCValAssign::LocInfo LocInfo, int MinSize,
                             Align MinAlign, ISD::ArgFlagsTy ArgFlags);
 

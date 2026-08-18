@@ -60,6 +60,7 @@
 #include <climits>
 #include <cstdint>
 #include <map>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -332,6 +333,7 @@ public:
     bool IsNest : 1;
     bool IsByVal : 1;
     bool IsByRef : 1;
+    bool IsGoRet : 1;
     bool IsInAlloca : 1;
     bool IsPreallocated : 1;
     bool IsReturned : 1;
@@ -341,13 +343,15 @@ public:
     bool IsCFGuardTarget : 1;
     MaybeAlign Alignment = std::nullopt;
     Type *IndirectType = nullptr;
+    unsigned GoRetIndex = std::numeric_limits<unsigned>::max();
 
     ArgListEntry(Value *Val, SDValue Node, Type *Ty)
         : Val(Val), Node(Node), OrigTy(Ty), Ty(Ty), IsSExt(false),
           IsZExt(false), IsNoExt(false), IsInReg(false), IsSRet(false),
-          IsNest(false), IsByVal(false), IsByRef(false), IsInAlloca(false),
-          IsPreallocated(false), IsReturned(false), IsSwiftSelf(false),
-          IsSwiftAsync(false), IsSwiftError(false), IsCFGuardTarget(false) {}
+          IsNest(false), IsByVal(false), IsByRef(false), IsGoRet(false),
+          IsInAlloca(false), IsPreallocated(false), IsReturned(false),
+          IsSwiftSelf(false), IsSwiftAsync(false), IsSwiftError(false),
+          IsCFGuardTarget(false) {}
 
     explicit ArgListEntry(Value *Val, SDValue Node = SDValue())
         : ArgListEntry(Val, Node, Val->getType()) {}

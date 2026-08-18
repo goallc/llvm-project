@@ -488,6 +488,11 @@ public:
     return AttributeSets.getParamByRefType(ArgNo);
   }
 
+  /// Extract the goret type for a parameter.
+  Type *getParamGoRetType(unsigned ArgNo) const {
+    return AttributeSets.getParamGoRetType(ArgNo);
+  }
+
   /// Extract the preallocated type for a parameter.
   Type *getParamPreallocatedType(unsigned ArgNo) const {
     return AttributeSets.getParamPreallocatedType(ArgNo);

@@ -1046,6 +1046,7 @@ Function *CodeExtractor::constructFunctionDeclaration(
       case Attribute::ZExt:
       case Attribute::ImmArg:
       case Attribute::ByRef:
+      case Attribute::GoRet:
       case Attribute::WriteOnly:
       case Attribute::Writable:
       case Attribute::DeadOnUnwind:

@@ -11,7 +11,8 @@
 
 declare goabiinternal void @internal_callee()
 declare goabi0 void @"abi0_callee<ABI0>"()
-declare goabi0 i64 @"abi0_result<ABI0>"()
+declare goabi0 void @"abi0_result<ABI0>"(
+    ptr goret(i64) align 8 "goretindex"="0")
 
 define goabi0 void @"abi0_to_internal<ABI0>"() "go-nosplit" {
 ; PRE-LABEL: name: 'abi0_to_internal<ABI0>'
@@ -82,11 +83,15 @@ define goabiinternal i64 @internal_statepoint_result_from_abi0()
 ; ASM-O2-NEXT: movq (%rsp), %rax
 ; ASM: retq
 entry:
+  %result.addr = alloca i64, align 8
   %token = call goabi0 token (i64, i32, ptr, i32, i32, ...)
       @llvm.experimental.gc.statepoint.p0(
-          i64 0, i32 0, ptr elementtype(i64 ()) @"abi0_result<ABI0>",
-          i32 0, i32 0, i32 0, i32 0)
-  %result = call i64 @llvm.experimental.gc.result.i64(token %token)
+          i64 0, i32 0,
+          ptr elementtype(void (ptr)) @"abi0_result<ABI0>",
+          i32 1, i32 0,
+          ptr goret(i64) align 8 "goretindex"="0" %result.addr,
+          i32 0, i32 0)
+  %result = load i64, ptr %result.addr, align 8
   ret i64 %result
 }
 
@@ -112,7 +117,6 @@ entry:
 
 declare token @llvm.experimental.gc.statepoint.p0(
     i64 immarg, i32 immarg, ptr, i32 immarg, i32 immarg, ...)
-declare i64 @llvm.experimental.gc.result.i64(token)
 
 ; Each repair has one symbol-free R_TLS_LE relocation, matching native x86 Go
 ; objects. Calls retain their ABI-specific named targets.

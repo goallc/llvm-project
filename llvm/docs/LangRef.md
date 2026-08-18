@@ -1408,6 +1408,29 @@ Currently, only the following parameter attributes are defined:
     This is intended for representing ABI constraints, and is not
     intended to be inferred for optimization use.
 
+(attr_goret)=
+
+`goret(<ty>)` and `"goretindex"="<n>"`
+:   The `goret` argument attribute marks a pointer parameter as the logical
+    destination of a Go ABI result whose in-memory type is `<ty>`. The paired
+    `"goretindex"="<n>"` string attribute gives that result's zero-based index
+    in the complete Go result sequence. Both attributes are required on the
+    same parameter.
+
+    These attributes are valid only with the `goabiinternal` and `goabi0`
+    calling conventions. The `goret` parameter is an IR-level carrier and is
+    not passed as a machine pointer argument. For a callee, the target binds it
+    to the result's Go ABI stack home. For a call, the target copies the value
+    from that physical result home to the pointer operand after the call.
+    Consequently, the pointer is dereferenceable for the storage size of
+    `<ty>` and the callee may write that storage as its result.
+
+    `goretindex` values must be unique and increasing in parameter order, and
+    each value must be smaller than the number of direct LLVM results plus the
+    number of `goret` results. The type and index are ABI-affecting and must be
+    present consistently on the function and its call sites. Neither attribute
+    is valid for return values.
+
 (attr_preallocated)=
 
 `preallocated(<ty>)`

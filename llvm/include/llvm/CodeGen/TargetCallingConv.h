@@ -33,6 +33,7 @@ namespace ISD {
     unsigned IsSRet : 1;     ///< Hidden struct-ret ptr
     unsigned IsByVal : 1;    ///< Struct passed by value
     unsigned IsByRef : 1;    ///< Passed in memory
+    unsigned IsGoRet : 1;    ///< Go result written to its ABI result home
     unsigned IsNest : 1;     ///< Nested fn static chain
     unsigned IsReturned : 1; ///< Always returned
     unsigned IsSplit : 1;
@@ -57,17 +58,17 @@ namespace ISD {
     /// Whether this is part of a variable argument list (non-fixed).
     unsigned IsVarArg : 1;
 
-    unsigned ByValOrByRefSize = 0; ///< Byval or byref struct size
+    unsigned ByValOrIndirectSize = 0; ///< Byval, byref, or goret size
 
     unsigned PointerAddrSpace = 0; ///< Address space of pointer argument
 
   public:
     ArgFlagsTy()
         : IsZExt(0), IsSExt(0), IsNoExt(0), IsInReg(0), IsSRet(0), IsByVal(0),
-          IsByRef(0), IsNest(0), IsReturned(0), IsSplit(0), IsInAlloca(0),
-          IsPreallocated(0), IsSplitEnd(0), IsSwiftSelf(0), IsSwiftAsync(0),
-          IsSwiftError(0), IsCFGuardTarget(0), IsHva(0), IsHvaStart(0),
-          IsSecArgPass(0), MemAlign(0), OrigAlign(0),
+          IsByRef(0), IsGoRet(0), IsNest(0), IsReturned(0), IsSplit(0),
+          IsInAlloca(0), IsPreallocated(0), IsSplitEnd(0), IsSwiftSelf(0),
+          IsSwiftAsync(0), IsSwiftError(0), IsCFGuardTarget(0), IsHva(0),
+          IsHvaStart(0), IsSecArgPass(0), MemAlign(0), OrigAlign(0),
           IsInConsecutiveRegsLast(0), IsInConsecutiveRegs(0),
           IsCopyElisionCandidate(0), IsPointer(0), IsVarArg(0) {
       static_assert(sizeof(*this) == 4 * sizeof(unsigned), "flags are too big");
@@ -93,6 +94,9 @@ namespace ISD {
 
     bool isByRef() const { return IsByRef; }
     void setByRef() { IsByRef = 1; }
+
+    bool isGoRet() const { return IsGoRet; }
+    void setGoRet() { IsGoRet = 1; }
 
     bool isInAlloca() const { return IsInAlloca; }
     void setInAlloca() { IsInAlloca = 1; }
@@ -176,21 +180,30 @@ namespace ISD {
     }
 
     unsigned getByValSize() const {
-      assert(isByVal() && !isByRef());
-      return ByValOrByRefSize;
+      assert(isByVal() && !isByRef() && !isGoRet());
+      return ByValOrIndirectSize;
     }
     void setByValSize(unsigned S) {
-      assert(isByVal() && !isByRef());
-      ByValOrByRefSize = S;
+      assert(isByVal() && !isByRef() && !isGoRet());
+      ByValOrIndirectSize = S;
     }
 
     unsigned getByRefSize() const {
       assert(!isByVal() && isByRef());
-      return ByValOrByRefSize;
+      return ByValOrIndirectSize;
     }
     void setByRefSize(unsigned S) {
       assert(!isByVal() && isByRef());
-      ByValOrByRefSize = S;
+      ByValOrIndirectSize = S;
+    }
+
+    unsigned getGoRetSize() const {
+      assert(!isByVal() && !isByRef() && isGoRet());
+      return ByValOrIndirectSize;
+    }
+    void setGoRetSize(unsigned S) {
+      assert(!isByVal() && !isByRef() && isGoRet());
+      ByValOrIndirectSize = S;
     }
 
     unsigned getPointerAddrSpace() const { return PointerAddrSpace; }

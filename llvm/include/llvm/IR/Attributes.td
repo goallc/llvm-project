@@ -108,6 +108,11 @@ def ByVal : TypeAttr<"byval", IntersectPreserve, [ParamAttr]>;
 /// Mark in-memory ABI type.
 def ByRef : TypeAttr<"byref", IntersectPreserve, [ParamAttr]>;
 
+/// Go ABI result written through the caller's logical result home. The
+/// companion "goretindex" string attribute identifies this result in the
+/// complete Go result sequence.
+def GoRet : TypeAttr<"goret", IntersectPreserve, [ParamAttr]>;
+
 /// Parameter or return value may not contain uninitialized or poison bits.
 def NoUndef : EnumAttr<"noundef", IntersectAnd, [ParamAttr, RetAttr]>;
 

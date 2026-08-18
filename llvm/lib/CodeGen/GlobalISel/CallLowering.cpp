@@ -51,6 +51,8 @@ static void addFlagsFromAttrSet(ISD::ArgFlagsTy &Flags, AttributeSet Attrs) {
     Flags.setByVal();
   if (Attrs.hasAttribute(Attribute::ByRef))
     Flags.setByRef();
+  if (Attrs.hasAttribute(Attribute::GoRet))
+    Flags.setGoRet();
   if (Attrs.hasAttribute(Attribute::InAlloca)) {
     Flags.setInAlloca();
     // Set the byval flag for CCAssignFn callbacks that don't know about
@@ -250,7 +252,7 @@ void CallLowering::setArgFlags(CallLowering::ArgInfo &Arg, unsigned OpIdx,
 
   Align MemAlign = DL.getABITypeAlign(Arg.Ty);
   if (Flags.isByVal() || Flags.isInAlloca() || Flags.isPreallocated() ||
-      Flags.isByRef()) {
+      Flags.isByRef() || Flags.isGoRet()) {
     assert(OpIdx >= AttributeList::FirstArgIndex);
     unsigned ParamIdx = OpIdx - AttributeList::FirstArgIndex;
 
@@ -258,15 +260,20 @@ void CallLowering::setArgFlags(CallLowering::ArgInfo &Arg, unsigned OpIdx,
     if (!ElementTy)
       ElementTy = FuncInfo.getParamByRefType(ParamIdx);
     if (!ElementTy)
+      ElementTy = FuncInfo.getParamGoRetType(ParamIdx);
+    if (!ElementTy)
       ElementTy = FuncInfo.getParamInAllocaType(ParamIdx);
     if (!ElementTy)
       ElementTy = FuncInfo.getParamPreallocatedType(ParamIdx);
 
-    assert(ElementTy && "Must have byval, inalloca or preallocated type");
+    assert(ElementTy &&
+           "Must have byval, byref, goret, inalloca or preallocated type");
 
     uint64_t MemSize = DL.getTypeAllocSize(ElementTy);
     if (Flags.isByRef())
       Flags.setByRefSize(MemSize);
+    else if (Flags.isGoRet())
+      Flags.setGoRetSize(MemSize);
     else
       Flags.setByValSize(MemSize);
 

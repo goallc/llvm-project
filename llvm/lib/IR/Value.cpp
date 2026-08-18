@@ -843,7 +843,7 @@ bool Value::canBeFreed() const {
   if (isa<AllocaInst>(this))
     return false;
 
-  // Handle byval/byref/sret/inalloca/preallocated arguments.  The storage
+  // Handle byval/byref/goret/sret/inalloca/preallocated arguments.  The storage
   // lifetime is guaranteed to be longer than the callee's lifetime.
   if (auto *A = dyn_cast<Argument>(this)) {
     if (A->hasPointeeInMemoryValueAttr())
@@ -917,7 +917,7 @@ uint64_t Value::getPointerDereferenceableBytes(const DataLayout &DL,
   if (const Argument *A = dyn_cast<Argument>(this)) {
     DerefBytes = A->getDereferenceableBytes();
     if (DerefBytes == 0) {
-      // Handle byval/byref/inalloca/preallocated arguments
+      // Handle byval/byref/goret/inalloca/preallocated arguments.
       if (Type *ArgMemTy = A->getPointeeInMemoryValueType()) {
         if (ArgMemTy->isSized()) {
           // FIXME: Why isn't this the type alloc size?

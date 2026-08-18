@@ -265,6 +265,10 @@ Attribute Attribute::getWithByRefType(LLVMContext &Context, Type *Ty) {
   return get(Context, ByRef, Ty);
 }
 
+Attribute Attribute::getWithGoRetType(LLVMContext &Context, Type *Ty) {
+  return get(Context, GoRet, Ty);
+}
+
 Attribute Attribute::getWithPreallocatedType(LLVMContext &Context, Type *Ty) {
   return get(Context, Preallocated, Ty);
 }
@@ -1216,6 +1220,10 @@ Type *AttributeSet::getByRefType() const {
   return SetNode ? SetNode->getAttributeType(Attribute::ByRef) : nullptr;
 }
 
+Type *AttributeSet::getGoRetType() const {
+  return SetNode ? SetNode->getAttributeType(Attribute::GoRet) : nullptr;
+}
+
 Type *AttributeSet::getByValType() const {
   return SetNode ? SetNode->getAttributeType(Attribute::ByVal) : nullptr;
 }
@@ -2001,6 +2009,10 @@ Type *AttributeList::getParamStructRetType(unsigned Index) const {
 
 Type *AttributeList::getParamByRefType(unsigned Index) const {
   return getAttributes(Index + FirstArgIndex).getByRefType();
+}
+
+Type *AttributeList::getParamGoRetType(unsigned Index) const {
+  return getAttributes(Index + FirstArgIndex).getGoRetType();
 }
 
 Type *AttributeList::getParamPreallocatedType(unsigned Index) const {
