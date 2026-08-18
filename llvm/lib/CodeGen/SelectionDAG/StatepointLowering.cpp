@@ -395,6 +395,41 @@ static SDNode *peelCallResultChain(SDNode *Node) {
   return CommonCallEnd ? CommonCallEnd : Node;
 }
 
+/// Find the target call below post-call result handling. Target lowering may
+/// consume an in-frame result with generic loads and stores or with a
+/// target-specific memory operation. Such nodes still expose their control
+/// predecessor as their only chain operand. A lowered call is identified by
+/// its register-mask operand, which is part of the call-node contract consumed
+/// by LowerAsSTATEPOINT.
+static SDNode *peelToCallNode(SDNode *Node) {
+  if (llvm::any_of(Node->ops(), [](SDValue Op) {
+        return Op.getOpcode() == ISD::RegisterMask;
+      }))
+    return Node;
+
+  if (Node->getOpcode() == ISD::TokenFactor) {
+    SDNode *CommonCall = nullptr;
+    for (SDValue Operand : Node->ops()) {
+      SDNode *Call = peelToCallNode(Operand.getNode());
+      if (CommonCall && CommonCall != Call)
+        return Node;
+      CommonCall = Call;
+    }
+    return CommonCall ? CommonCall : Node;
+  }
+
+  SDNode *ChainPredecessor = nullptr;
+  for (SDValue Operand : Node->ops()) {
+    if (Operand.getValueType() != MVT::Other ||
+        Operand.getOpcode() == ISD::VALUETYPE)
+      continue;
+    if (ChainPredecessor)
+      return Node;
+    ChainPredecessor = Operand.getNode();
+  }
+  return ChainPredecessor ? peelToCallNode(ChainPredecessor) : Node;
+}
+
 static std::pair<SDValue, SDNode *> lowerCallFromStatepointLoweringInfo(
     SelectionDAGBuilder::StatepointLoweringInfo &SI,
     SelectionDAGBuilder &Builder) {
@@ -431,7 +466,7 @@ static std::pair<SDValue, SDNode *> lowerCallFromStatepointLoweringInfo(
   // A calling convention may consume register and stack results before
   // CALLSEQ_END releases the outgoing frame. Peel that result chain to recover
   // the underlying call node.
-  SDNode *CallNode = peelCallResultChain(CallEnd->getOperand(0).getNode());
+  SDNode *CallNode = peelToCallNode(CallEnd->getOperand(0).getNode());
   return std::make_pair(ReturnValue, CallNode);
 }
 

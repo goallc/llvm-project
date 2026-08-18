@@ -140,6 +140,12 @@ bool Argument::hasByRefAttr() const {
   return hasAttribute(Attribute::ByRef);
 }
 
+bool Argument::hasGoRetAttr() const {
+  if (!getType()->isPointerTy())
+    return false;
+  return hasAttribute(Attribute::GoRet);
+}
+
 bool Argument::hasSwiftSelfAttr() const {
   return getParent()->hasParamAttribute(getArgNo(), Attribute::SwiftSelf);
 }
@@ -175,11 +181,11 @@ bool Argument::hasPointeeInMemoryValueAttr() const {
          Attrs.hasAttribute(Attribute::StructRet) ||
          Attrs.hasAttribute(Attribute::InAlloca) ||
          Attrs.hasAttribute(Attribute::Preallocated) ||
-         Attrs.hasAttribute(Attribute::ByRef);
+         Attrs.hasAttribute(Attribute::ByRef) ||
+         Attrs.hasAttribute(Attribute::GoRet);
 }
 
-/// For a byval, sret, inalloca, or preallocated parameter, get the in-memory
-/// parameter type.
+/// For a parameter with an in-memory ABI type, get that type.
 static Type *getMemoryParamAllocType(AttributeSet ParamAttrs) {
   // FIXME: All the type carrying attributes are mutually exclusive, so there
   // should be a single query to get the stored type that handles any of them.
@@ -187,6 +193,8 @@ static Type *getMemoryParamAllocType(AttributeSet ParamAttrs) {
     return ByValTy;
   if (Type *ByRefTy = ParamAttrs.getByRefType())
     return ByRefTy;
+  if (Type *GoRetTy = ParamAttrs.getGoRetType())
+    return GoRetTy;
   if (Type *PreAllocTy = ParamAttrs.getPreallocatedType())
     return PreAllocTy;
   if (Type *InAllocaTy = ParamAttrs.getInAllocaType())
@@ -229,6 +237,11 @@ Type *Argument::getParamStructRetType() const {
 Type *Argument::getParamByRefType() const {
   assert(getType()->isPointerTy() && "Only pointers have byref types");
   return getParent()->getParamByRefType(getArgNo());
+}
+
+Type *Argument::getParamGoRetType() const {
+  assert(getType()->isPointerTy() && "Only pointers have goret types");
+  return getParent()->getParamGoRetType(getArgNo());
 }
 
 Type *Argument::getParamInAllocaType() const {

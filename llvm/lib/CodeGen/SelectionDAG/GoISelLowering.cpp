@@ -11,6 +11,7 @@
 #include "llvm/CodeGen/TargetCallingConv.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/Support/ErrorHandling.h"
+#include <limits>
 
 using namespace llvm;
 
@@ -45,15 +46,32 @@ static void setByValLocation(unsigned ArgIndex, ArrayRef<ArgT> Pieces,
 
 } // namespace
 
-goabi::CallLayout goabi::computeFormalArgLayout(const Function &F,
-                                                ArrayRef<ISD::InputArg> Ins,
-                                                ArrayRef<CCValAssign> ArgLocs,
-                                                uint64_t StackArgsSize,
-                                                const DataLayout &DL,
-                                                const ABIConfig &Config) {
+goabi::CallLayout
+goabi::computeFormalArgLayout(const Function &F, ArrayRef<ISD::InputArg> Ins,
+                              ArrayRef<CCValAssign> ArgLocs,
+                              uint64_t StackArgsSize, uint64_t StackResultsEnd,
+                              const DataLayout &DL, const ABIConfig &Config) {
+  SmallVector<ResultCarrier, 4> MemoryResults;
+  for (const Argument &Arg : F.args()) {
+    if (!Arg.hasGoRetAttr())
+      continue;
+    uint64_t Index;
+    Attribute IndexAttr = F.getAttributes()
+                              .getParamAttrs(Arg.getArgNo())
+                              .getAttribute("goretindex");
+    if (!IndexAttr.isStringAttribute() ||
+        IndexAttr.getValueAsString().getAsInteger(10, Index) ||
+        Index > std::numeric_limits<unsigned>::max())
+      report_fatal_error("invalid goretindex function attribute");
+    MemoryResults.push_back(
+        {static_cast<unsigned>(Index), Arg.getParamGoRetType()});
+  }
+  validateResultCarriers(F.getReturnType(), hasTupleResultsAttr(F),
+                         MemoryResults, F.getCallingConv(), DL, Config);
+
   SmallVector<ValueLayout, 8> ArgLayouts;
   for (const Argument &Arg : F.args()) {
-    if (Arg.hasNestAttr())
+    if (Arg.hasNestAttr() || Arg.hasGoRetAttr())
       continue;
     ValueLayout &Layout = ArgLayouts.emplace_back();
     Layout.Ty =
@@ -63,20 +81,26 @@ goabi::CallLayout goabi::computeFormalArgLayout(const Function &F,
       setByValLocation(Arg.getArgNo(), Ins, ArgLocs, Layout, DL);
   }
 
-  SmallVector<Type *, 8> ResultTys;
-  getReturnTypes(F.getReturnType(), hasTupleResultsAttr(F), ResultTys);
-  return goabi::computeCallLayout(ArgLayouts, StackArgsSize, ResultTys, DL,
-                                  Config);
+  return goabi::computeCallLayout(ArgLayouts, StackArgsSize, StackResultsEnd,
+                                  DL, Config);
 }
 
 goabi::CallLayout
 goabi::computeCallLayout(TargetLowering::CallLoweringInfo &CLI,
                          ArrayRef<CCValAssign> ArgLocs, uint64_t StackArgsSize,
-                         const ABIConfig &Config) {
+                         uint64_t StackResultsEnd, const ABIConfig &Config) {
   const TargetLowering::ArgListTy &Args = CLI.getArgs();
+  SmallVector<ResultCarrier, 4> MemoryResults;
+  for (const TargetLowering::ArgListEntry &Arg : Args)
+    if (Arg.IsGoRet)
+      MemoryResults.push_back({Arg.GoRetIndex, Arg.IndirectType});
+  bool TupleResults = CLI.CB && hasTupleResultsAttr(*CLI.CB);
+  validateResultCarriers(CLI.OrigRetTy, TupleResults, MemoryResults,
+                         CLI.CallConv, CLI.DAG.getDataLayout(), Config);
+
   SmallVector<ValueLayout, 8> ArgLayouts;
   for (auto [I, Arg] : llvm::enumerate(Args)) {
-    if (Arg.IsNest)
+    if (Arg.IsNest || Arg.IsGoRet)
       continue;
     Type *Ty = Arg.IsByVal ? Arg.IndirectType : Arg.OrigTy;
     if (!Ty)
@@ -89,9 +113,6 @@ goabi::computeCallLayout(TargetLowering::CallLoweringInfo &CLI,
                        CLI.DAG.getDataLayout());
   }
 
-  SmallVector<Type *, 8> ResultTys;
-  getReturnTypes(CLI.RetTy, CLI.CB && goabi::hasTupleResultsAttr(*CLI.CB),
-                 ResultTys);
-  return goabi::computeCallLayout(ArgLayouts, StackArgsSize, ResultTys,
+  return goabi::computeCallLayout(ArgLayouts, StackArgsSize, StackResultsEnd,
                                   CLI.DAG.getDataLayout(), Config);
 }

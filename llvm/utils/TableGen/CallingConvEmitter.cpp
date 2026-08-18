@@ -319,6 +319,12 @@ void CallingConvEmitter::emitAction(const Record *Action, indent Indent,
     O << Indent << "State.HandleByVal(ValNo, ValVT, LocVT, LocInfo, " << Size
       << ", Align(" << Align << "), ArgFlags);\n";
     O << Indent << "return false;\n";
+  } else if (Action->isSubClassOf("CCPassGoRet")) {
+    int Size = Action->getValueAsInt("Size");
+    int Align = Action->getValueAsInt("Align");
+    O << Indent << "State.HandleGoRet(ValNo, ValVT, LocVT, LocInfo, " << Size
+      << ", Align(" << Align << "), ArgFlags);\n";
+    O << Indent << "return false;\n";
   } else if (Action->isSubClassOf("CCCustom")) {
     O << Indent << "if (" << Action->getValueAsString("FuncName")
       << "(ValNo, ValVT, "

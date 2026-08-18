@@ -8909,21 +8909,6 @@ static constexpr unsigned AArch64GoXRegs[] = {
     AArch64::X4,  AArch64::X5,  AArch64::X6,  AArch64::X7,
     AArch64::X8,  AArch64::X9,  AArch64::X10, AArch64::X11,
     AArch64::X12, AArch64::X13, AArch64::X14, AArch64::X15};
-static constexpr unsigned AArch64GoWRegs[] = {
-    AArch64::W0,  AArch64::W1,  AArch64::W2,  AArch64::W3,
-    AArch64::W4,  AArch64::W5,  AArch64::W6,  AArch64::W7,
-    AArch64::W8,  AArch64::W9,  AArch64::W10, AArch64::W11,
-    AArch64::W12, AArch64::W13, AArch64::W14, AArch64::W15};
-static constexpr unsigned AArch64GoHRegs[] = {
-    AArch64::H0,  AArch64::H1,  AArch64::H2,  AArch64::H3,
-    AArch64::H4,  AArch64::H5,  AArch64::H6,  AArch64::H7,
-    AArch64::H8,  AArch64::H9,  AArch64::H10, AArch64::H11,
-    AArch64::H12, AArch64::H13, AArch64::H14, AArch64::H15};
-static constexpr unsigned AArch64GoSRegs[] = {
-    AArch64::S0,  AArch64::S1,  AArch64::S2,  AArch64::S3,
-    AArch64::S4,  AArch64::S5,  AArch64::S6,  AArch64::S7,
-    AArch64::S8,  AArch64::S9,  AArch64::S10, AArch64::S11,
-    AArch64::S12, AArch64::S13, AArch64::S14, AArch64::S15};
 static constexpr unsigned AArch64GoDRegs[] = {
     AArch64::D0,  AArch64::D1,  AArch64::D2,  AArch64::D3,
     AArch64::D4,  AArch64::D5,  AArch64::D6,  AArch64::D7,
@@ -8956,65 +8941,9 @@ static unsigned getAArch64GoStackBias(CallingConv::ID CallConv) {
   return goabi::isGoCallingConv(CallConv) ? 8 : 0;
 }
 
-static MVT getAArch64GoCopyVT(MVT VT) {
-  if (VT.isInteger() && VT.getSizeInBits() < 32)
-    return MVT::i32;
-  return VT;
-}
-
-// Keep the original ABI piece width in memory even when SelectionDAG legalizes
-// the value to a wider integer type.
-static SDValue loadAArch64GoStackPiece(SelectionDAG &DAG, SDValue Chain,
-                                       const SDLoc &DL, EVT ValueVT, EVT MemVT,
-                                       SDValue Addr,
-                                       MachinePointerInfo PointerInfo) {
-  if (ValueVT == MemVT)
-    return DAG.getLoad(ValueVT, DL, Chain, Addr, PointerInfo);
-  assert(ValueVT.isInteger() && MemVT.isInteger() &&
-         "unexpected widened Go ABI stack piece");
-  return DAG.getExtLoad(ISD::EXTLOAD, DL, ValueVT, Chain, Addr, PointerInfo,
-                        MemVT);
-}
-
-static SDValue storeAArch64GoStackPiece(SelectionDAG &DAG, SDValue Chain,
-                                        const SDLoc &DL, SDValue Value,
-                                        EVT MemVT, SDValue Addr,
-                                        MachinePointerInfo PointerInfo) {
-  if (Value.getValueType() == MemVT)
-    return DAG.getStore(Chain, DL, Value, Addr, PointerInfo);
-  assert(Value.getValueType().isInteger() && MemVT.isInteger() &&
-         "unexpected widened Go ABI stack piece");
-  return DAG.getTruncStore(Chain, DL, Value, Addr, PointerInfo, MemVT);
-}
-
 static bool isAArch64GoFloatPiece(Type *Ty) {
-  return goabi::isFloatingPiece(Ty);
-}
-
-static unsigned getAArch64GoPhysReg(MVT VT, Type *OrigTy, unsigned IntIndex,
-                                    unsigned FPIndex) {
-  if (isAArch64GoFloatPiece(OrigTy)) {
-    switch (getAArch64GoCopyVT(VT).SimpleTy) {
-    case MVT::f16:
-    case MVT::bf16:
-      return AArch64GoHRegs[FPIndex];
-    case MVT::f32:
-      return AArch64GoSRegs[FPIndex];
-    case MVT::f64:
-      return AArch64GoDRegs[FPIndex];
-    default:
-      llvm_unreachable("unsupported Go FP value type");
-    }
-  }
-  return getAArch64GoCopyVT(VT) == MVT::i64 ? AArch64GoXRegs[IntIndex]
-                                            : AArch64GoWRegs[IntIndex];
-}
-
-static SmallVector<Type *, 8>
-getAArch64GoReturnTypes(Type *RetTy, const AttributeList &Attrs) {
-  SmallVector<Type *, 8> ResultTys;
-  goabi::getReturnTypes(RetTy, goabi::hasTupleResultsAttr(Attrs), ResultTys);
-  return ResultTys;
+  return Ty && (Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||
+                Ty->isDoubleTy());
 }
 
 struct AArch64GoFormalArgInfo {
@@ -9025,7 +8954,7 @@ struct AArch64GoFormalArgInfo {
 static AArch64GoFormalArgInfo prepareAArch64GoFormalArguments(
     const AArch64TargetLowering &TLI, MachineFunction &MF,
     ArrayRef<ISD::InputArg> Ins, ArrayRef<CCValAssign> ArgLocs,
-    uint64_t StackArgsSize, SelectionDAG &DAG) {
+    uint64_t StackArgsSize, uint64_t StackResultsEnd, SelectionDAG &DAG) {
   const Function &F = MF.getFunction();
   const AArch64Subtarget &Subtarget = MF.getSubtarget<AArch64Subtarget>();
   auto *FuncInfo = MF.getInfo<AArch64FunctionInfo>();
@@ -9034,6 +8963,7 @@ static AArch64GoFormalArgInfo prepareAArch64GoFormalArguments(
       getAArch64GoABIConfig(TLI, Subtarget, F.getCallingConv());
   AArch64GoFormalArgInfo Info;
   Info.Layout = goabi::computeFormalArgLayout(F, Ins, ArgLocs, StackArgsSize,
+                                              StackResultsEnd,
                                               DAG.getDataLayout(), ABIConfig);
   const goabi::CallLayout &Layout = Info.Layout;
   MFI.setGoABIArgSizes(Layout.StackArgsSize, Layout.ArgSize);
@@ -9093,6 +9023,29 @@ static AArch64GoFormalArgInfo prepareAArch64GoFormalArguments(
     if (Arg.hasNestAttr())
       continue;
 
+    if (Arg.hasGoRetAttr()) {
+      const ISD::InputArg *Carrier = nullptr;
+      const CCValAssign *CarrierLoc = nullptr;
+      for (auto [I, In] : llvm::enumerate(Ins)) {
+        if (In.OrigArgIndex != Arg.getArgNo())
+          continue;
+        if (Carrier)
+          report_fatal_error("invalid split AArch64 goret carrier");
+        Carrier = &In;
+        CarrierLoc = &ArgLocs[I];
+      }
+      uint64_t Size =
+          DAG.getDataLayout().getTypeAllocSize(Arg.getParamGoRetType());
+      if (!Carrier || !Carrier->Flags.isGoRet() || !CarrierLoc->isMemLoc() ||
+          Carrier->Flags.getGoRetSize() != Size ||
+          CarrierLoc->getLocMemOffset() < int64_t(StackArgsSize))
+        report_fatal_error("invalid AArch64 goret result home");
+      Info.HomeFIs[Arg.getArgNo()] =
+          MFI.CreateFixedObject(Size, StackBias + CarrierLoc->getLocMemOffset(),
+                                /*IsImmutable=*/false, /*IsAliased=*/true);
+      continue;
+    }
+
     if (NextLayoutIndex >= Layout.Args.size())
       report_fatal_error("AArch64 Go argument has no logical layout");
     unsigned LayoutIndex = NextLayoutIndex++;
@@ -9146,152 +9099,13 @@ static AArch64GoFormalArgInfo prepareAArch64GoFormalArguments(
   return Info;
 }
 
-static SDValue lowerAArch64GoReturn(const AArch64TargetLowering &TLI,
-                                    SDValue Chain, MachineFunction &MF,
-                                    const SmallVectorImpl<ISD::OutputArg> &Outs,
-                                    const SmallVectorImpl<SDValue> &OutVals,
-                                    const SDLoc &DL, SelectionDAG &DAG) {
-  const AArch64Subtarget &Subtarget = MF.getSubtarget<AArch64Subtarget>();
-  MachineFrameInfo &MFI = MF.getFrameInfo();
-  if (!MFI.hasGoABIArgSizes())
-    report_fatal_error("missing AArch64 Go ABI argument layout");
-  SmallVector<Type *, 8> ResultTys = getAArch64GoReturnTypes(
-      MF.getFunction().getReturnType(), MF.getFunction().getAttributes());
-  goabi::CallLayout Layout = goabi::computeCallLayout(
-      {}, MFI.getGoABIStackArgsSize(), ResultTys, DAG.getDataLayout(),
-      getAArch64GoABIConfig(TLI, Subtarget, MF.getFunction().getCallingConv()));
-  unsigned StackBias = getAArch64GoStackBias(MF.getFunction().getCallingConv());
-
-  SmallVector<SDValue, 8> MemOps;
-  SmallVector<std::pair<unsigned, SDValue>, 8> RetRegs;
-  SmallVector<unsigned, 8> IntPieces(Layout.Results.size(), 0);
-  SmallVector<unsigned, 8> FPPieces(Layout.Results.size(), 0);
-  for (auto [I, Out] : llvm::enumerate(Outs)) {
-    unsigned ResultIndex = Out.OrigArgIndex;
-    if (ResultIndex >= Layout.Results.size())
-      report_fatal_error("AArch64 Go return piece has no logical result");
-    const goabi::ValueLayout &ResultLayout = Layout.Results[ResultIndex];
-    SDValue Val = OutVals[I];
-    if (ResultLayout.InRegs) {
-      MVT CopyVT = getAArch64GoCopyVT(Val.getSimpleValueType());
-      if (Val.getSimpleValueType() != CopyVT)
-        Val = DAG.getNode(ISD::ZERO_EXTEND, DL, CopyVT, Val);
-      bool IsFP = isAArch64GoFloatPiece(Out.OrigTy);
-      unsigned Piece =
-          IsFP ? FPPieces[ResultIndex]++ : IntPieces[ResultIndex]++;
-      unsigned PReg = getAArch64GoPhysReg(
-          Out.VT, Out.OrigTy, ResultLayout.IntRegStart + (IsFP ? 0 : Piece),
-          ResultLayout.FPRegStart + (IsFP ? Piece : 0));
-      RetRegs.emplace_back(PReg, Val);
-      continue;
-    }
-
-    unsigned Size = static_cast<unsigned>(
-        std::max<uint64_t>(1, Out.ArgVT.getStoreSize().getKnownMinValue()));
-    int FI = MFI.CreateFixedObject(
-        Size, StackBias + ResultLayout.StackOffset + Out.PartOffset,
-        /*IsImmutable=*/false);
-    if (MF.getInfo<AArch64FunctionInfo>()->hasGoABI0FrameIndex())
-      MFI.setIsAliasedObjectIndex(FI, true);
-    SDValue Addr = DAG.getFrameIndex(FI, TLI.getPointerTy(DAG.getDataLayout()));
-    MemOps.push_back(
-        storeAArch64GoStackPiece(DAG, Chain, DL, Val, Out.ArgVT, Addr,
-                                 MachinePointerInfo::getFixedStack(MF, FI)));
-  }
-
-  if (!MemOps.empty())
-    Chain = DAG.getNode(ISD::TokenFactor, DL, MVT::Other, MemOps);
-
-  SDValue Glue;
-  SmallVector<SDValue, 12> RetOps(1, Chain);
-  for (const auto &[Reg, Val] : RetRegs) {
-    Chain = DAG.getCopyToReg(Chain, DL, Reg, Val, Glue);
-    Glue = Chain.getValue(1);
-    RetOps.push_back(DAG.getRegister(Reg, Val.getValueType()));
-  }
-
-  RetOps[0] = Chain;
-  if (Glue.getNode())
-    RetOps.push_back(Glue);
-  return DAG.getNode(AArch64ISD::RET_GLUE, DL, MVT::Other, RetOps);
-}
-
-static SDValue lowerAArch64GoCallResults(const AArch64TargetLowering &TLI,
-                                         SDValue Chain, SDValue InGlue,
-                                         ArrayRef<ISD::InputArg> Ins,
-                                         const goabi::CallLayout &Layout,
-                                         unsigned StackBias, unsigned NumBytes,
-                                         const SDLoc &DL, SelectionDAG &DAG,
-                                         SmallVectorImpl<SDValue> &InVals) {
-  MachineFunction &MF = DAG.getMachineFunction();
-  MVT PtrVT = TLI.getPointerTy(DAG.getDataLayout());
-  SmallVector<SDValue, 8> ResultVals(Ins.size());
-
-  SmallVector<unsigned, 8> IntPieces(Layout.Results.size(), 0);
-  SmallVector<unsigned, 8> FPPieces(Layout.Results.size(), 0);
-  for (auto [I, In] : llvm::enumerate(Ins)) {
-    unsigned ResultIndex = In.OrigArgIndex;
-    if (ResultIndex >= Layout.Results.size())
-      report_fatal_error("AArch64 Go call result piece has no logical result");
-    const goabi::ValueLayout &ResultLayout = Layout.Results[ResultIndex];
-    if (!ResultLayout.InRegs)
-      continue;
-    MVT CopyVT = getAArch64GoCopyVT(In.VT);
-    bool IsFP = isAArch64GoFloatPiece(In.OrigTy);
-    unsigned Piece = IsFP ? FPPieces[ResultIndex]++ : IntPieces[ResultIndex]++;
-    unsigned PReg = getAArch64GoPhysReg(
-        In.VT, In.OrigTy, ResultLayout.IntRegStart + (IsFP ? 0 : Piece),
-        ResultLayout.FPRegStart + (IsFP ? Piece : 0));
-    SDValue Val = DAG.getCopyFromReg(Chain, DL, PReg, CopyVT, InGlue);
-    Chain = Val.getValue(1);
-    InGlue = Val.getValue(2);
-    ResultVals[I] =
-        In.VT == CopyVT ? Val : DAG.getNode(ISD::TRUNCATE, DL, In.VT, Val);
-  }
-
-  // Register results must be read before stack result loads. Keeping the call
-  // sequence active also keeps the outgoing Go frame, and therefore the
-  // post-growth result addresses, valid until every stack result is consumed.
-  bool HasStackResults = llvm::any_of(Ins, [&](const ISD::InputArg &In) {
-    return In.OrigArgIndex >= Layout.Results.size() ||
-           !Layout.Results[In.OrigArgIndex].InRegs;
-  });
-  SDValue ResultStackPtr;
-  if (HasStackResults) {
-    ResultStackPtr = DAG.getCopyFromReg(Chain, DL, AArch64::SP, PtrVT, InGlue);
-    Chain = ResultStackPtr.getValue(1);
-    InGlue = ResultStackPtr.getValue(2);
-  }
-  for (auto [I, In] : llvm::enumerate(Ins)) {
-    unsigned ResultIndex = In.OrigArgIndex;
-    if (ResultIndex >= Layout.Results.size())
-      report_fatal_error("AArch64 Go call result piece has no logical result");
-    const goabi::ValueLayout &ResultLayout = Layout.Results[ResultIndex];
-    if (ResultLayout.InRegs)
-      continue;
-    uint64_t Offset = StackBias + ResultLayout.StackOffset + In.PartOffset;
-    SDValue Addr = DAG.getNode(ISD::ADD, DL, PtrVT, ResultStackPtr,
-                               DAG.getIntPtrConstant(Offset, DL));
-    SDValue Load =
-        loadAArch64GoStackPiece(DAG, Chain, DL, In.VT, In.ArgVT, Addr,
-                                MachinePointerInfo::getStack(MF, Offset));
-    Chain = Load.getValue(1);
-    ResultVals[I] = Load;
-  }
-
-  Chain = DAG.getCALLSEQ_END(Chain, NumBytes, 0,
-                             HasStackResults ? SDValue() : InGlue, DL);
-  InVals.append(ResultVals.begin(), ResultVals.end());
-  return Chain;
-}
-
 } // namespace
 
 std::optional<TargetLowering::ArgumentCopyElisionFrameInfo>
 AArch64TargetLowering::getArgumentCopyElisionFrameInfo(
     const Argument &Arg, MachineFunction &MF) const {
   if (!goabi::isGoCallingConv(MF.getFunction().getCallingConv()) ||
-      Arg.hasByValAttr())
+      Arg.hasByValAttr() || Arg.hasGoRetAttr())
     return std::nullopt;
   const auto *FuncInfo = MF.getInfo<AArch64FunctionInfo>();
   uint64_t ArgSize = MF.getDataLayout().getTypeAllocSize(Arg.getType());
@@ -9431,6 +9245,9 @@ AArch64TargetLowering::CCAssignFnForReturn(CallingConv::ID CC) const {
   switch (CC) {
   default:
     return RetCC_AArch64_AAPCS;
+  case CallingConv::GoABIInternal:
+  case CallingConv::GoABI0:
+    return CC_AArch64_Go;
   case CallingConv::ARM64EC_Thunk_X64:
     return RetCC_AArch64_Arm64EC_Thunk;
   case CallingConv::CFGuard_Check:
@@ -9553,6 +9370,7 @@ SDValue AArch64TargetLowering::LowerFormalArguments(
   std::optional<AArch64GoFormalArgInfo> GoInfo;
   if (IsGo)
     GoInfo = prepareAArch64GoFormalArguments(*this, MF, Ins, ArgLocs,
+                                             CCInfo.getGoStackArgsSize(),
                                              CCInfo.getStackSize(), DAG);
 
   SMEAttrs Attrs = FuncInfo->getSMEFnAttrs();
@@ -9565,13 +9383,13 @@ SDValue AArch64TargetLowering::LowerFormalArguments(
   for (unsigned i = 0, e = Ins.size(); i != e; ++i) {
     CCValAssign &VA = ArgLocs[i - ExtraArgLocs];
 
-    if (Ins[i].Flags.isByVal()) {
+    if (Ins[i].Flags.isByVal() || Ins[i].Flags.isGoRet()) {
       if (IsGo) {
         unsigned ArgIndex = Ins[i].OrigArgIndex;
         if (ArgIndex == ISD::InputArg::NoArgIndex ||
             ArgIndex >= GoInfo->HomeFIs.size() ||
             GoInfo->HomeFIs[ArgIndex] == INT_MAX)
-          report_fatal_error("AArch64 Go byval argument has no incoming home");
+          report_fatal_error("AArch64 Go memory carrier has no incoming home");
         InVals.push_back(DAG.getFrameIndex(GoInfo->HomeFIs[ArgIndex],
                                            getPointerTy(DAG.getDataLayout())));
         continue;
@@ -10684,19 +10502,17 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
   unsigned GoStackBias = 0;
   if (IsGo) {
     GoLayout = goabi::computeCallLayout(
-        CLI, ArgLocs, CCInfo.getStackSize(),
+        CLI, ArgLocs, CCInfo.getGoStackArgsSize(), CCInfo.getStackSize(),
         getAArch64GoABIConfig(*this, *Subtarget, CallConv));
     GoStackBias = getAArch64GoStackBias(CallConv);
   }
 
   // Assign locations to each value returned by this call.
   SmallVector<CCValAssign, 16> RVLocs;
-  if (!IsGo) {
-    CCAssignFn *RetCC = CCAssignFnForReturn(CallConv);
-    CCState RetCCInfo(CallConv, IsVarArg, DAG.getMachineFunction(), RVLocs,
-                      *DAG.getContext());
-    RetCCInfo.AnalyzeCallResult(Ins, RetCC);
-  }
+  CCAssignFn *RetCC = CCAssignFnForReturn(CallConv);
+  CCState RetCCInfo(CallConv, IsVarArg, DAG.getMachineFunction(), RVLocs,
+                    *DAG.getContext());
+  RetCCInfo.AnalyzeCallResult(Ins, RetCC);
 
   // Set type id for call site info.
   setTypeIdForCallsiteInfo(CB, MF, CSInfo);
@@ -10894,6 +10710,11 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
     CCValAssign &VA = ArgLocs[i - ExtraArgLocs];
     SDValue Arg = OutVals[i];
     ISD::ArgFlagsTy Flags = Outs[i].Flags;
+
+    // A goret carrier reserves an in-frame result object. Its IR pointer is
+    // the post-call copy destination, not a machine call operand.
+    if (Flags.isGoRet())
+      continue;
 
     // Promote the value if needed.
     switch (VA.getLocInfo()) {
@@ -11309,9 +11130,47 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
       MF.getFunction().getParent()->getModuleFlag("import-call-optimization"))
     DAG.addCalledGlobal(Chain.getNode(), CalledGlobal, OpFlags);
 
-  if (IsGo)
-    return lowerAArch64GoCallResults(*this, Chain, InGlue, Ins, GoLayout,
-                                     GoStackBias, NumBytes, DL, DAG, InVals);
+  if (IsGo) {
+    Chain = LowerCallResult(Chain, InGlue, CallConv, IsVarArg, RVLocs, DL, DAG,
+                            InVals, /*isThisReturn=*/false, SDValue(),
+                            RequiresSMChange);
+
+    bool HasGoRet = llvm::any_of(
+        Outs, [](const ISD::OutputArg &Out) { return Out.Flags.isGoRet(); });
+    SDValue ResultGlue =
+        Ins.empty() ? InGlue : Chain.getValue(Chain->getNumValues() - 1);
+    if (HasGoRet) {
+      MVT PtrVT = getPointerTy(DAG.getDataLayout());
+      SDValue ResultStackPtr =
+          DAG.getCopyFromReg(Chain, DL, AArch64::SP, PtrVT, ResultGlue);
+      Chain = ResultStackPtr.getValue(1);
+
+      SmallVector<SDValue, 4> Copies;
+      for (auto [I, VA] : llvm::enumerate(ArgLocs)) {
+        const ISD::ArgFlagsTy &Flags = Outs[I].Flags;
+        if (!Flags.isGoRet())
+          continue;
+        if (!VA.isMemLoc() || VA.getLocMemOffset() < 0)
+          report_fatal_error("invalid AArch64 goret call location");
+        uint64_t Offset =
+            GoStackBias + static_cast<uint64_t>(VA.getLocMemOffset());
+        SDValue Source = DAG.getNode(ISD::ADD, DL, PtrVT, ResultStackPtr,
+                                     DAG.getIntPtrConstant(Offset, DL));
+        Copies.push_back(DAG.getMemcpy(
+            Chain, DL, OutVals[I], Source,
+            DAG.getConstant(Flags.getGoRetSize(), DL, PtrVT),
+            Flags.getNonZeroMemAlign(), Flags.getNonZeroMemAlign(),
+            /*isVol=*/false, /*AlwaysInline=*/true, /*CI=*/nullptr,
+            std::nullopt, MachinePointerInfo(),
+            MachinePointerInfo::getStack(MF, Offset)));
+      }
+      if (!Copies.empty())
+        Chain = DAG.getNode(ISD::TokenFactor, DL, MVT::Other, Copies);
+      ResultGlue = SDValue();
+    }
+
+    return DAG.getCALLSEQ_END(Chain, NumBytes, 0, ResultGlue, DL);
+  }
 
   uint64_t CalleePopBytes =
       DoesCalleeRestoreStack(CallConv, TailCallOpt) ? alignTo(NumBytes, 16) : 0;
@@ -11370,11 +11229,18 @@ bool AArch64TargetLowering::CanLowerReturn(
     const SmallVectorImpl<ISD::OutputArg> &Outs, LLVMContext &Context,
     const Type *RetTy) const {
   if (goabi::isGoCallingConv(CallConv))
-    return !isVarArg;
+    if (isVarArg)
+      return false;
   CCAssignFn *RetCC = CCAssignFnForReturn(CallConv);
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, isVarArg, MF, RVLocs, Context);
-  return CCInfo.CheckReturn(Outs, RetCC);
+  if (!CCInfo.CheckReturn(Outs, RetCC)) {
+    if (goabi::isGoCallingConv(CallConv))
+      report_fatal_error(
+          "AArch64 Go direct return exceeds the register ABI; use goret");
+    return false;
+  }
+  return true;
 }
 
 SDValue
@@ -11383,9 +11249,6 @@ AArch64TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
                                    const SmallVectorImpl<ISD::OutputArg> &Outs,
                                    const SmallVectorImpl<SDValue> &OutVals,
                                    const SDLoc &DL, SelectionDAG &DAG) const {
-  if (goabi::isGoCallingConv(CallConv))
-    return lowerAArch64GoReturn(*this, Chain, DAG.getMachineFunction(), Outs,
-                                OutVals, DL, DAG);
   auto &MF = DAG.getMachineFunction();
   auto *FuncInfo = MF.getInfo<AArch64FunctionInfo>();
 

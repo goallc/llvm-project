@@ -587,6 +587,10 @@ def CC_AArch64_Go : CallingConv<[
   // The closure context is not part of the ordinary Go argument layout.
   CCIfNest<CCIfType<[i64], CCAssignToReg<[X26]>>>,
 
+  // A goret pointer is an IR carrier for an in-frame result object, not a
+  // machine pointer argument.
+  CCIfGoRet<CCPassGoRet<0, 1>>,
+
   // Preserve the exact size and alignment carried by byval(T).
   CCIfByVal<CCPassByVal<0, 1>>,
 
