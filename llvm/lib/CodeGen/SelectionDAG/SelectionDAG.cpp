@@ -56,6 +56,7 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Casting.h"
@@ -9566,6 +9567,139 @@ getMemcpyLoadsAndStores(SelectionDAG &DAG, const SDLoc &dl, SDValue Chain,
   return DAG.getNode(ISD::TokenFactor, dl, MVT::Other, OutChains);
 }
 
+static SDValue tryForwardByValStores(SelectionDAG &DAG, const SDLoc &DL,
+                                     SDValue Chain, SDValue Dst, SDValue Src,
+                                     uint64_t Size, Align DstAlign,
+                                     MachinePointerInfo DstPtrInfo) {
+  auto *SrcFI = dyn_cast<FrameIndexSDNode>(Src);
+  if (!SrcFI)
+    return SDValue();
+
+  MachineFunction &MF = DAG.getMachineFunction();
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  int FI = SrcFI->getIndex();
+
+  if (MF.getTarget().getOptLevel() == CodeGenOptLevel::None)
+    return SDValue();
+
+  // Incoming argument-copy elision has priority. Its result is a fixed
+  // canonical home whose initialization remains required even if that home is
+  // subsequently used as a byval source.
+  if (MFI.isFixedObjectIndex(FI))
+    return SDValue();
+  const AllocaInst *AI = MFI.getObjectAllocation(FI);
+  if (!AI || !isSingleByValCallCarrier(*AI, DAG.getDataLayout()) ||
+      MFI.getObjectSize(FI) != static_cast<int64_t>(Size) ||
+      MFI.getObjectAlign(FI) > DstAlign)
+    return SDValue();
+
+  SmallVector<StoreSDNode *, 8> Stores;
+  SmallVector<LifetimeSDNode *, 2> Lifetimes;
+  SmallVector<SDNode *, 8> Worklist;
+  SmallPtrSet<SDNode *, 8> Visited;
+
+  for (SDNode &N : DAG.allnodes())
+    if (const auto *FIN = dyn_cast<FrameIndexSDNode>(&N);
+        FIN && FIN->getIndex() == FI)
+      Worklist.push_back(&N);
+
+  while (!Worklist.empty()) {
+    SDNode *N = Worklist.pop_back_val();
+    if (!Visited.insert(N).second)
+      continue;
+    for (SDUse &U : N->uses()) {
+      SDNode *User = U.getUser();
+      if (auto *ST = dyn_cast<StoreSDNode>(User)) {
+        if (U.getOperandNo() != 2 || !ST->isSimple() || ST->isIndexed())
+          return SDValue();
+        Stores.push_back(ST);
+        continue;
+      }
+      if (auto *Lifetime = dyn_cast<LifetimeSDNode>(User)) {
+        Lifetimes.push_back(Lifetime);
+        continue;
+      }
+      if (User->getOpcode() == ISD::ADD || User->getOpcode() == ISD::PTRADD) {
+        unsigned OtherOp = U.getOperandNo() ^ 1;
+        if (U.getOperandNo() > 1 ||
+            !isa<ConstantSDNode>(User->getOperand(OtherOp)))
+          return SDValue();
+        Worklist.push_back(User);
+        continue;
+      }
+      if (User->getOpcode() == ISD::BITCAST ||
+          User->getOpcode() == ISD::ADDRSPACECAST) {
+        Worklist.push_back(User);
+        continue;
+      }
+      return SDValue();
+    }
+  }
+
+  if (Stores.empty())
+    return SDValue();
+
+  struct ForwardedStore {
+    SDValue Value;
+    EVT MemVT;
+    uint64_t Offset;
+    bool IsTruncating;
+  };
+  SmallVector<ForwardedStore, 8> Forwarded;
+  SmallVector<std::pair<uint64_t, uint64_t>, 8> Ranges;
+  for (StoreSDNode *ST : Stores) {
+    BaseIndexOffset StoreBase = BaseIndexOffset::match(ST, DAG);
+    const auto *BaseFI = dyn_cast<FrameIndexSDNode>(StoreBase.getBase());
+    TypeSize StoreSize = ST->getMemoryVT().getStoreSize();
+    if (!BaseFI || BaseFI->getIndex() != FI || StoreBase.getIndex().getNode() ||
+        !StoreBase.hasValidOffset() || StoreBase.getOffset() < 0 ||
+        StoreSize.isScalable())
+      return SDValue();
+    uint64_t Offset = static_cast<uint64_t>(StoreBase.getOffset());
+    uint64_t Bytes = StoreSize.getFixedValue();
+    if (Offset > Size || Bytes > Size - Offset)
+      return SDValue();
+    Forwarded.push_back(
+        {ST->getValue(), ST->getMemoryVT(), Offset, ST->isTruncatingStore()});
+    Ranges.emplace_back(Offset, Offset + Bytes);
+  }
+
+  llvm::sort(Ranges);
+  for (unsigned I = 1; I != Ranges.size(); ++I)
+    if (Ranges[I - 1].second > Ranges[I].first)
+      return SDValue();
+
+  auto RemoveChainNode = [&](SDNode *N) {
+    SDValue Old(N, 0);
+    SDValue Input = N->getOperand(0);
+    if (Chain == Old)
+      Chain = Input;
+    DAG.ReplaceAllUsesOfValueWith(Old, Input);
+  };
+  for (StoreSDNode *ST : Stores)
+    RemoveChainNode(ST);
+  for (LifetimeSDNode *Lifetime : Lifetimes)
+    RemoveChainNode(Lifetime);
+  MFI.RemoveStackObject(FI);
+
+  SmallVector<SDValue, 8> NewStores;
+  for (const ForwardedStore &ST : Forwarded) {
+    SDValue Ptr =
+        DAG.getObjectPtrOffset(DL, Dst, TypeSize::getFixed(ST.Offset));
+    MachinePointerInfo PtrInfo = DstPtrInfo.getWithOffset(ST.Offset);
+    Align Alignment = commonAlignment(DstAlign, ST.Offset);
+    if (ST.IsTruncating)
+      NewStores.push_back(DAG.getTruncStore(Chain, DL, ST.Value, Ptr, PtrInfo,
+                                            ST.MemVT, Alignment));
+    else
+      NewStores.push_back(
+          DAG.getStore(Chain, DL, ST.Value, Ptr, PtrInfo, Alignment));
+  }
+  return NewStores.size() == 1
+             ? NewStores.front()
+             : DAG.getNode(ISD::TokenFactor, DL, MVT::Other, NewStores);
+}
+
 static SDValue getMemmoveLoadsAndStores(
     SelectionDAG &DAG, const SDLoc &dl, SDValue Chain, SDValue Dst, SDValue Src,
     uint64_t Size, Align DstAlign, Align SrcAlign, bool isVol,
@@ -10003,6 +10137,12 @@ SDValue SelectionDAG::getMemcpy(
     // Memcpy with size zero? Just return the original chain.
     if (ConstantSize->isZero())
       return Chain;
+
+    if (!isVol)
+      if (SDValue Forwarded = tryForwardByValStores(
+              *this, dl, Chain, Dst, Src, ConstantSize->getZExtValue(),
+              DstAlign, DstPtrInfo))
+        return Forwarded;
 
     SDValue Result = getMemcpyLoadsAndStores(
         *this, dl, Chain, Dst, Src, ConstantSize->getZExtValue(), DstAlign,

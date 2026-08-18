@@ -21,6 +21,7 @@
 namespace llvm {
 template <typename T> class SmallVectorImpl;
 class GlobalValue;
+class AllocaInst;
 class LLT;
 class MachineBasicBlock;
 class MachineFunction;
@@ -94,6 +95,13 @@ LLVM_ABI void computeValueLLTs(const DataLayout &DL, Type &Ty,
                                SmallVectorImpl<LLT> &ValueLLTs,
                                SmallVectorImpl<uint64_t> *FixedOffsets,
                                uint64_t FixedStartingOffset = 0);
+
+/// Return true when \p Alloca is a private initialization buffer consumed by
+/// exactly one byval argument, with no intervening call or escaping address.
+/// The callee's argument layout describes the outgoing copy, so the source
+/// object has no semantic lifetime at the consuming call's safepoint.
+LLVM_ABI bool isSingleByValCallCarrier(const AllocaInst &Alloca,
+                                       const DataLayout &DL);
 
 /// ExtractTypeInfo - Returns the type info, possibly bitcast, encoded in V.
 LLVM_ABI GlobalValue *ExtractTypeInfo(Value *V);
