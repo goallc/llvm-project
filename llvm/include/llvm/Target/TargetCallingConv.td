@@ -41,6 +41,10 @@ class CCIf<string predicate, CCAction A> : CCPredicateAction<A> {
 class CCIfByVal<CCAction A> : CCIf<"ArgFlags.isByVal()", A> {
 }
 
+/// CCIfGoRet - If the current argument is a Go result carrier, apply A.
+class CCIfGoRet<CCAction A> : CCIf<"ArgFlags.isGoRet()", A> {
+}
+
 /// CCIfPreallocated - If the current argument has Preallocated parameter attribute,
 /// apply Action A.
 class CCIfPreallocated<CCAction A> : CCIf<"ArgFlags.isPreallocated()", A> {
@@ -167,6 +171,13 @@ class CCAssignToRegAndStack<list<Register> regList, int size, int align>
 /// slot to implement ByVal aggregate parameter passing. Size and alignment
 /// specify the minimum size and alignment for the stack slot.
 class CCPassByVal<int size, int align> : CCAction {
+  int Size = size;
+  int Align = align;
+}
+
+/// CCPassGoRet - Assign a goret carrier to its in-frame Go result object.
+/// The carrier is not passed as a machine pointer value.
+class CCPassGoRet<int size, int align> : CCAction {
   int Size = size;
   int Align = align;
 }

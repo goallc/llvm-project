@@ -421,7 +421,8 @@ static bool isUnsupportedFunction(Function *F) {
         Attribute::StackAlignment, Attribute::SwiftSelf,
         Attribute::SwiftAsync,     Attribute::SwiftError,
         Attribute::Preallocated,   Attribute::ByRef,
-        Attribute::ZExt,           Attribute::SExt};
+        Attribute::GoRet,          Attribute::ZExt,
+        Attribute::SExt};
 
     return llvm::any_of(ABIAttrs, [&](Attribute::AttrKind kind) {
       return A.hasAttribute(kind);

@@ -12,11 +12,13 @@ declare ptr @llvm.go.abi0.frame()
 
 ; The intrinsic denotes one mutable, aliased object spanning the two arguments
 ; and one result slot. It deliberately overlaps the per-value fixed objects.
-define goabi0 ptr @abi0_frame(ptr byval(i64) align 8 %a,
-                             ptr byval(i64) align 8 %b) noinline {
+define goabi0 void @abi0_frame(ptr byval(i64) align 8 %a,
+                              ptr byval(i64) align 8 %b,
+                              ptr goret(ptr) align 8 "goretindex"="0" %result) noinline {
 entry:
   %frame = call ptr @llvm.go.abi0.frame()
-  ret ptr %frame
+  store ptr %frame, ptr %result, align 8
+  ret void
 }
 
 ; X86-LABEL: name: abi0_frame
@@ -30,8 +32,9 @@ entry:
 ; A64-NEXT: isImmutable: false, isAliased: true
 ; A64: ADDXri %fixed-stack.{{[0-9]+}}
 ; X86-ASM-LABEL: abi0_frame:
-; X86-ASM: leaq 8(%rsp), %rax
-; X86-ASM-NEXT: movq %rax, 24(%rsp)
+; X86-ASM: leaq 24(%rsp), [[RESULT:%r[a-z0-9]+]]
+; X86-ASM-NEXT: leaq 8(%rsp), [[FRAME:%r[a-z0-9]+]]
+; X86-ASM-NEXT: movq [[FRAME]], ([[RESULT]])
 ; A64-ASM-LABEL: abi0_frame:
 ; A64-ASM: add x8, sp, #8
 ; A64-ASM-NEXT: str x8, [sp, #24]

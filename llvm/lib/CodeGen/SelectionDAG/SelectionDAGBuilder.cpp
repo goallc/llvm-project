@@ -11767,6 +11767,8 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
         Flags.setByVal();
       if (Args[i].IsByRef)
         Flags.setByRef();
+      if (Args[i].IsGoRet)
+        Flags.setGoRet();
       if (Args[i].IsPreallocated) {
         Flags.setPreallocated();
         // Set the byval flag for CCAssignFn callbacks that don't know about
@@ -11786,9 +11788,13 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
         Flags.setByVal();
       }
       Align MemAlign;
-      if (Args[i].IsByVal || Args[i].IsInAlloca || Args[i].IsPreallocated) {
+      if (Args[i].IsByVal || Args[i].IsInAlloca || Args[i].IsPreallocated ||
+          Args[i].IsGoRet) {
         unsigned FrameSize = DL.getTypeAllocSize(Args[i].IndirectType);
-        Flags.setByValSize(FrameSize);
+        if (Args[i].IsGoRet)
+          Flags.setGoRetSize(FrameSize);
+        else
+          Flags.setByValSize(FrameSize);
 
         // info is not there but there are cases it cannot get right.
         if (auto MA = Args[i].Alignment)
@@ -12331,6 +12337,8 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
         Flags.setByVal();
       if (Arg.hasAttribute(Attribute::ByRef))
         Flags.setByRef();
+      if (Arg.hasAttribute(Attribute::GoRet))
+        Flags.setGoRet();
       if (Arg.hasAttribute(Attribute::InAlloca)) {
         Flags.setInAlloca();
         // Set the byval flag for CCAssignFn callbacks that don't know about
@@ -12360,7 +12368,7 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
       Align MemAlign;
       Type *ArgMemTy = nullptr;
       if (Flags.isByVal() || Flags.isInAlloca() || Flags.isPreallocated() ||
-          Flags.isByRef()) {
+          Flags.isByRef() || Flags.isGoRet()) {
         if (!ArgMemTy)
           ArgMemTy = Arg.getPointeeInMemoryValueType();
 
@@ -12377,6 +12385,8 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
           MemAlign = TLI->getByValTypeAlignment(ArgMemTy, DL);
         if (Flags.isByRef())
           Flags.setByRefSize(MemSize);
+        else if (Flags.isGoRet())
+          Flags.setGoRetSize(MemSize);
         else
           Flags.setByValSize(MemSize);
       } else if (auto ParamAlign = Arg.getParamStackAlign()) {

@@ -61,53 +61,9 @@ static goabi::ABIConfig getX86GoABIConfig(const X86Subtarget &Subtarget,
           Subtarget.useSoftFloat()};
 }
 
-static MVT getX86GoCopyVT(MVT VT) { return VT == MVT::i1 ? MVT::i8 : VT; }
-
-// Go ABI stack slots retain the width of the source piece even when legalizing
-// the SelectionDAG value widens it. Keep memory traffic at the ABI width and
-// extend or truncate only at the register boundary.
-static SDValue loadX86GoStackPiece(SelectionDAG &DAG, SDValue Chain,
-                                   const SDLoc &DL, EVT ValueVT, EVT MemVT,
-                                   SDValue Addr,
-                                   MachinePointerInfo PointerInfo) {
-  if (ValueVT == MemVT)
-    return DAG.getLoad(ValueVT, DL, Chain, Addr, PointerInfo);
-  assert(ValueVT.isInteger() && MemVT.isInteger() &&
-         "unexpected widened Go ABI stack piece");
-  return DAG.getExtLoad(ISD::EXTLOAD, DL, ValueVT, Chain, Addr, PointerInfo,
-                        MemVT);
-}
-
-static SDValue storeX86GoStackPiece(SelectionDAG &DAG, SDValue Chain,
-                                    const SDLoc &DL, SDValue Value, EVT MemVT,
-                                    SDValue Addr,
-                                    MachinePointerInfo PointerInfo) {
-  if (Value.getValueType() == MemVT)
-    return DAG.getStore(Chain, DL, Value, Addr, PointerInfo);
-  assert(Value.getValueType().isInteger() && MemVT.isInteger() &&
-         "unexpected widened Go ABI stack piece");
-  return DAG.getTruncStore(Chain, DL, Value, Addr, PointerInfo, MemVT);
-}
-
-static bool isX86GoFloatPiece(Type *Ty) { return goabi::isFloatingPiece(Ty); }
-
-static MCPhysReg getX86GoIntPhysReg(MVT VT, unsigned Index) {
-  uint64_t Size = std::max<uint64_t>(8, VT.getStoreSize().getKnownMinValue() * 8);
-  return getX86SubSuperRegister(X86GoIntRegs[Index], static_cast<unsigned>(Size));
-}
-
-static MCPhysReg getX86GoPhysReg(MVT VT, Type *OrigTy, unsigned IntIndex,
-                                 unsigned FPIndex) {
-  if (isX86GoFloatPiece(OrigTy))
-    return X86GoFPRegs[FPIndex];
-  return getX86GoIntPhysReg(getX86GoCopyVT(VT), IntIndex);
-}
-
-static SmallVector<Type *, 8> getX86GoReturnTypes(Type *RetTy,
-                                                  const AttributeList &Attrs) {
-  SmallVector<Type *, 8> ResultTys;
-  goabi::getReturnTypes(RetTy, goabi::hasTupleResultsAttr(Attrs), ResultTys);
-  return ResultTys;
+static bool isX86GoFloatPiece(Type *Ty) {
+  return Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||
+         Ty->isDoubleTy();
 }
 
 struct X86GoFormalArgInfo {
@@ -118,7 +74,8 @@ struct X86GoFormalArgInfo {
 static X86GoFormalArgInfo
 prepareX86GoFormalArguments(MachineFunction &MF, ArrayRef<ISD::InputArg> Ins,
                             ArrayRef<CCValAssign> ArgLocs,
-                            uint64_t StackArgsSize, SelectionDAG &DAG) {
+                            uint64_t StackArgsSize, uint64_t StackResultsEnd,
+                            SelectionDAG &DAG) {
   auto *FuncInfo = MF.getInfo<X86MachineFunctionInfo>();
   MachineFrameInfo &MFI = MF.getFrameInfo();
   const Function &F = MF.getFunction();
@@ -131,8 +88,9 @@ prepareX86GoFormalArguments(MachineFunction &MF, ArrayRef<ISD::InputArg> Ins,
 
   goabi::ABIConfig ABIConfig = getX86GoABIConfig(Subtarget, F.getCallingConv());
   X86GoFormalArgInfo Info;
-  Info.Layout = goabi::computeFormalArgLayout(
-      F, Ins, ArgLocs, StackArgsSize, DAG.getDataLayout(), ABIConfig);
+  Info.Layout = goabi::computeFormalArgLayout(F, Ins, ArgLocs, StackArgsSize,
+                                              StackResultsEnd,
+                                              DAG.getDataLayout(), ABIConfig);
   const goabi::CallLayout &Layout = Info.Layout;
   MFI.setGoABIArgSizes(Layout.StackArgsSize, Layout.ArgSize);
 
@@ -202,6 +160,29 @@ prepareX86GoFormalArguments(MachineFunction &MF, ArrayRef<ISD::InputArg> Ins,
     if (Arg.hasNestAttr())
       continue;
 
+    if (Arg.hasGoRetAttr()) {
+      const ISD::InputArg *Carrier = nullptr;
+      const CCValAssign *CarrierLoc = nullptr;
+      for (auto [I, In] : llvm::enumerate(Ins)) {
+        if (In.OrigArgIndex != Arg.getArgNo())
+          continue;
+        if (Carrier)
+          report_fatal_error("invalid split X86 goret carrier");
+        Carrier = &In;
+        CarrierLoc = &ArgLocs[I];
+      }
+      uint64_t Size =
+          DAG.getDataLayout().getTypeAllocSize(Arg.getParamGoRetType());
+      if (!Carrier || !Carrier->Flags.isGoRet() || !CarrierLoc->isMemLoc() ||
+          Carrier->Flags.getGoRetSize() != Size ||
+          CarrierLoc->getLocMemOffset() < int64_t(StackArgsSize))
+        report_fatal_error("invalid X86 goret result home");
+      Info.HomeFIs[Arg.getArgNo()] = MFI.CreateFixedObject(
+          Size, CarrierLoc->getLocMemOffset(), /*IsImmutable=*/false,
+          /*IsAliased=*/true);
+      continue;
+    }
+
     if (NextLayoutIndex >= Layout.Args.size())
       report_fatal_error("X86 Go argument has no logical layout");
     unsigned LayoutIndex = NextLayoutIndex++;
@@ -255,158 +236,13 @@ prepareX86GoFormalArguments(MachineFunction &MF, ArrayRef<ISD::InputArg> Ins,
   return Info;
 }
 
-static SDValue lowerX86GoReturn(const X86TargetLowering &TLI, SDValue Chain,
-                                MachineFunction &MF,
-                                const SmallVectorImpl<ISD::OutputArg> &Outs,
-                                const SmallVectorImpl<SDValue> &OutVals,
-                                const SDLoc &DL, SelectionDAG &DAG) {
-  const X86Subtarget &Subtarget = MF.getSubtarget<X86Subtarget>();
-  MachineFrameInfo &MFI = MF.getFrameInfo();
-  if (!MFI.hasGoABIArgSizes())
-    report_fatal_error("missing X86 Go ABI argument layout");
-  SmallVector<Type *, 8> ResultTys =
-      getX86GoReturnTypes(MF.getFunction().getReturnType(),
-                          MF.getFunction().getAttributes());
-  goabi::CallLayout Layout = goabi::computeCallLayout(
-      {}, MFI.getGoABIStackArgsSize(), ResultTys, DAG.getDataLayout(),
-      getX86GoABIConfig(Subtarget, MF.getFunction().getCallingConv()));
-
-  SmallVector<SDValue, 8> MemOps;
-  SmallVector<std::pair<Register, SDValue>, 8> RetRegs;
-  SmallVector<unsigned, 8> IntPieces(Layout.Results.size(), 0);
-  SmallVector<unsigned, 8> FPPieces(Layout.Results.size(), 0);
-  for (auto [I, Out] : llvm::enumerate(Outs)) {
-    unsigned ResultIndex = Out.OrigArgIndex;
-    if (ResultIndex >= Layout.Results.size())
-      report_fatal_error("X86 Go return piece has no logical result");
-    const goabi::ValueLayout &ResultLayout = Layout.Results[ResultIndex];
-    SDValue Val = OutVals[I];
-    if (ResultLayout.InRegs) {
-      MVT CopyVT = getX86GoCopyVT(Val.getSimpleValueType());
-      if (Val.getSimpleValueType() != CopyVT)
-        Val = DAG.getNode(ISD::ZERO_EXTEND, DL, CopyVT, Val);
-      bool IsFP = isX86GoFloatPiece(Out.OrigTy);
-      unsigned Piece =
-          IsFP ? FPPieces[ResultIndex]++ : IntPieces[ResultIndex]++;
-      MCPhysReg PReg = getX86GoPhysReg(
-          Out.VT, Out.OrigTy, ResultLayout.IntRegStart + (IsFP ? 0 : Piece),
-          ResultLayout.FPRegStart + (IsFP ? Piece : 0));
-      RetRegs.emplace_back(PReg, Val);
-      continue;
-    }
-
-    unsigned Size = static_cast<unsigned>(
-        std::max<uint64_t>(1, Out.ArgVT.getStoreSize().getKnownMinValue()));
-    int FI =
-        MFI.CreateFixedObject(Size, ResultLayout.StackOffset + Out.PartOffset,
-                              /*IsImmutable=*/false);
-    if (MF.getInfo<X86MachineFunctionInfo>()->hasGoABI0FrameIndex())
-      MFI.setIsAliasedObjectIndex(FI, true);
-    SDValue Addr = DAG.getFrameIndex(FI, TLI.getPointerTy(DAG.getDataLayout()));
-    MemOps.push_back(
-        storeX86GoStackPiece(DAG, Chain, DL, Val, Out.ArgVT, Addr,
-                             MachinePointerInfo::getFixedStack(MF, FI)));
-  }
-
-  if (!MemOps.empty())
-    Chain = DAG.getNode(ISD::TokenFactor, DL, MVT::Other, MemOps);
-
-  SDValue Glue;
-  SmallVector<SDValue, 12> RetOps;
-  RetOps.push_back(Chain);
-  RetOps.push_back(DAG.getTargetConstant(0, DL, MVT::i32));
-
-  for (const auto &[Reg, Val] : RetRegs) {
-    Chain = DAG.getCopyToReg(Chain, DL, Reg, Val, Glue);
-    Glue = Chain.getValue(1);
-    RetOps.push_back(DAG.getRegister(Reg, Val.getValueType()));
-  }
-
-  RetOps[0] = Chain;
-  if (Glue.getNode())
-    RetOps.push_back(Glue);
-  return DAG.getNode(X86ISD::RET_GLUE, DL, MVT::Other, RetOps);
-}
-
-static SDValue lowerX86GoCallResults(const X86TargetLowering &TLI,
-                                     SDValue Chain, SDValue InGlue,
-                                     ArrayRef<ISD::InputArg> Ins,
-                                     const goabi::CallLayout &Layout,
-                                     unsigned NumBytes, const SDLoc &DL,
-                                     SelectionDAG &DAG,
-                                     SmallVectorImpl<SDValue> &InVals) {
-  MachineFunction &MF = DAG.getMachineFunction();
-  const X86Subtarget &Subtarget = MF.getSubtarget<X86Subtarget>();
-  const X86RegisterInfo *RegInfo = Subtarget.getRegisterInfo();
-  MVT PtrVT = TLI.getPointerTy(DAG.getDataLayout());
-  SmallVector<SDValue, 8> ResultVals(Ins.size());
-
-  SmallVector<unsigned, 8> IntPieces(Layout.Results.size(), 0);
-  SmallVector<unsigned, 8> FPPieces(Layout.Results.size(), 0);
-  for (auto [I, In] : llvm::enumerate(Ins)) {
-    unsigned ResultIndex = In.OrigArgIndex;
-    if (ResultIndex >= Layout.Results.size())
-      report_fatal_error("X86 Go call result piece has no logical result");
-    const goabi::ValueLayout &ResultLayout = Layout.Results[ResultIndex];
-    if (!ResultLayout.InRegs)
-      continue;
-    MVT CopyVT = getX86GoCopyVT(In.VT);
-    bool IsFP = isX86GoFloatPiece(In.OrigTy);
-    unsigned Piece = IsFP ? FPPieces[ResultIndex]++ : IntPieces[ResultIndex]++;
-    MCPhysReg PReg = getX86GoPhysReg(
-        In.VT, In.OrigTy, ResultLayout.IntRegStart + (IsFP ? 0 : Piece),
-        ResultLayout.FPRegStart + (IsFP ? Piece : 0));
-    SDValue Val = DAG.getCopyFromReg(Chain, DL, PReg, CopyVT, InGlue);
-    Chain = Val.getValue(1);
-    InGlue = Val.getValue(2);
-    ResultVals[I] =
-        In.VT == CopyVT ? Val : DAG.getNode(ISD::TRUNCATE, DL, In.VT, Val);
-  }
-
-  // Register results must be read before stack result loads. Keeping the call
-  // sequence active also keeps the outgoing Go frame, and therefore the
-  // post-growth result addresses, valid until every stack result is consumed.
-  bool HasStackResults = llvm::any_of(Ins, [&](const ISD::InputArg &In) {
-    return In.OrigArgIndex >= Layout.Results.size() ||
-           !Layout.Results[In.OrigArgIndex].InRegs;
-  });
-  SDValue ResultStackPtr;
-  if (HasStackResults) {
-    ResultStackPtr = DAG.getCopyFromReg(Chain, DL, RegInfo->getStackRegister(),
-                                        PtrVT, InGlue);
-    Chain = ResultStackPtr.getValue(1);
-    InGlue = ResultStackPtr.getValue(2);
-  }
-  for (auto [I, In] : llvm::enumerate(Ins)) {
-    unsigned ResultIndex = In.OrigArgIndex;
-    if (ResultIndex >= Layout.Results.size())
-      report_fatal_error("X86 Go call result piece has no logical result");
-    const goabi::ValueLayout &ResultLayout = Layout.Results[ResultIndex];
-    if (ResultLayout.InRegs)
-      continue;
-    uint64_t Offset = ResultLayout.StackOffset + In.PartOffset;
-    SDValue Addr = DAG.getNode(ISD::ADD, DL, PtrVT, ResultStackPtr,
-                               DAG.getIntPtrConstant(Offset, DL));
-    SDValue Load =
-        loadX86GoStackPiece(DAG, Chain, DL, In.VT, In.ArgVT, Addr,
-                            MachinePointerInfo::getStack(MF, Offset));
-    Chain = Load.getValue(1);
-    ResultVals[I] = Load;
-  }
-
-  Chain = DAG.getCALLSEQ_END(Chain, NumBytes, 0,
-                             HasStackResults ? SDValue() : InGlue, DL);
-  InVals.append(ResultVals.begin(), ResultVals.end());
-  return Chain;
-}
-
 } // namespace
 
 std::optional<TargetLowering::ArgumentCopyElisionFrameInfo>
 X86TargetLowering::getArgumentCopyElisionFrameInfo(const Argument &Arg,
                                                    MachineFunction &MF) const {
   if (!goabi::isGoCallingConv(MF.getFunction().getCallingConv()) ||
-      Arg.hasByValAttr())
+      Arg.hasByValAttr() || Arg.hasGoRetAttr())
     return std::nullopt;
   const auto *FuncInfo = MF.getInfo<X86MachineFunctionInfo>();
   uint64_t ArgSize = MF.getDataLayout().getTypeAllocSize(Arg.getType());
@@ -1081,8 +917,16 @@ bool X86TargetLowering::CanLowerReturn(
     CallingConv::ID CallConv, MachineFunction &MF, bool isVarArg,
     const SmallVectorImpl<ISD::OutputArg> &Outs, LLVMContext &Context,
     const Type *RetTy) const {
-  if (goabi::isGoCallingConv(CallConv))
-    return !isVarArg;
+  if (goabi::isGoCallingConv(CallConv)) {
+    if (isVarArg)
+      return false;
+    SmallVector<CCValAssign, 16> RVLocs;
+    CCState CCInfo(CallConv, isVarArg, MF, RVLocs, Context);
+    if (!CCInfo.CheckReturn(Outs, CC_X86_64_Go))
+      report_fatal_error(
+          "X86 Go direct return exceeds the register ABI; use goret");
+    return true;
+  }
 
   // Mingw64 GCC returns f128 via sret, and LLVM matches it for compatibility.
   // This logic exists for libcalls, a frontend should explicitly use sret
@@ -1197,9 +1041,6 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
                                const SmallVectorImpl<ISD::OutputArg> &Outs,
                                const SmallVectorImpl<SDValue> &OutVals,
                                const SDLoc &dl, SelectionDAG &DAG) const {
-  if (goabi::isGoCallingConv(CallConv))
-    return lowerX86GoReturn(*this, Chain, DAG.getMachineFunction(), Outs,
-                            OutVals, dl, DAG);
   MachineFunction &MF = DAG.getMachineFunction();
   X86MachineFunctionInfo *FuncInfo = MF.getInfo<X86MachineFunctionInfo>();
 
@@ -1215,7 +1056,8 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
 
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, isVarArg, MF, RVLocs, *DAG.getContext());
-  CCInfo.AnalyzeReturn(Outs, RetCC_X86);
+  CCInfo.AnalyzeReturn(Outs, goabi::isGoCallingConv(CallConv) ? CC_X86_64_Go
+                                                              : RetCC_X86);
 
   SmallVector<std::pair<Register, SDValue>, 4> RetVals;
   for (unsigned I = 0, OutsIndex = 0, E = RVLocs.size(); I != E;
@@ -1573,7 +1415,8 @@ SDValue X86TargetLowering::LowerCallResult(
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, isVarArg, DAG.getMachineFunction(), RVLocs,
                  *DAG.getContext());
-  CCInfo.AnalyzeCallResult(Ins, RetCC_X86);
+  CCInfo.AnalyzeCallResult(Ins, goabi::isGoCallingConv(CallConv) ? CC_X86_64_Go
+                                                                 : RetCC_X86);
 
   // Copy all of the result registers out of their specified physreg.
   for (unsigned I = 0, InsIndex = 0, E = RVLocs.size(); I != E;
@@ -2186,6 +2029,7 @@ SDValue X86TargetLowering::LowerFormalArguments(
   std::optional<X86GoFormalArgInfo> GoInfo;
   if (IsGo)
     GoInfo = prepareX86GoFormalArguments(MF, Ins, ArgLocs,
+                                         CCInfo.getGoStackArgsSize(),
                                          CCInfo.getStackSize(), DAG);
 
   SDValue ArgValue;
@@ -2275,12 +2119,13 @@ SDValue X86TargetLowering::LowerFormalArguments(
         } else
           ArgValue = DAG.getNode(ISD::TRUNCATE, dl, VA.getValVT(), ArgValue);
       }
-    } else if (IsGo && Ins[InsIndex].Flags.isByVal()) {
+    } else if (IsGo && (Ins[InsIndex].Flags.isByVal() ||
+                        Ins[InsIndex].Flags.isGoRet())) {
       unsigned ArgIndex = Ins[InsIndex].OrigArgIndex;
       if (ArgIndex == ISD::InputArg::NoArgIndex ||
           ArgIndex >= GoInfo->HomeFIs.size() ||
           GoInfo->HomeFIs[ArgIndex] == INT_MAX)
-        report_fatal_error("X86 Go byval argument has no incoming home");
+        report_fatal_error("X86 Go indirect value has no incoming home");
       ArgValue = DAG.getFrameIndex(GoInfo->HomeFIs[ArgIndex],
                                    getPointerTy(DAG.getDataLayout()));
     } else {
@@ -2590,9 +2435,9 @@ SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
 
   goabi::CallLayout GoLayout;
   if (IsGo)
-    GoLayout =
-        goabi::computeCallLayout(CLI, ArgLocs, CCInfo.getStackSize(),
-                                 getX86GoABIConfig(Subtarget, CLI.CallConv));
+    GoLayout = goabi::computeCallLayout(
+        CLI, ArgLocs, CCInfo.getGoStackArgsSize(), CCInfo.getStackSize(),
+        getX86GoABIConfig(Subtarget, CLI.CallConv));
 
   // In vectorcall calling convention a second pass is required for the HVA
   // types.
@@ -2782,7 +2627,7 @@ SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     assert(OutIndex < Outs.size() && "Invalid Out index");
     // Skip inalloca/preallocated arguments, they have already been written.
     ISD::ArgFlagsTy Flags = Outs[OutIndex].Flags;
-    if (Flags.isInAlloca() || Flags.isPreallocated())
+    if (Flags.isInAlloca() || Flags.isPreallocated() || Flags.isGoRet())
       continue;
 
     CCValAssign &VA = ArgLocs[I];
@@ -3211,9 +3056,45 @@ SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     if (MDNode *HeapAlloc = CLI.CB->getMetadata("heapallocsite"))
       DAG.addHeapAllocSite(Chain.getNode(), HeapAlloc);
 
-  if (IsGo)
-    return lowerX86GoCallResults(*this, Chain, InGlue, Ins, GoLayout, NumBytes,
-                                 dl, DAG, InVals);
+  if (IsGo) {
+    Chain = LowerCallResult(Chain, InGlue, CallConv, isVarArg, Ins, dl, DAG,
+                            InVals, RegMask);
+
+    bool HasGoRet = llvm::any_of(
+        Outs, [](const ISD::OutputArg &Out) { return Out.Flags.isGoRet(); });
+    SDValue ResultGlue =
+        Ins.empty() ? InGlue : Chain.getValue(Chain->getNumValues() - 1);
+    if (HasGoRet) {
+      MVT PtrVT = getPointerTy(DAG.getDataLayout());
+      SDValue ResultStackPtr = DAG.getCopyFromReg(
+          Chain, dl, RegInfo->getStackRegister(), PtrVT, ResultGlue);
+      Chain = ResultStackPtr.getValue(1);
+
+      SmallVector<SDValue, 4> Copies;
+      for (auto [I, VA] : llvm::enumerate(ArgLocs)) {
+        const ISD::ArgFlagsTy &Flags = Outs[I].Flags;
+        if (!Flags.isGoRet())
+          continue;
+        if (!VA.isMemLoc() || VA.getLocMemOffset() < 0)
+          report_fatal_error("invalid X86 goret call location");
+        uint64_t Offset = static_cast<uint64_t>(VA.getLocMemOffset());
+        SDValue Source = DAG.getNode(ISD::ADD, dl, PtrVT, ResultStackPtr,
+                                     DAG.getIntPtrConstant(Offset, dl));
+        Copies.push_back(DAG.getMemcpy(
+            Chain, dl, OutVals[I], Source,
+            DAG.getConstant(Flags.getGoRetSize(), dl, PtrVT),
+            Flags.getNonZeroMemAlign(), Flags.getNonZeroMemAlign(),
+            /*isVol=*/false, /*AlwaysInline=*/true, /*CI=*/nullptr,
+            std::nullopt, MachinePointerInfo(),
+            MachinePointerInfo::getStack(MF, Offset)));
+      }
+      if (!Copies.empty())
+        Chain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, Copies);
+      ResultGlue = SDValue();
+    }
+
+    return DAG.getCALLSEQ_END(Chain, NumBytes, 0, ResultGlue, dl);
+  }
 
   // Create the CALLSEQ_END node.
   unsigned NumBytesForCalleeToPop = 0; // Callee pops nothing.
