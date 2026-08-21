@@ -113,6 +113,10 @@ private:
   /// but may still change instruction sizes before target branch relaxation.
   std::vector<std::function<Pass *()>> PreBranchRelaxationPassFactories;
 
+  /// Plugin-provided LLVM IR passes that run after all standard codegen IR
+  /// preparation and immediately before instruction selection.
+  std::vector<std::function<Pass *()>> PreISelPassFactories;
+
   /// Set the StartAfter, StartBefore and StopAfter passes to allow running only
   /// a portion of the normal code-gen pass sequence.
   ///
@@ -226,6 +230,12 @@ public:
   /// pipeline, so ownership of the returned pass transfers normally to it.
   void addPreBranchRelaxationPass(std::function<Pass *()> Factory) {
     PreBranchRelaxationPassFactories.push_back(std::move(Factory));
+  }
+
+  /// Register a late LLVM IR pass after CodeGenPrepare and the remaining
+  /// standard IR preparation passes, but before instruction selection.
+  void addPreISelPass(std::function<Pass *()> Factory) {
+    PreISelPassFactories.push_back(std::move(Factory));
   }
 
   /// Allow the target to enable a specific standard pass by default.

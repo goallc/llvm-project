@@ -107,14 +107,14 @@ getArgumentValueOffset(const Value *V, const DataLayout &DL) {
 
 static SDValue getStatepointGCValue(const Value *V,
                                     SelectionDAGBuilder &Builder) {
-  // A typed byval argument denotes its incoming Go stack home, not a heap
-  // pointer stored in that home. Always use the canonical fixed frame index
-  // for this address. In particular, do not let an earlier gc.relocate or a
-  // larger live set turn the address into an ordinary pointer spill: stack
-  // growth rematerializes frame-index addresses, while the separate object
-  // layout describes which words in the home are GC roots.
+  // A typed byval or goret argument denotes a fixed Go stack home, not a heap
+  // pointer stored in that home. Always use the canonical frame index for this
+  // address. In particular, do not let an earlier gc.relocate or a larger live
+  // set turn the address into an ordinary pointer spill: stack growth
+  // rematerializes frame-index addresses, while separate object metadata
+  // describes which words in the home are GC roots.
   if (const auto *Arg = dyn_cast<Argument>(V);
-      Arg && Arg->hasByValAttr() &&
+      Arg && (Arg->hasByValAttr() || Arg->hasGoRetAttr()) &&
       goabi::isGoCallingConv(
           Builder.DAG.getMachineFunction().getFunction().getCallingConv())) {
     int FI = Builder.FuncInfo.getArgumentFrameIndex(Arg);
@@ -698,7 +698,9 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
 
     if (auto ArgValue = getArgumentValueOffset(V, Builder.DAG.getDataLayout());
         ArgValue &&
-        !(V == ArgValue->first && ArgValue->first->hasByValAttr())) {
+        !(V == ArgValue->first &&
+          (ArgValue->first->hasByValAttr() ||
+           ArgValue->first->hasGoRetAttr()))) {
       uint64_t Size = PtrSD.getValueType().getStoreSize().getKnownMinValue();
       int FI = Builder.FuncInfo.getArgumentValueHome(ArgValue->first,
                                                      ArgValue->second, Size);
@@ -1064,7 +1066,9 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
                    DAG.getMachineFunction().getFunction().getCallingConv()) &&
                isa<FrameIndexSDNode>(SDV) &&
                (isa<AllocaInst>(V) ||
-                (isa<Argument>(V) && cast<Argument>(V)->hasByValAttr() &&
+                (isa<Argument>(V) &&
+                 (cast<Argument>(V)->hasByValAttr() ||
+                  cast<Argument>(V)->hasGoRetAttr()) &&
                  FuncInfo.getArgumentFrameIndex(cast<Argument>(V)) ==
                      cast<FrameIndexSDNode>(SDV)->getIndex()))) {
       Record.type = RecordType::FrameIndexRemat;
@@ -1224,14 +1228,15 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
   // pointers passed to deopt are base pointers; relaxing that assumption
   // would require relatively large changes to how we represent relocations.
   for (Value *V : I.deopt_operands()) {
-    // GoALLC uses direct static allocas and typed byval parameters as
-    // frame-layout carriers for its per-object pointer maps. The object is a
-    // GC root only when its base is also present in the explicit gc-live
-    // bundle; treating the deopt carrier as a root would make an inactive
-    // lifetime scan uninitialized or dead storage.
+    // GoALLC uses direct static allocas and typed byval/goret parameters as
+    // fixed-frame metadata carriers. The object is a GC root only when its
+    // base is also present in the explicit gc-live bundle; treating the deopt
+    // carrier as a root would make inactive storage or the frame address
+    // itself enter the pointer map.
     const auto *Arg = dyn_cast<Argument>(V);
     if (GFI->getStrategy().getName() == "goallc" &&
-        (isa<AllocaInst>(V) || (Arg && Arg->hasByValAttr())))
+        (isa<AllocaInst>(V) ||
+         (Arg && (Arg->hasByValAttr() || Arg->hasGoRetAttr()))))
       continue;
     if (!isGCValue(V, *this))
       continue;
