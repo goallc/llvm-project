@@ -228,6 +228,9 @@ namespace llvm {
     EmitInstrWithCustomInserter(MachineInstr &MI,
                                 MachineBasicBlock *MBB) const override;
 
+    void AdjustInstrPostInstrSelection(MachineInstr &MI,
+                                       SDNode *Node) const override;
+
     /// Do not merge vector stores after legalization because that may conflict
     /// with x86-specific store splitting optimizations.
     bool mergeStoresAfterLegalization(EVT MemVT) const override {

@@ -285,8 +285,9 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   case CallingConv::PreserveNone:
     return CSR_64_NoneRegs_SaveList;
   case CallingConv::GoABIInternal:
-  case CallingConv::GoABI0:
     return CSR_64_Go_SaveList;
+  case CallingConv::GoABI0:
+    return CSR_64_GoABI0_SaveList;
   case CallingConv::CXX_FAST_TLS:
     if (Is64Bit)
       return MF->getInfo<X86MachineFunctionInfo>()->isSplitCSR() ?
@@ -429,8 +430,9 @@ X86RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
   case CallingConv::PreserveNone:
     return CSR_64_NoneRegs_RegMask;
   case CallingConv::GoABIInternal:
-  case CallingConv::GoABI0:
     return CSR_64_Go_RegMask;
+  case CallingConv::GoABI0:
+    return CSR_64_GoABI0_RegMask;
   case CallingConv::CXX_FAST_TLS:
     if (Is64Bit)
       return CSR_64_TLS_Darwin_RegMask;

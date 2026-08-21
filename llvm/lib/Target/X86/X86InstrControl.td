@@ -325,7 +325,8 @@ let isCall = 1, isTerminator = 1, isReturn = 1, isBranch = 1,
 // RSP is marked as a use to prevent stack-pointer assignments that appear
 // immediately before calls from potentially appearing dead. Uses for argument
 // registers are added manually.
-let isCall = 1, Uses = [RSP, SSP], SchedRW = [WriteJump] in {
+let isCall = 1, Uses = [RSP, SSP], SchedRW = [WriteJump],
+    hasPostISelHook = 1 in {
   // NOTE: this pattern doesn't match "X86call imm", because we do not know
   // that the offset between an arbitrary immediate and the call will fit in
   // the 32-bit pcrel field that we have.
@@ -425,6 +426,7 @@ let isPseudo = 1, isCall = 1, isCodeGenOnly = 1,
 
 let isPseudo = 1, isCall = 1, isCodeGenOnly = 1,
     Uses = [RSP, SSP],
+    hasPostISelHook = 1,
     SchedRW = [WriteJump] in {
   def CALL64m_RVMARKER :
      PseudoI<(outs), (ins i64imm:$rvfunc, i64mem:$dst), [(X86call_rvmarker tglobaladdr:$rvfunc, (loadi64 addr:$dst))]>,
