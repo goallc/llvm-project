@@ -1237,7 +1237,14 @@ def CSR_64_AllRegs_AVX512 : CalleeSavedRegs<(sub (add CSR_64_MostRegs, RAX,
                                                       (sequence "K%u", 0, 7)),
                                                  (sequence "XMM%u", 0, 15))>;
 def CSR_64_NoneRegs    : CalleeSavedRegs<(add RBP)>;
-def CSR_64_Go          : CalleeSavedRegs<(add R14, RBP, XMM15)>;
+// Go functions only use RBP as an ordinary callee-saved register. R14 and
+// XMM15 contain reserved runtime state and are repaired at ABI boundaries
+// instead of being spilled by PEI.
+def CSR_64_GoFunction  : CalleeSavedRegs<(add RBP)>;
+
+// Call-preserved masks for the two Go calling conventions. ABIInternal
+// preserves the reserved runtime state.
+def CSR_64_GoABIInternal : CalleeSavedRegs<(add R14, RBP, XMM15)>;
 // ABI0 does not establish or preserve the ABIInternal state registers. Keep
 // R14 and XMM15 reserved in Go functions, but model them as clobbered at an
 // ABI0 call so values read from either register cannot remain assigned there
