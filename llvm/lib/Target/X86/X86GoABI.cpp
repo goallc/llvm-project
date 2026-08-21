@@ -75,13 +75,13 @@ static bool isOrdinaryGoCall(const MachineInstr &MI,
 
   const X86RegisterInfo &TRI =
       *MF.getSubtarget<X86Subtarget>().getRegisterInfo();
-  const uint32_t *GoInternalMask =
+  const uint32_t *GoABIInternalMask =
       TRI.getCallPreservedMask(MF, CallingConv::GoABIInternal);
   const uint32_t *GoABI0Mask =
       TRI.getCallPreservedMask(MF, CallingConv::GoABI0);
   return llvm::any_of(MI.operands(), [&](const MachineOperand &MO) {
     return MO.isRegMask() &&
-           (MO.getRegMask() == GoInternalMask ||
+           (MO.getRegMask() == GoABIInternalMask ||
             MO.getRegMask() == GoABI0Mask);
   });
 }
