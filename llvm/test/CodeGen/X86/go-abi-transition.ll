@@ -13,6 +13,7 @@ declare goabiinternal void @internal_callee()
 declare goabi0 void @"abi0_callee<ABI0>"()
 declare goabi0 void @"abi0_result<ABI0>"(
     ptr goret(i64) align 8 "goretindex"="0")
+declare i64 @llvm.read_register.i64(metadata)
 
 define goabi0 void @"abi0_to_internal<ABI0>"() "go-nosplit" {
 ; PRE-LABEL: name: 'abi0_to_internal<ABI0>'
@@ -45,12 +46,33 @@ define goabiinternal void @internal_to_abi0() "go-nosplit" {
 ; ASM: callq "abi0_callee<ABI0>"
 ; ASM-NEXT: xorps %xmm15, %xmm15
 ; ASM-NEXT: movq %fs:runtime.tlsg@TPOFF, %r14
-; ASM-NOT: movaps {{.*}}, %xmm15
-; ASM-NOT: popq %r14
+; ASM: movaps {{.*}}, %xmm15
+; ASM: popq %r14
 ; ASM: retq
 entry:
   call goabi0 void @"abi0_callee<ABI0>"()
   ret void
+}
+
+define goabiinternal i64 @internal_snapshot_g_across_abi0() "go-nosplit" {
+; ABI0 may change R14. Preserve the value observed before the call separately
+; while the late repair reloads the current g into R14 after the call.
+; PRE-LABEL: name: internal_snapshot_g_across_abi0
+; PRE: CALL64pcrel32 {{.*}}@"abi0_callee<ABI0>", csr_64_goabi0{{.*}}implicit-def $r14, implicit-def $xmm15
+; ASM-LABEL: internal_snapshot_g_across_abi0:
+; ASM-O0: movq %r14, %rax
+; ASM-O0-NEXT: movq %rax, [[OLDG:[0-9]+]](%rsp)
+; ASM-O2: movq %r14, [[OLDG:%r[a-z0-9]+]]
+; ASM: callq "abi0_callee<ABI0>"
+; ASM-NEXT: xorps %xmm15, %xmm15
+; ASM-NEXT: movq %fs:runtime.tlsg@TPOFF, %r14
+; ASM-O0: movq [[OLDG]](%rsp), %rax
+; ASM-O2: movq [[OLDG]], %rax
+; ASM: retq
+entry:
+  %oldg = call i64 @llvm.read_register.i64(metadata !0)
+  call goabi0 void @"abi0_callee<ABI0>"()
+  ret i64 %oldg
 }
 
 define goabiinternal void @internal_statepoint_to_abi0()
@@ -95,6 +117,29 @@ entry:
   ret i64 %result
 }
 
+define goabiinternal i64 @internal_statepoint_snapshot_g_across_abi0()
+    "go-nosplit" gc "statepoint-example" {
+; PRE-LABEL: name: internal_statepoint_snapshot_g_across_abi0
+; PRE: STATEPOINT {{.*}}@"abi0_callee<ABI0>"{{.*}}csr_64_goabi0{{.*}}implicit-def $r14, implicit-def $xmm15
+; ASM-LABEL: internal_statepoint_snapshot_g_across_abi0:
+; ASM-O0: movq %r14, %rax
+; ASM-O0-NEXT: movq %rax, [[SP_OLDG:[0-9]+]](%rsp)
+; ASM-O2: movq %r14, [[SP_OLDG:%r[a-z0-9]+]]
+; ASM: callq "abi0_callee<ABI0>"
+; ASM: xorps %xmm15, %xmm15
+; ASM-NEXT: movq %fs:runtime.tlsg@TPOFF, %r14
+; ASM-O0: movq [[SP_OLDG]](%rsp), %rax
+; ASM-O2: movq [[SP_OLDG]], %rax
+; ASM: retq
+entry:
+  %oldg = call i64 @llvm.read_register.i64(metadata !0)
+  call goabi0 token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 0, i32 0, ptr elementtype(void ()) @"abi0_callee<ABI0>",
+          i32 0, i32 0, i32 0, i32 0)
+  ret i64 %oldg
+}
+
 define goabiinternal i8 @go_local_is_sp_relative() "go-nosplit"
     "frame-pointer"="non-leaf" {
 ; Go context restoration can restore SP while clearing BP. Keep local slots
@@ -117,6 +162,8 @@ entry:
 
 declare token @llvm.experimental.gc.statepoint.p0(
     i64 immarg, i32 immarg, ptr, i32 immarg, i32 immarg, ...)
+
+!0 = !{!"r14"}
 
 ; Each repair has one symbol-free R_TLS_LE relocation, matching native x86 Go
 ; objects. Calls retain their ABI-specific named targets.

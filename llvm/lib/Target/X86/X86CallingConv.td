@@ -1238,6 +1238,12 @@ def CSR_64_AllRegs_AVX512 : CalleeSavedRegs<(sub (add CSR_64_MostRegs, RAX,
                                                  (sequence "XMM%u", 0, 15))>;
 def CSR_64_NoneRegs    : CalleeSavedRegs<(add RBP)>;
 def CSR_64_Go          : CalleeSavedRegs<(add R14, RBP, XMM15)>;
+// ABI0 does not establish or preserve the ABIInternal state registers. Keep
+// R14 and XMM15 reserved in Go functions, but model them as clobbered at an
+// ABI0 call so values read from either register cannot remain assigned there
+// across the boundary. The late X86 Go ABI pass restores their current state
+// after the call.
+def CSR_64_GoABI0      : CalleeSavedRegs<(add RBP)>;
 
 // Standard C + YMM6-15
 def CSR_Win64_Intel_OCL_BI_AVX : CalleeSavedRegs<(add RBX, RBP, RDI, RSI, R12,

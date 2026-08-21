@@ -28,6 +28,7 @@
 #include "llvm/Analysis/BlockFrequencyInfo.h"
 #include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/Analysis/VectorUtils.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -38,6 +39,7 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/SDPatternMatch.h"
 #include "llvm/CodeGen/SelectionDAGNodes.h"
+#include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/WinEHFuncInfo.h"
 #include "llvm/IR/CallingConv.h"
@@ -68,6 +70,38 @@
 using namespace llvm;
 
 #define DEBUG_TYPE "x86-isel"
+
+static bool isGoABI0Call(const MachineInstr &MI) {
+  const MachineFunction &MF = *MI.getMF();
+  if (!goabi::isGoCallingConv(MF.getFunction().getCallingConv()) ||
+      !MF.getSubtarget<X86Subtarget>().is64Bit())
+    return false;
+
+  if (MI.getOpcode() == TargetOpcode::STATEPOINT)
+    return goabi::isGoABI0CallingConv(StatepointOpers(&MI).getCallingConv());
+
+  const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
+  const uint32_t *GoABI0Mask =
+      TRI->getCallPreservedMask(MF, CallingConv::GoABI0);
+  return llvm::any_of(MI.operands(), [&](const MachineOperand &MO) {
+    return MO.isRegMask() && MO.getRegMask() == GoABI0Mask;
+  });
+}
+
+static void addGoABI0StateClobbers(MachineInstr &MI) {
+  if (!MI.isCall() || !isGoABI0Call(MI))
+    return;
+
+  // Regmasks normally suffice to model call clobbers. R14 and XMM15 are
+  // reserved in Go functions, however, and a reserved register with no
+  // explicit defs is treated as constant by the register coalescer. Attach
+  // the ABI0 clobbers directly to the lowered call so copies of the old state
+  // cannot be coalesced across it.
+  MI.addOperand(
+      MachineOperand::CreateReg(X86::R14, /*isDef=*/true, /*isImp=*/true));
+  MI.addOperand(
+      MachineOperand::CreateReg(X86::XMM15, /*isDef=*/true, /*isImp=*/true));
+}
 
 static cl::opt<int> ExperimentalPrefInnermostLoopAlignment(
     "x86-experimental-pref-innermost-loop-alignment", cl::init(4),
@@ -38488,9 +38522,16 @@ X86TargetLowering::emitPatchableEventCall(MachineInstr &MI,
   return BB;
 }
 
+void X86TargetLowering::AdjustInstrPostInstrSelection(MachineInstr &MI,
+                                                      SDNode *Node) const {
+  addGoABI0StateClobbers(MI);
+}
+
 MachineBasicBlock *
 X86TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
                                                MachineBasicBlock *BB) const {
+  addGoABI0StateClobbers(MI);
+
   MachineFunction *MF = BB->getParent();
   const TargetInstrInfo *TII = Subtarget.getInstrInfo();
   const MIMetadata MIMD(MI);

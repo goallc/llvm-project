@@ -8,7 +8,8 @@
 //
 // R14 and XMM15 are reserved in every x86-64 Go function. ABIInternal requires
 // them to contain g and zero respectively, while ABI0 does not establish or
-// preserve those values. This late pass repairs the reserved state at ABI
+// preserve those values. Call lowering marks ABI0 calls as explicit clobbers
+// before register allocation. This late pass repairs the reserved state at ABI
 // boundaries after register allocation, frame lowering, and scheduling.
 //
 //===----------------------------------------------------------------------===//
@@ -19,7 +20,6 @@
 #include "X86RegisterInfo.h"
 #include "X86Subtarget.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/BinaryFormat/GoObj.h"
 #include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -29,7 +29,6 @@
 #include "llvm/CodeGen/MachinePassManager.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/IR/CallingConv.h"
-#include "llvm/MC/MCSymbol.h"
 #include "llvm/Pass.h"
 
 #include <iterator>
@@ -69,20 +68,6 @@ INITIALIZE_PASS(X86GoABILegacy, DEBUG_TYPE, "X86 Go ABI state repair", false,
 
 FunctionPass *llvm::createX86GoABILegacyPass() { return new X86GoABILegacy(); }
 
-static StringRef getDirectCalleeName(const MachineInstr &MI,
-                                     const X86InstrInfo &TII) {
-  const MachineOperand &Callee = MI.getOpcode() == TargetOpcode::STATEPOINT
-                                     ? StatepointOpers(&MI).getCallTarget()
-                                     : TII.getCalleeOperand(MI);
-  if (Callee.isGlobal())
-    return Callee.getGlobal()->getName();
-  if (Callee.isSymbol())
-    return Callee.getSymbolName();
-  if (Callee.isMCSymbol())
-    return Callee.getMCSymbol()->getName();
-  return {};
-}
-
 static bool isOrdinaryGoCall(const MachineInstr &MI,
                              const MachineFunction &MF) {
   if (MI.getOpcode() == TargetOpcode::STATEPOINT)
@@ -90,10 +75,28 @@ static bool isOrdinaryGoCall(const MachineInstr &MI,
 
   const X86RegisterInfo &TRI =
       *MF.getSubtarget<X86Subtarget>().getRegisterInfo();
-  const uint32_t *GoMask =
+  const uint32_t *GoInternalMask =
       TRI.getCallPreservedMask(MF, CallingConv::GoABIInternal);
-  return llvm::any_of(MI.operands(), [GoMask](const MachineOperand &MO) {
-    return MO.isRegMask() && MO.getRegMask() == GoMask;
+  const uint32_t *GoABI0Mask =
+      TRI.getCallPreservedMask(MF, CallingConv::GoABI0);
+  return llvm::any_of(MI.operands(), [&](const MachineOperand &MO) {
+    return MO.isRegMask() &&
+           (MO.getRegMask() == GoInternalMask ||
+            MO.getRegMask() == GoABI0Mask);
+  });
+}
+
+static bool isGoABI0Call(const MachineInstr &MI, const MachineFunction &MF) {
+  if (MI.getOpcode() == TargetOpcode::STATEPOINT)
+    return goabi::isGoABI0CallingConv(
+        StatepointOpers(&MI).getCallingConv());
+
+  const X86RegisterInfo &TRI =
+      *MF.getSubtarget<X86Subtarget>().getRegisterInfo();
+  const uint32_t *GoABI0Mask =
+      TRI.getCallPreservedMask(MF, CallingConv::GoABI0);
+  return llvm::any_of(MI.operands(), [&](const MachineOperand &MO) {
+    return MO.isRegMask() && MO.getRegMask() == GoABI0Mask;
   });
 }
 
@@ -133,9 +136,8 @@ static bool repairGoABIState(MachineFunction &MF) {
         continue;
       if (!isOrdinaryGoCall(MI, MF))
         continue;
-      StringRef CalleeName = getDirectCalleeName(MI, TII);
 
-      bool CalleeIsABI0 = CalleeName.ends_with(GoObj::ABI0SymbolSuffix);
+      bool CalleeIsABI0 = isGoABI0Call(MI, MF);
       bool RepairBefore = goabi::isGoABI0CallingConv(CallerCC) && !CalleeIsABI0;
       bool RepairAfter =
           goabi::isGoABIInternalCallingConv(CallerCC) && CalleeIsABI0;
