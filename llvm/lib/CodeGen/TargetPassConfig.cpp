@@ -982,6 +982,9 @@ void TargetPassConfig::addISelPrepare() {
   addPass(createSafeStackPass());
   addPass(createStackProtectorPass());
 
+  for (const auto &Factory : PreISelPassFactories)
+    addPass(Factory());
+
   if (PrintISelInput)
     addPass(createPrintFunctionPass(
         dbgs(), "\n\n*** Final LLVM Code input to ISel ***\n"));

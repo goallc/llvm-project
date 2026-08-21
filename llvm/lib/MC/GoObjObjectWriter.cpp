@@ -415,6 +415,7 @@ struct GoObjAllocaPtrMapRecord {
   uint64_t ByteSize;
   uint64_t Alignment;
   uint64_t PointerSize;
+  bool ContentsLive;
   uint64_t BitCount;
   SmallVector<uint64_t, 4> BitmapWords;
 };
@@ -562,28 +563,32 @@ parseAllocaPtrMapRecords(const MCContext::GoObjStackMapEntry &Entry) {
       Deopts[ProtocolStart + 2], "record count");
   size_t Cursor = ProtocolStart + 3;
   size_t RecordsEnd = ProtocolStart + ProtocolLength - 1;
-  if (RecordCount > (RecordsEnd - Cursor) / 10)
+  if (RecordCount > (RecordsEnd - Cursor) / 11)
     report_fatal_error("GoObj alloca ptrmap record count is invalid");
   SmallVector<GoObjAllocaPtrMapRecord, 4> Records;
   Records.reserve(static_cast<size_t>(RecordCount));
   for (uint64_t RecordIndex = 0; RecordIndex != RecordCount; ++RecordIndex) {
-    if (Cursor > RecordsEnd || RecordsEnd - Cursor < 10)
+    if (Cursor > RecordsEnd || RecordsEnd - Cursor < 11)
       report_fatal_error("GoObj alloca ptrmap record header is malformed");
     if (!IsConstant(Deopts[Cursor], GoObj::AllocaPtrMapRecordTag))
       report_fatal_error("GoObj alloca ptrmap record tag is invalid");
     uint64_t RecordLength =
         getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 1], "record length");
     uint64_t WordCount = getNonnegativeAllocaPtrMapConstant(
-        Deopts[Cursor + 9], "bitmap word count");
-    if (WordCount > RecordsEnd - Cursor - 10 ||
-        RecordLength != 10 + WordCount || RecordLength > RecordsEnd - Cursor)
+        Deopts[Cursor + 10], "bitmap word count");
+    if (WordCount > RecordsEnd - Cursor - 11 ||
+        RecordLength != 11 + WordCount || RecordLength > RecordsEnd - Cursor)
       report_fatal_error("GoObj alloca ptrmap record length is invalid");
 
     const auto &Base = Deopts[Cursor + 2];
     if (Base.Type != MCContext::GoObjStackMapLocation::Direct)
       report_fatal_error(
           "GoObj alloca ptrmap base is not a direct frame location");
-    uint64_t WordBits = getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 8],
+    uint64_t ContentsLive = getNonnegativeAllocaPtrMapConstant(
+        Deopts[Cursor + 7], "contents-live flag");
+    if (ContentsLive > 1)
+      report_fatal_error("GoObj alloca ptrmap contents-live flag is invalid");
+    uint64_t WordBits = getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 9],
                                                            "bitmap word width");
     if (WordBits != GoObj::AllocaPtrMapBitmapWordBits)
       report_fatal_error("GoObj alloca ptrmap bitmap word width is invalid");
@@ -594,12 +599,13 @@ parseAllocaPtrMapRecords(const MCContext::GoObjStackMapEntry &Entry) {
         getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 4], "byte size"),
         getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 5], "alignment"),
         getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 6], "pointer size"),
-        getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 7], "bit count"),
+        ContentsLive != 0,
+        getNonnegativeAllocaPtrMapConstant(Deopts[Cursor + 8], "bit count"),
         {}};
     Record.BitmapWords.reserve(WordCount);
     for (uint64_t Word = 0; Word != WordCount; ++Word)
       Record.BitmapWords.push_back(static_cast<uint64_t>(
-          getAllocaPtrMapConstant(Deopts[Cursor + 10 + Word], "bitmap word")));
+          getAllocaPtrMapConstant(Deopts[Cursor + 11 + Word], "bitmap word")));
     Records.push_back(std::move(Record));
     Cursor += RecordLength;
   }
@@ -687,7 +693,7 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
     GoObjAllocaPtrMapRecord Layout;
     goobj::StackMapSlotKind Kind;
     uint64_t SeenOrdinaryEntries = 0;
-    bool SawUnmatchedGCLive = false;
+    bool SawInactiveContents = false;
   };
   SmallVector<FunctionAllocaRecord, 4> FunctionAllocaRecords;
   uint64_t OrdinaryEntryCount =
@@ -805,7 +811,7 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
       }
       AllocaRanges.push_back({RangeStart, RangeEnd});
 
-      bool IsActive = llvm::any_of(
+      bool HasDirectGCLive = llvm::any_of(
           GCLiveLocations,
           [&](const MCContext::GoObjStackMapLocation &Location) {
             MCContext::GoObjStackMapLocation Normalized =
@@ -816,6 +822,9 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
                    Normalized.DwarfRegNum == RecordBase.DwarfRegNum &&
                    Normalized.Offset == RecordBase.Offset;
           });
+      if (Record.ContentsLive && !HasDirectGCLive)
+        report_fatal_error(
+            "GoObj live alloca ptrmap has no direct gc-live base");
 
       uint64_t PaddingBits = Record.BitmapWords.size() * 64 - Record.BitCount;
       if (PaddingBits && (Record.BitmapWords.back() >> (64 - PaddingBits)) != 0)
@@ -842,9 +851,10 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
         if ((Record.BitmapWords[Bit / 64] & (uint64_t(1) << (Bit % 64))) == 0)
           continue;
         HasPointer = true;
-        // The layout record is interpretation-free. A matching direct
-        // gc-live base means this pointer word is live at this callsite.
-        if (IsActive) {
+        // gc-live may carry the direct frame base solely for gc.relocate.
+        // Only the producer's independent contents-live bit makes this
+        // pointer word live at the callsite.
+        if (Record.ContentsLive) {
           DenseSet<uint32_t> &AllocaPointerBits =
               Slot.Kind == goobj::StackMapSlotKind::Args
                   ? AllocaArgsPointerBits
@@ -869,13 +879,13 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
           });
       if (FunctionRecord == FunctionAllocaRecords.end()) {
         FunctionAllocaRecords.push_back(
-            {NormalizedRecord, *RecordKind, 1, !IsActive});
+            {NormalizedRecord, *RecordKind, 1, !Record.ContentsLive});
       } else {
         if (FunctionRecord->Kind != *RecordKind)
           report_fatal_error(
               "GoObj alloca ptrmap frame region changes between statepoints");
         ++FunctionRecord->SeenOrdinaryEntries;
-        FunctionRecord->SawUnmatchedGCLive |= !IsActive;
+        FunctionRecord->SawInactiveContents |= !Record.ContentsLive;
       }
     }
 
@@ -1022,7 +1032,7 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
 
   SmallVector<GoObjStatepointStackMaps::StackObject, 4> FunctionStackObjects;
   for (const FunctionAllocaRecord &FunctionRecord : FunctionAllocaRecords) {
-    if (!FunctionRecord.SawUnmatchedGCLive)
+    if (!FunctionRecord.SawInactiveContents)
       continue;
     if (FunctionRecord.SeenOrdinaryEntries != OrdinaryEntryCount)
       report_fatal_error(

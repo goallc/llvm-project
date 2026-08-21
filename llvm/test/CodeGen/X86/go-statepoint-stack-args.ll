@@ -3,6 +3,7 @@
 ; RUN:   -stop-after=finalize-isel < %s | FileCheck %s
 
 %aggregate = type { ptr addrspace(1), i64, ptr addrspace(1) }
+%goret.home = type { ptr, i64, ptr }
 
 declare goabiinternal void @safepoint()
 
@@ -143,10 +144,28 @@ entry:
   ret ptr addrspace(1) %home.relocated
 }
 
+define goabiinternal { i64, i64, i64, i64, i64, i64, i64, i64, i64 }
+    @goret_home_address(
+        ptr addrspace(1) goret(%goret.home) align 8 "goretindex"="9" %result)
+    #0 gc "statepoint-example" {
+entry:
+  %token = call goabiinternal token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 9, i32 0, ptr elementtype(void ()) @safepoint,
+          i32 0, i32 0, i32 0, i32 0)
+      [ "gc-live"(ptr addrspace(1) %result) ]
+  %result.relocated = call ptr addrspace(1)
+      @llvm.experimental.gc.relocate.p1(token %token, i32 0, i32 0)
+  store ptr null, ptr addrspace(1) %result.relocated, align 8
+  ret { i64, i64, i64, i64, i64, i64, i64, i64, i64 } zeroinitializer
+}
+
 declare token @llvm.experimental.gc.statepoint.p0(
     i64 immarg, i32 immarg, ptr, i32 immarg, i32 immarg, ...)
 declare ptr addrspace(1) @llvm.experimental.gc.relocate.p1(
     token, i32 immarg, i32 immarg)
+
+attributes #0 = { "go_results_tuple" }
 
 ; CHECK-LABEL: name: scalar_stack_arg
 ; CHECK: fixedStack:
@@ -208,3 +227,14 @@ declare ptr addrspace(1) @llvm.experimental.gc.relocate.p1(
 ; CHECK-SAME: 2, 2, 0, %fixed-stack.[[BYVAL_HOME]], 0, 1, 8, %stack.[[HEAP_SLOT]], 0,
 ; CHECK-NEXT: ADJCALLSTACKUP64
 ; CHECK-NEXT: {{%[0-9]+}}:gr64 = LEA64r %fixed-stack.[[BYVAL_HOME]],
+
+; CHECK-LABEL: name: goret_home_address
+; CHECK: fixedStack:
+; CHECK: - { id: [[GORET_HOME:[0-9]+]], type: default, offset: 0, size: 24,
+; CHECK: stack: []
+; CHECK: STATEPOINT 9,
+; CHECK-SAME: 2, 1, 0, %fixed-stack.[[GORET_HOME]], 0,
+; CHECK-SAME: 2, 1, 0, %fixed-stack.[[GORET_HOME]], 0,
+; CHECK-NEXT: ADJCALLSTACKUP64
+; CHECK-NEXT: [[GORET_ADDR:%[0-9]+]]:gr64 = LEA64r %fixed-stack.[[GORET_HOME]],
+; CHECK: MOV64mi32 [[GORET_ADDR]],

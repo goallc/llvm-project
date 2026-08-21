@@ -1,0 +1,50 @@
+# RUN: llc -mtriple=x86_64-- -verify-machineinstrs -run-pass=branch-folder -o - %s | FileCheck %s
+
+# Branch folding must preserve inlineasm_br indirect targets that are CFG
+# successors but are not represented by the branch analyzed in the block.
+---
+name:            empty_block
+body:             |
+  ; CHECK-LABEL: name: empty_block
+  ; CHECK: bb.0:
+  ; CHECK-NEXT: successors: %bb.1(0x00000000)
+  ; CHECK: bb.1 (inlineasm-br-indirect-target):
+  bb.0:
+    successors: %bb.1(0x80000000)
+    JMP_1 %bb.1
+
+  bb.1:
+    successors: %bb.2(0x80000000), %bb.3(0x00000000)
+
+  bb.2:
+    $eax = MOV32ri 0
+    RET 0, implicit $eax
+
+  bb.3 (inlineasm-br-indirect-target):
+    $eax = MOV32ri 1
+    RET 0, implicit $eax
+...
+
+---
+name:            branch_only_block
+body:             |
+  ; CHECK-LABEL: name: branch_only_block
+  ; CHECK: bb.0:
+  ; CHECK-NEXT: successors: %bb.1(0x00000000)
+  ; CHECK: bb.1 (inlineasm-br-indirect-target):
+  bb.0:
+    successors: %bb.1(0x80000000)
+    JMP_1 %bb.1
+
+  bb.1:
+    successors: %bb.2(0x80000000), %bb.3(0x00000000)
+    JMP_1 %bb.2
+
+  bb.2:
+    $eax = MOV32ri 0
+    RET 0, implicit $eax
+
+  bb.3 (inlineasm-br-indirect-target):
+    $eax = MOV32ri 1
+    RET 0, implicit $eax
+...

@@ -1441,11 +1441,13 @@ ReoptimizeBlock:
         Pred->ReplaceUsesOfBlockWith(MBB, &*FallThrough);
       }
       // Add rest successors of MBB to successors of FallThrough. Those
-      // successors are not directly reachable via MBB, so it should be
-      // landing-pad.
+      // successors are not represented by the analyzed branch, so they must
+      // be EH pads or inlineasm_br indirect targets.
       for (auto SI = MBB->succ_begin(), SE = MBB->succ_end(); SI != SE; ++SI)
         if (*SI != &*FallThrough && !FallThrough->isSuccessor(*SI)) {
-          assert((*SI)->isEHPad() && "Bad CFG");
+          assert(((*SI)->isEHPad() ||
+                  (*SI)->isInlineAsmBrIndirectTarget()) &&
+                 "Bad CFG");
           FallThrough->copySuccessor(MBB, SI);
         }
       // If MBB was the target of a jump table, update jump tables to go to the
@@ -1710,12 +1712,14 @@ ReoptimizeBlock:
               DidChange = true;
               PMBB->ReplaceUsesOfBlockWith(MBB, CurTBB);
               // Add rest successors of MBB to successors of CurTBB. Those
-              // successors are not directly reachable via MBB, so it should be
-              // landing-pad.
+              // successors are not represented by the analyzed branch, so
+              // they must be EH pads or inlineasm_br indirect targets.
               for (auto SI = MBB->succ_begin(), SE = MBB->succ_end(); SI != SE;
                    ++SI)
                 if (*SI != CurTBB && !CurTBB->isSuccessor(*SI)) {
-                  assert((*SI)->isEHPad() && "Bad CFG");
+                  assert(((*SI)->isEHPad() ||
+                          (*SI)->isInlineAsmBrIndirectTarget()) &&
+                         "Bad CFG");
                   CurTBB->copySuccessor(MBB, SI);
                 }
               // If this change resulted in PMBB ending in a conditional
