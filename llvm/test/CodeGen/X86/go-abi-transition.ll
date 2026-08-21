@@ -43,11 +43,13 @@ define goabiinternal void @internal_to_abi0() "go-nosplit" {
 ; LATE-NEXT: $xmm15 = XORPSrr
 ; LATE-NEXT: $r14 = MOV64rm {{.*}}runtime.tlsg
 ; ASM-LABEL: internal_to_abi0:
+; ASM-NOT: pushq %r14
+; ASM-NOT: movaps %xmm15,
 ; ASM: callq "abi0_callee<ABI0>"
 ; ASM-NEXT: xorps %xmm15, %xmm15
 ; ASM-NEXT: movq %fs:runtime.tlsg@TPOFF, %r14
-; ASM: movaps {{.*}}, %xmm15
-; ASM: popq %r14
+; ASM-NOT: movaps {{.*}}, %xmm15
+; ASM-NOT: popq %r14
 ; ASM: retq
 entry:
   call goabi0 void @"abi0_callee<ABI0>"()
@@ -61,7 +63,7 @@ define goabiinternal i64 @internal_snapshot_g_across_abi0() "go-nosplit" {
 ; PRE: CALL64pcrel32 {{.*}}@"abi0_callee<ABI0>", csr_64_goabi0{{.*}}implicit-def $r14, implicit-def $xmm15
 ; ASM-LABEL: internal_snapshot_g_across_abi0:
 ; ASM-O0: movq %r14, %rax
-; ASM-O0-NEXT: movq %rax, [[OLDG:[0-9]+]](%rsp)
+; ASM-O0-NEXT: movq %rax, [[OLDG:[0-9]*]](%rsp)
 ; ASM-O2: movq %r14, [[OLDG:%r[a-z0-9]+]]
 ; ASM: callq "abi0_callee<ABI0>"
 ; ASM-NEXT: xorps %xmm15, %xmm15
@@ -78,10 +80,14 @@ entry:
 define goabiinternal void @internal_statepoint_to_abi0()
     "go-nosplit" gc "statepoint-example" {
 ; ASM-LABEL: internal_statepoint_to_abi0:
+; ASM-NOT: pushq %r14
+; ASM-NOT: movaps %xmm15,
 ; ASM: callq "abi0_callee<ABI0>"
 ; A statepoint label records the return PC between the call and the repair.
 ; ASM: xorps %xmm15, %xmm15
 ; ASM-NEXT: movq %fs:runtime.tlsg@TPOFF, %r14
+; ASM-NOT: movaps {{.*}}, %xmm15
+; ASM-NOT: popq %r14
 ; ASM: retq
 entry:
   call goabi0 token (i64, i32, ptr, i32, i32, ...)
@@ -123,7 +129,7 @@ define goabiinternal i64 @internal_statepoint_snapshot_g_across_abi0()
 ; PRE: STATEPOINT {{.*}}@"abi0_callee<ABI0>"{{.*}}csr_64_goabi0{{.*}}implicit-def $r14, implicit-def $xmm15
 ; ASM-LABEL: internal_statepoint_snapshot_g_across_abi0:
 ; ASM-O0: movq %r14, %rax
-; ASM-O0-NEXT: movq %rax, [[SP_OLDG:[0-9]+]](%rsp)
+; ASM-O0-NEXT: movq %rax, [[SP_OLDG:[0-9]*]](%rsp)
 ; ASM-O2: movq %r14, [[SP_OLDG:%r[a-z0-9]+]]
 ; ASM: callq "abi0_callee<ABI0>"
 ; ASM: xorps %xmm15, %xmm15
