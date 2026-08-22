@@ -7040,6 +7040,15 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
           "llvm.go.pointer.address result must match the pointer width", &Call);
     break;
   }
+  case Intrinsic::go_pointer_from_address: {
+    auto *PointerTy = cast<PointerType>(Call.getType());
+    Check(Call.getArgOperand(0)->getType()->getIntegerBitWidth() ==
+              M.getDataLayout().getPointerSizeInBits(
+                  PointerTy->getAddressSpace()),
+          "llvm.go.pointer.from.address operand must match the pointer width",
+          &Call);
+    break;
+  }
   case Intrinsic::structured_gep: {
     // Parser should refuse those 2 cases.
     assert(Call.arg_size() >= 1);
