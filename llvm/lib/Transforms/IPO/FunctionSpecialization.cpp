@@ -889,6 +889,11 @@ static Function *cloneCandidateFunction(Function *F, unsigned NSpecs) {
   ValueToValueMapTy Mappings;
   Function *Clone = CloneFunction(F, Mappings);
   Clone->setName(F->getName() + ".specialized." + Twine(NSpecs));
+  // A GoObj package symbol index identifies one frontend definition. A
+  // specialization is an internal implementation detail and must be appended
+  // as a new helper symbol instead of occupying the original definition's
+  // package slot.
+  Clone->setMetadata("goobj.symbol.index", nullptr);
   removeSSACopy(*Clone);
   return Clone;
 }
