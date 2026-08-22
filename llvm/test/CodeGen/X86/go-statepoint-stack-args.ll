@@ -236,5 +236,4 @@ attributes #0 = { "go_results_tuple" }
 ; CHECK-SAME: 2, 1, 0, %fixed-stack.[[GORET_HOME]], 0,
 ; CHECK-SAME: 2, 1, 0, %fixed-stack.[[GORET_HOME]], 0,
 ; CHECK-NEXT: ADJCALLSTACKUP64
-; CHECK-NEXT: [[GORET_ADDR:%[0-9]+]]:gr64 = LEA64r %fixed-stack.[[GORET_HOME]],
-; CHECK: MOV64mi32 [[GORET_ADDR]],
+; CHECK-NEXT: MOV64mi32 %fixed-stack.[[GORET_HOME]],

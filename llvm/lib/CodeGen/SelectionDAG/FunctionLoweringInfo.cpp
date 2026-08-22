@@ -14,7 +14,9 @@
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/Analysis/UniformityAnalysis.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/Analysis.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
@@ -32,6 +34,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Statepoint.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -43,15 +46,87 @@ using namespace llvm;
 /// isUsedOutsideOfDefiningBlock - Return true if this instruction is used by
 /// PHI nodes or outside of the basic block that defines it, or used by a
 /// switch or atomic instruction, which may expand to multiple basic blocks.
-static bool isUsedOutsideOfDefiningBlock(const Instruction *I) {
+static bool isUsedOutsideOfDefiningBlock(
+    const Instruction *I,
+    const DenseMap<const Value *, const Value *> &FixedFrameValues) {
   if (I->use_empty()) return false;
-  if (isa<PHINode>(I)) return true;
+  if (FixedFrameValues.contains(I))
+    return false;
+  if (isa<PHINode>(I))
+    return true;
   const BasicBlock *BB = I->getParent();
-  for (const User *U : I->users())
-    if (cast<Instruction>(U)->getParent() != BB || isa<PHINode>(U))
+  for (const User *U : I->users()) {
+    const auto *UserI = cast<Instruction>(U);
+    if (FixedFrameValues.contains(UserI))
+      continue;
+    if (UserI->getParent() != BB || isa<PHINode>(UserI))
       return true;
+  }
 
   return false;
+}
+
+static const Value *findGoFixedFrameBase(const Value &Root,
+                                         const TargetFrameLowering &TFI,
+                                         Align StackAlign) {
+  SmallVector<const Value *, 8> Worklist{&Root};
+  SmallPtrSet<const Value *, 8> Visited;
+  const Value *Base = nullptr;
+
+  while (!Worklist.empty()) {
+    const Value *V = Worklist.pop_back_val();
+    if (!Visited.insert(V).second)
+      continue;
+
+    if (const auto *PN = dyn_cast<PHINode>(V)) {
+      Worklist.append(PN->incoming_values().begin(),
+                      PN->incoming_values().end());
+      continue;
+    }
+    if (const auto *Relocate = dyn_cast<GCRelocateInst>(V)) {
+      Worklist.push_back(Relocate->getDerivedPtr());
+      continue;
+    }
+    if (const auto *Extract = dyn_cast<ExtractValueInst>(V)) {
+      if (Value *Inserted = FindInsertedValue(
+              const_cast<Value *>(Extract->getAggregateOperand()),
+              Extract->getIndices())) {
+        Worklist.push_back(Inserted);
+        continue;
+      }
+    }
+    if (const auto *GEP = dyn_cast<GetElementPtrInst>(V);
+        GEP && GEP->hasAllZeroIndices()) {
+      Worklist.push_back(GEP->getPointerOperand());
+      continue;
+    }
+    if (const auto *Cast = dyn_cast<CastInst>(V);
+        Cast && Cast->isNoopCast(Cast->getDataLayout())) {
+      Worklist.push_back(Cast->getOperand(0));
+      continue;
+    }
+
+    const Value *Candidate = nullptr;
+    if (const auto *AI = dyn_cast<AllocaInst>(V)) {
+      if (!AI->isStaticAlloca() ||
+          (!TFI.isStackRealignable() && AI->getAlign() > StackAlign))
+        return nullptr;
+      Candidate = AI;
+    } else if (const auto *Arg = dyn_cast<Argument>(V)) {
+      if (!Arg->hasByValAttr() && !Arg->hasGoRetAttr())
+        return nullptr;
+      Candidate = Arg;
+    } else {
+      return nullptr;
+    }
+
+    if (Base && Base != Candidate)
+      return nullptr;
+    Base = Candidate;
+  }
+
+  // Reject unanchored cycles such as `phi [ %self, %backedge ]`.
+  return Base;
 }
 
 static ISD::NodeType getPreferredExtendForValue(const Instruction *I) {
@@ -130,6 +205,15 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
   // instruction values that are used outside of the block that defines
   // them.
   const Align StackAlign = TFI->getStackAlign();
+  if (goabi::isGoCallingConv(Fn->getCallingConv())) {
+    for (const BasicBlock &BB : *Fn)
+      for (const Instruction &I : BB) {
+        if (!isa<PHINode, GCRelocateInst>(I))
+          continue;
+        if (const Value *Base = findGoFixedFrameBase(I, *TFI, StackAlign))
+          GoFixedFrameBaseMap[&I] = Base;
+      }
+  }
   for (const BasicBlock &BB : *Fn) {
     for (const Instruction &I : BB) {
       if (const AllocaInst *AI = dyn_cast<AllocaInst>(&I)) {
@@ -229,7 +313,7 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
 
       // Mark values used outside their block as exported, by allocating
       // a virtual register for them.
-      if (isUsedOutsideOfDefiningBlock(&I))
+      if (isUsedOutsideOfDefiningBlock(&I, GoFixedFrameBaseMap))
         if (!isa<AllocaInst>(I) || !StaticAllocaMap.count(cast<AllocaInst>(&I)))
           InitializeRegForValue(&I);
 
@@ -294,6 +378,9 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
       if (PN.use_empty())
         continue;
 
+      if (GoFixedFrameBaseMap.contains(&PN))
+        continue;
+
       // Skip empty types
       if (PN.getType()->isEmptyTy())
         continue;
@@ -342,6 +429,7 @@ void FunctionLoweringInfo::clear() {
   ValueMap.clear();
   VirtReg2Value.clear();
   StaticAllocaMap.clear();
+  GoFixedFrameBaseMap.clear();
   LiveOutRegInfo.clear();
   VisitedBBs.clear();
   ArgDbgValues.clear();

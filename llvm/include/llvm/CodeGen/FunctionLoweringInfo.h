@@ -138,6 +138,17 @@ public:
   /// ByValArgFrameIndexMap - Keep track of frame indices for byval arguments.
   DenseMap<const Argument*, int> ByValArgFrameIndexMap;
 
+  /// GoFixedFrameBaseMap - Values whose complete provenance denotes one Go
+  /// fixed frame object. PHIs and the gc.relocates produced from them are
+  /// frame addresses that must be rematerialized from the FrameIndex, not
+  /// ordinary pointer values.
+  DenseMap<const Value *, const Value *> GoFixedFrameBaseMap;
+
+  const Value *getGoFixedFrameBase(const Value *V) const {
+    auto It = GoFixedFrameBaseMap.find(V);
+    return It == GoFixedFrameBaseMap.end() ? nullptr : It->second;
+  }
+
   struct ArgumentValueHome {
     uint64_t Offset;
     uint64_t Size;
