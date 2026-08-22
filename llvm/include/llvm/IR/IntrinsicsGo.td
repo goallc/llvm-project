@@ -31,6 +31,13 @@ def int_go_pointer_address : DefaultAttrsIntrinsic<
     [llvm_anyint_ty], [llvm_anyptr_ty],
     [IntrNoMem, IntrHasSideEffects, NoCapture<ArgIndex<0>>]>;
 
+// Materialize a pointer from its integer address. This remains an ordered
+// operation until Go statepoint rewriting so a pointer reconstructed before a
+// stack-growing call stays visible to pointer liveness and relocation.
+def int_go_pointer_from_address : DefaultAttrsIntrinsic<
+    [llvm_anyptr_ty], [llvm_anyint_ty],
+    [IntrNoMem, IntrHasSideEffects]>;
+
 // Acquire Entries pointer-sized slots from the current P's Go write-barrier
 // buffer.  This is deliberately an intrinsic rather than an ordinary call:
 // the runtime entry point uses a private ABI and returns the buffer pointer in
