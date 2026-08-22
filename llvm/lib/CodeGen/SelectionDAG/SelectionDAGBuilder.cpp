@@ -2032,6 +2032,23 @@ SDValue SelectionDAGBuilder::getValueImpl(const Value *V) {
     llvm_unreachable("Unknown vector constant");
   }
 
+  // Values proven to denote one Go fixed frame object are identities of that
+  // object's frame index, even after a PHI or gc.relocate. Rematerialize the
+  // address instead of exporting it through a virtual register.
+  if (const Value *Base = FuncInfo.getGoFixedFrameBase(V)) {
+    int FI = INT_MAX;
+    if (const auto *AI = dyn_cast<AllocaInst>(Base)) {
+      auto It = FuncInfo.StaticAllocaMap.find(AI);
+      if (It != FuncInfo.StaticAllocaMap.end())
+        FI = It->second;
+    } else {
+      FI = FuncInfo.getArgumentFrameIndex(cast<Argument>(Base));
+    }
+    assert(FI != INT_MAX && "Go fixed frame PHI has no frame index");
+    return DAG.getFrameIndex(
+        FI, TLI.getValueType(DAG.getDataLayout(), V->getType()));
+  }
+
   // If this is a static alloca, generate it as the frameindex instead of
   // computation.
   if (const AllocaInst *AI = dyn_cast<AllocaInst>(V)) {
@@ -12739,6 +12756,9 @@ SelectionDAGBuilder::HandlePHINodesInSuccessorBlocks(const BasicBlock *LLVMBB) {
     for (const PHINode &PN : SuccBB->phis()) {
       // Ignore dead phi's.
       if (PN.use_empty())
+        continue;
+
+      if (FuncInfo.getGoFixedFrameBase(&PN))
         continue;
 
       // Skip empty types

@@ -1049,6 +1049,16 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
     SDValue SDV = getStatepointGCValue(V, *this);
     SDValue Loc = StatepointLowering.getLocation(SDV);
 
+    const Value *FixedFrameBase = FuncInfo.getGoFixedFrameBase(V);
+    if (!FixedFrameBase)
+      FixedFrameBase = V;
+    const auto *FrameIndex = dyn_cast<FrameIndexSDNode>(SDV);
+    bool IsGoFixedFrameAddress = isa_and_nonnull<AllocaInst>(FixedFrameBase);
+    if (const auto *Arg = dyn_cast_if_present<Argument>(FixedFrameBase))
+      IsGoFixedFrameAddress =
+          FrameIndex && (Arg->hasByValAttr() || Arg->hasGoRetAttr()) &&
+          FuncInfo.getArgumentFrameIndex(Arg) == FrameIndex->getIndex();
+
     bool IsLocal = (Relocate->getParent() == StatepointInstr->getParent());
 
     RecordType Record;
@@ -1064,15 +1074,9 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
       }
     } else if (goabi::isGoCallingConv(
                    DAG.getMachineFunction().getFunction().getCallingConv()) &&
-               isa<FrameIndexSDNode>(SDV) &&
-               (isa<AllocaInst>(V) ||
-                (isa<Argument>(V) &&
-                 (cast<Argument>(V)->hasByValAttr() ||
-                  cast<Argument>(V)->hasGoRetAttr()) &&
-                 FuncInfo.getArgumentFrameIndex(cast<Argument>(V)) ==
-                     cast<FrameIndexSDNode>(SDV)->getIndex()))) {
+               FrameIndex && IsGoFixedFrameAddress) {
       Record.type = RecordType::FrameIndexRemat;
-      Record.payload.FI = cast<FrameIndexSDNode>(SDV)->getIndex();
+      Record.payload.FI = FrameIndex->getIndex();
     } else if (Loc.getNode()) {
       Record.type = RecordType::Spill;
       Record.payload.FI = cast<FrameIndexSDNode>(Loc)->getIndex();
@@ -1447,6 +1451,12 @@ void SelectionDAGBuilder::visitGCRelocate(const GCRelocateInst &Relocate) {
   }
 
   if (Record.type == RecordType::FrameIndexRemat) {
+    if (FuncInfo.getGoFixedFrameBase(&Relocate)) {
+      setValue(&Relocate,
+               DAG.getFrameIndex(Record.payload.FI, getFrameIndexTy()));
+      return;
+    }
+
     SDValue FrameAddress =
         DAG.getFrameIndex(Record.payload.FI, getFrameIndexTy());
     Register Reg = FuncInfo.CreateReg(FrameAddress.getSimpleValueType());

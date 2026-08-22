@@ -2224,6 +2224,9 @@ bool FastISel::handlePHINodesInSuccessorBlocks(const BasicBlock *LLVMBB) {
       if (PN.use_empty())
         continue;
 
+      if (FuncInfo.getGoFixedFrameBase(&PN))
+        continue;
+
       // Only handle legal types. Two interesting things to note here. First,
       // by bailing out early, we may leave behind some dead instructions,
       // since SelectionDAG's HandlePHINodesInSuccessorBlocks will insert its

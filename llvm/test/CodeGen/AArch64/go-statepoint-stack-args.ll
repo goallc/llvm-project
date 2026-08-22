@@ -243,6 +243,5 @@ attributes #0 = { "go_results_tuple" }
 ; CHECK-SAME: 2, 1, 0, %fixed-stack.[[GORET_HOME]], 0,
 ; CHECK-SAME: 2, 1, 0, %fixed-stack.[[GORET_HOME]], 0,
 ; CHECK-NEXT: ADJCALLSTACKUP
-; CHECK-NEXT: [[GORET_FRAME:%[0-9]+]]:gpr64sp = ADDXri %fixed-stack.[[GORET_HOME]], 0, 0
-; CHECK-NEXT: [[GORET_ADDR:%[0-9]+]]:gpr64sp = COPY [[GORET_FRAME]]
-; CHECK: STRXui {{.*}}, [[GORET_ADDR]], 0
+; CHECK-NOT: ADDXri %fixed-stack.[[GORET_HOME]]
+; CHECK: STRXui {{.*}}, %fixed-stack.[[GORET_HOME]], 0
