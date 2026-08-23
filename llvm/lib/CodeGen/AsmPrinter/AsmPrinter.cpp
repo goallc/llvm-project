@@ -44,6 +44,7 @@
 #include "llvm/CodeGen/GCMetadata.h"
 #include "llvm/CodeGen/GCMetadataPrinter.h"
 #include "llvm/CodeGen/GoCallingConv.h"
+#include "llvm/CodeGen/GoObjAsyncPreemption.h"
 #include "llvm/CodeGen/InsertCodePrefetch.h"
 #include "llvm/CodeGen/LazyMachineBlockFrequencyInfo.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
@@ -2549,10 +2550,28 @@ void AsmPrinter::emitFunctionBody() {
 
   bool TrackGoObjPCSP = TM.getTargetTriple().isOSBinFormatGoObj();
   SmallVector<MCContext::GoObjPCSPEntry, 8> GoObjPCSPEntries;
+  SmallVector<MCContext::GoObjUnsafePointEntry, 8> GoObjUnsafePointEntries;
   SmallVector<std::optional<int32_t>, 8> GoObjMBBEntrySPDelta;
   if (TrackGoObjPCSP)
     GoObjMBBEntrySPDelta = computeGoObjMBBEntrySPDelta(*MF);
   int32_t GoObjSPDelta = 0;
+  SmallPtrSet<const MachineInstr *, 8> GoObjUnsafeInstructions;
+  GoObjAsyncPreemptionMode GoObjAsyncPreemption =
+      GoObjAsyncPreemptionMode::Unhandled;
+  if (TrackGoObjPCSP) {
+    GoObjAsyncPreemption =
+        invokeGoObjAsyncPreemptionCallbacks(*MF, [&](const MachineInstr &MI) {
+          GoObjUnsafeInstructions.insert(&MI);
+        });
+    if (CurrentFnSym) {
+      if (GoObjAsyncPreemption == GoObjAsyncPreemptionMode::InstructionRanges)
+        OutContext.setGoObjSymbolAsyncUnsafe(CurrentFnSym, false);
+      else if (GoObjAsyncPreemption ==
+               GoObjAsyncPreemptionMode::WholeFunctionUnsafe)
+        OutContext.setGoObjSymbolAsyncUnsafe(CurrentFnSym, true);
+    }
+  }
+  int32_t GoObjUnsafePointValue = GoObj::UnsafePointSafe;
 
   bool CanDoExtraAnalysis = ORE->allowExtraAnalysis(DEBUG_TYPE);
   // Create a slot for the entry basic block section so that the section
@@ -2608,6 +2627,18 @@ void AsmPrinter::emitFunctionBody() {
       if (!MI.isPosition() && !MI.isImplicitDef() && !MI.isKill() &&
           !MI.isDebugInstr()) {
         HasAnyRealCode = true;
+      }
+
+      if (GoObjAsyncPreemption == GoObjAsyncPreemptionMode::InstructionRanges) {
+        int32_t Value = GoObjUnsafeInstructions.contains(&MI)
+                            ? GoObj::UnsafePointUnsafe
+                            : GoObj::UnsafePointSafe;
+        if (Value != GoObjUnsafePointValue) {
+          GoObjUnsafePointValue = Value;
+          MCSymbol *Label = OutContext.createTempSymbol("goobj_unsafe_point");
+          OutStreamer->emitLabel(Label);
+          GoObjUnsafePointEntries.push_back({Label, Value});
+        }
       }
 
       // If there is a pre-instruction symbol, emit a label for it here.
@@ -2946,6 +2977,11 @@ void AsmPrinter::emitFunctionBody() {
     OutContext.setGoObjSymbolPCSPEntries(
         CurrentFnSym, std::vector<MCContext::GoObjPCSPEntry>(
                           GoObjPCSPEntries.begin(), GoObjPCSPEntries.end()));
+  if (TrackGoObjPCSP && CurrentFnSym)
+    OutContext.setGoObjSymbolUnsafePointEntries(
+        CurrentFnSym,
+        std::vector<MCContext::GoObjUnsafePointEntry>(
+            GoObjUnsafePointEntries.begin(), GoObjUnsafePointEntries.end()));
 
   emitFunctionBodyEnd();
 
