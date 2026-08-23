@@ -10457,14 +10457,17 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
   bool IsVarArg = CLI.IsVarArg;
   const CallBase *CB = CLI.CB;
   bool IsGo = goabi::isGoCallingConv(CallConv);
+  MachineFunction &MF = DAG.getMachineFunction();
+  bool IsSupportedGoTailCall =
+      IsGo && IsTailCall && CB &&
+      goabi::isSupportedMustTailCall(MF.getFunction(), *CB);
 
   if (IsGo) {
-    IsTailCall = false;
+    IsTailCall = IsSupportedGoTailCall;
     if (IsVarArg)
       report_fatal_error("Go calling convention does not support varargs");
   }
 
-  MachineFunction &MF = DAG.getMachineFunction();
   MachineFunction::CallSiteInfo CSInfo;
   bool IsThisReturn = false;
 
@@ -10543,14 +10546,22 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
     ZAMarkerNode = AArch64ISD::INOUT_ZA_USE;
 
   if (IsTailCall) {
-    // Check if it's really possible to do a tail call.
-    IsTailCall = isEligibleForTailCallOptimization(CLI);
-
-    // A sibling call is one where we're under the usual C ABI and not planning
-    // to change that but can still do a tail call:
-    if (!ZAMarkerNode && !TailCallOpt && IsTailCall &&
-        CallConv != CallingConv::Tail && CallConv != CallingConv::SwiftTail)
+    if (IsSupportedGoTailCall) {
+      // The frontend has restricted this to a direct void(void) transfer, so
+      // neither Go ABI has stack arguments or results to move. Reuse the
+      // incoming frame as a sibling call even when the two Go CC IDs differ.
       IsSibCall = true;
+    } else {
+      // Check if it's really possible to do a tail call.
+      IsTailCall = isEligibleForTailCallOptimization(CLI);
+
+      // A sibling call is one where we're under the usual C ABI and not
+      // planning to change that but can still do a tail call:
+      if (!ZAMarkerNode && !TailCallOpt && IsTailCall &&
+          CallConv != CallingConv::Tail &&
+          CallConv != CallingConv::SwiftTail)
+        IsSibCall = true;
+    }
 
     if (IsTailCall)
       ++NumTailCalls;

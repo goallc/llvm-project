@@ -22,6 +22,21 @@ using namespace llvm;
 
 namespace llvm::goabi {
 
+bool isSupportedMustTailCall(const Function &Caller, const CallBase &CB) {
+  const Function *Callee = CB.getCalledFunction();
+  CallingConv::ID CallerCC = Caller.getCallingConv();
+  CallingConv::ID CalleeCC = CB.getCallingConv();
+  bool CompatibleCCs =
+      CallerCC == CalleeCC ||
+      (CallerCC == CallingConv::GoABI0 &&
+       CalleeCC == CallingConv::GoABIInternal);
+  return CB.isMustTailCall() && Callee && isGoCallingConv(CallerCC) &&
+         isGoCallingConv(CalleeCC) && CompatibleCCs && !Caller.isVarArg() &&
+         !CB.getFunctionType()->isVarArg() && Caller.arg_empty() &&
+         CB.arg_empty() && Caller.getReturnType()->isVoidTy() &&
+         CB.getFunctionType()->getReturnType()->isVoidTy();
+}
+
 std::string getGoObjBuiltinCalleeName(MachineFunction &MF, StringRef SymbolName,
                                       CallingConv::ID CC) {
   if (SymbolName.empty() ||
