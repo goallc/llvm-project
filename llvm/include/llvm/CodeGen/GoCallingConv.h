@@ -100,6 +100,14 @@ struct ResultCarrier {
 bool hasTupleResultsAttr(const AttributeList &Attrs);
 bool hasTupleResultsAttr(const Function &F);
 bool hasTupleResultsAttr(const CallBase &CB);
+
+/// Return whether \p CB is the initial Go musttail shape supported by target
+/// lowering. The Go frontend owns the semantic decision to request a tail
+/// transfer; this helper only validates the common mechanical contract before
+/// targets reuse the incoming frame. Keep the first version deliberately
+/// narrow so argument/result frame reuse can be enabled independently later.
+bool isSupportedMustTailCall(const Function &Caller, const CallBase &CB);
+
 // Mirrors ComputeValueTypes and marks leaves originating in %go.abi.pad.
 SmallBitVector getPaddingPieces(Type *Ty);
 

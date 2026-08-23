@@ -2,6 +2,13 @@
 
 ; Should assemble without error.
 
+declare goabiinternal void @go_internal_callee()
+
+define goabi0 void @"go_abi0_wrapper<ABI0>"() {
+  musttail call goabiinternal void @go_internal_callee()
+  ret void
+}
+
 declare void @similar_param_ptrty_callee(ptr)
 define void @similar_param_ptrty(ptr) {
   musttail call void @similar_param_ptrty_callee(ptr null)

@@ -3712,9 +3712,21 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
   }
 
   if (TM.getTargetTriple().isOSBinFormatGoObj()) {
+    uint8_t Flag = 0;
+    uint8_t Flag2 = 0;
     if (std::optional<std::pair<uint8_t, uint8_t>> Flags =
-            getGoObjSymbolFlags(&F))
-      OutContext.setGoObjSymbolFlags(CurrentFnSym, Flags->first, Flags->second);
+            getGoObjSymbolFlags(&F)) {
+      Flag = Flags->first;
+      Flag2 = Flags->second;
+    }
+    // Go's linker uses AttrLeaf to stop nosplit stack accounting at transfers
+    // that do not return to this frame. MachineFrameInfo::hasCalls excludes
+    // both ordinary leaf functions and genuine tail calls, matching the native
+    // assembler's definition rather than the IR-level presence of a call.
+    if (!MF.getFrameInfo().hasCalls())
+      Flag |= GoObj::SymFlagLeaf;
+    if (Flag != 0 || Flag2 != 0)
+      OutContext.setGoObjSymbolFlags(CurrentFnSym, Flag, Flag2);
     if (std::optional<std::pair<uint8_t, uint8_t>> Info =
             getGoObjFunctionInfo(F))
       OutContext.setGoObjFunctionInfo(CurrentFnSym, Info->first, Info->second);
