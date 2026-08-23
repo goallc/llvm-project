@@ -1798,6 +1798,22 @@ SDValue SelectionDAGBuilder::getCopyFromRegs(const Value *V, Type *Ty) {
 
 /// getValue - Return an SDValue for the given Value.
 SDValue SelectionDAGBuilder::getValue(const Value *V) {
+  // Typed byval and goret arguments in GC-enabled Go functions denote fixed
+  // incoming frame homes. Do not reuse an address exported from the entry
+  // block: an intervening statepoint may grow the Go stack, making that
+  // physical address stale. Selecting the canonical FrameIndex at every use
+  // lets the target rematerialize the address relative to the current stack.
+  if (const auto *Arg = dyn_cast<Argument>(V);
+      Arg && (Arg->hasByValAttr() || Arg->hasGoRetAttr()) &&
+      FuncInfo.Fn->hasGC() &&
+      goabi::isGoCallingConv(FuncInfo.Fn->getCallingConv())) {
+    int FI = FuncInfo.getArgumentFrameIndex(Arg);
+    if (FI != INT_MAX)
+      return DAG.getFrameIndex(
+          FI, DAG.getTargetLoweringInfo().getValueType(DAG.getDataLayout(),
+                                                       Arg->getType()));
+  }
+
   // If we already have an SDValue for this value, use it. It's important
   // to do this first, so that we don't create a CopyFromReg if we already
   // have a regular SDValue.
