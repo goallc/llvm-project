@@ -2011,10 +2011,52 @@ uint64_t GoObjObjectWriter::writeObject() {
         PCSPEntries = std::move(NormalizedPCSPEntries);
       }
 
-      int32_t InitialUnsafePointValue =
-          Asm->getContext().isGoObjSymbolAsyncUnsafe(Symbols[I].Symbol)
-              ? GoObj::UnsafePointUnsafe
-              : GoObj::UnsafePointSafe;
+      SmallVector<GoObjPCTabEntry, 8> UnsafePointEntries;
+      if (const auto *Entries =
+              Asm->getContext().getGoObjSymbolUnsafePointEntries(
+                  Symbols[I].Symbol)) {
+        for (const MCContext::GoObjUnsafePointEntry &Entry : *Entries) {
+          if (!Entry.Label->isInSection())
+            report_fatal_error("GoObj unsafe-point label was not emitted");
+          if (&Entry.Label->getSection() != &Symbols[I].Symbol->getSection())
+            report_fatal_error(
+                "GoObj unsafe-point label is in a different section");
+          uint64_t LabelOffset = Asm->getSymbolOffset(*Entry.Label);
+          if (LabelOffset < Symbols[I].SectionBegin)
+            report_fatal_error(
+                "GoObj unsafe-point label precedes its function");
+          uint64_t EventPC = LabelOffset - Symbols[I].SectionBegin;
+          if (EventPC > CodeSize)
+            report_fatal_error(
+                "GoObj unsafe-point label is outside its function");
+          UnsafePointEntries.push_back({EventPC, Entry.Value});
+        }
+        llvm::stable_sort(UnsafePointEntries,
+                          [](const auto &LHS, const auto &RHS) {
+                            return LHS.PC < RHS.PC;
+                          });
+        SmallVector<GoObjPCTabEntry, 8> NormalizedUnsafePointEntries;
+        for (const GoObjPCTabEntry &Entry : UnsafePointEntries) {
+          if (!NormalizedUnsafePointEntries.empty() &&
+              NormalizedUnsafePointEntries.back().PC == Entry.PC)
+            NormalizedUnsafePointEntries.back().Value = Entry.Value;
+          else if (NormalizedUnsafePointEntries.empty() ||
+                   NormalizedUnsafePointEntries.back().Value != Entry.Value)
+            NormalizedUnsafePointEntries.push_back(Entry);
+        }
+        UnsafePointEntries = std::move(NormalizedUnsafePointEntries);
+      }
+
+      bool IsWholeFunctionAsyncUnsafe =
+          Asm->getContext().isGoObjSymbolAsyncUnsafe(Symbols[I].Symbol);
+      int32_t InitialUnsafePointValue = IsWholeFunctionAsyncUnsafe
+                                            ? GoObj::UnsafePointUnsafe
+                                            : GoObj::UnsafePointSafe;
+      if (!IsWholeFunctionAsyncUnsafe && !UnsafePointEntries.empty() &&
+          UnsafePointEntries.front().PC == 0) {
+        InitialUnsafePointValue = UnsafePointEntries.front().Value;
+        UnsafePointEntries.erase(UnsafePointEntries.begin());
+      }
 
       GoObjFuncDebugLines &LineInfo = FuncDebugLines[I];
       if (LineInfo.Files.empty())
@@ -2108,7 +2150,10 @@ uint64_t GoObjObjectWriter::writeObject() {
           Symbols, AuxCarrierIndexes, 'P', StackMapIndex);
       uint32_t UnsafePointSym = getOrAddHashedAuxCarrierSymbol(
           Symbols, AuxCarrierIndexes, 'P',
-          makeConstantPCTab(InitialUnsafePointValue, CodeSize, PCQuantum));
+          IsWholeFunctionAsyncUnsafe
+              ? makeConstantPCTab(InitialUnsafePointValue, CodeSize, PCQuantum)
+              : makePCTab(InitialUnsafePointValue, UnsafePointEntries, CodeSize,
+                          PCQuantum));
 
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncInfo, FuncInfoSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, ArgsMapSym});

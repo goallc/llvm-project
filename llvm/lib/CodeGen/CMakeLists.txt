@@ -70,6 +70,7 @@ add_llvm_component_library(LLVMCodeGen
   GCMetadataPrinter.cpp
   GCRootLowering.cpp
   GoCallingConv.cpp
+  GoObjAsyncPreemption.cpp
   GlobalMerge.cpp
   GlobalMergeFunctions.cpp
   HardwareLoops.cpp
