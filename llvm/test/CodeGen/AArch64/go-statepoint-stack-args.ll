@@ -168,6 +168,22 @@ entry:
         i64, i64, i64, i64, i64, i64, i64 } zeroinitializer
 }
 
+define goabiinternal { i64, i64, i64, i64, i64, i64, i64, i64,
+                       i64, i64, i64, i64, i64, i64, i64 }
+    @goret_home_address_without_relocate(
+        ptr addrspace(1) goret(%goret.home) align 8 "goretindex"="15" %result)
+    #0 gc "statepoint-example" {
+entry:
+  call goabiinternal token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 10, i32 0, ptr elementtype(void ()) @safepoint,
+          i32 0, i32 0, i32 0, i32 0)
+      [ "gc-live"(ptr addrspace(1) %result) ]
+  store ptr null, ptr addrspace(1) %result, align 8
+  ret { i64, i64, i64, i64, i64, i64, i64, i64,
+        i64, i64, i64, i64, i64, i64, i64 } zeroinitializer
+}
+
 declare token @llvm.experimental.gc.statepoint.p0(
     i64 immarg, i32 immarg, ptr, i32 immarg, i32 immarg, ...)
 declare ptr addrspace(1) @llvm.experimental.gc.relocate.p1(
@@ -246,3 +262,14 @@ attributes #0 = { "go_results_tuple" }
 ; CHECK-NEXT: [[GORET_FRAME:%[0-9]+]]:gpr64sp = ADDXri %fixed-stack.[[GORET_HOME]], 0, 0
 ; CHECK-NEXT: [[GORET_ADDR:%[0-9]+]]:gpr64sp = COPY [[GORET_FRAME]]
 ; CHECK: STRXui {{.*}}, [[GORET_ADDR]], 0
+
+; CHECK-LABEL: name: goret_home_address_without_relocate
+; CHECK: fixedStack:
+; CHECK: - { id: [[RAW_GORET_HOME:[0-9]+]], type: default, offset: 8, size: 24,
+; CHECK: stack: []
+; CHECK: STATEPOINT 10,
+; CHECK-SAME: 2, 1, 0, %fixed-stack.[[RAW_GORET_HOME]], 0,
+; CHECK-NOT: %fixed-stack.[[RAW_GORET_HOME]]{{.*}}%fixed-stack.[[RAW_GORET_HOME]]
+; CHECK-NEXT: ADJCALLSTACKUP
+; CHECK-NEXT: [[RAW_GORET_ZERO:%[0-9]+]]:gpr64 = COPY $xzr
+; CHECK-NEXT: STRXui [[RAW_GORET_ZERO]], %fixed-stack.[[RAW_GORET_HOME]], 0
