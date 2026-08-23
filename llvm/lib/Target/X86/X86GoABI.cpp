@@ -132,7 +132,7 @@ static bool repairGoABIState(MachineFunction &MF) {
   for (MachineBasicBlock &MBB : MF) {
     for (auto I = MBB.begin(); I != MBB.end(); ++I) {
       MachineInstr &MI = *I;
-      if (!MI.isCall())
+      if (!MI.isCall() && !TII.isTailCall(MI))
         continue;
       if (!isOrdinaryGoCall(MI, MF))
         continue;

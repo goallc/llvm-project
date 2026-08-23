@@ -4263,8 +4263,18 @@ void Verifier::verifyMustTailCall(CallInst &CI) {
   Check(CallerTy->getReturnType() == CalleeTy->getReturnType(),
         "cannot guarantee tail call due to mismatched return types", &CI);
 
-  // - The calling conventions of the caller and callee must match.
-  Check(F->getCallingConv() == CI.getCallingConv(),
+  // - The calling conventions of the caller and callee must match. Go's two
+  // calling conventions are also compatible for the initially supported
+  // direct void(void) transfer. Keep this exception narrow so accepting a
+  // musttail here remains a target-independent guarantee rather than a hint.
+  const Function *CalledF = CI.getCalledFunction();
+  bool CompatibleGoCCs =
+      F->getCallingConv() == CallingConv::GoABI0 &&
+      CI.getCallingConv() == CallingConv::GoABIInternal && CalledF &&
+      !F->isVarArg() && !CalledF->isVarArg() && F->arg_empty() &&
+      CI.arg_empty() && F->getReturnType()->isVoidTy() &&
+      CalledF->getReturnType()->isVoidTy();
+  Check(F->getCallingConv() == CI.getCallingConv() || CompatibleGoCCs,
         "cannot guarantee tail call due to mismatched calling conv", &CI);
 
   // - The call must immediately precede a :ref:`ret <i_ret>` instruction.

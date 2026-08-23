@@ -9,6 +9,20 @@ define void @cc_mismatch() {
   ret void
 }
 
+declare goabiinternal void @go_cc_args_callee(i64)
+define goabi0 void @go_cc_args(i64 %value) {
+; CHECK: mismatched calling conv
+  musttail call goabiinternal void @go_cc_args_callee(i64 %value)
+  ret void
+}
+
+declare goabi0 void @go_abi0_callee()
+define goabiinternal void @go_cc_reverse() {
+; CHECK: mismatched calling conv
+  musttail call goabi0 void @go_abi0_callee()
+  ret void
+}
+
 declare void @more_parms_callee(i32)
 define void @more_parms() {
 ; CHECK: mismatched parameter counts

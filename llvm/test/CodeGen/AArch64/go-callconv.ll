@@ -29,6 +29,18 @@ entry:
   ret i64 %ret
 }
 
+declare goabiinternal void @internal_tail_target()
+
+define goabi0 void @"abi0_tail_wrapper<ABI0>"() "go-nosplit" {
+; A64-LABEL: "abi0_tail_wrapper<ABI0>":
+; A64-NOT: bl internal_tail_target
+; A64: b internal_tail_target
+; A64-NOT: ret
+entry:
+  musttail call goabiinternal void @internal_tail_target()
+  ret void
+}
+
 %go.abi.pad = type { i8 }
 %go.empty = type {}
 %go.empty.carrier = type { %go.empty, %go.abi.pad }

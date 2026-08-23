@@ -2384,8 +2384,11 @@ SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   MachineFunction &MF = DAG.getMachineFunction();
   bool Is64Bit = Subtarget.is64Bit();
   bool IsGo = goabi::isGoCallingConv(CallConv);
+  bool IsSupportedGoTailCall =
+      IsGo && isTailCall && CB &&
+      goabi::isSupportedMustTailCall(MF.getFunction(), *CB);
   if (IsGo) {
-    isTailCall = false;
+    isTailCall = IsSupportedGoTailCall;
     if (!Is64Bit)
       report_fatal_error("Go calling convention requires x86-64");
     if (isVarArg)
@@ -2458,8 +2461,12 @@ SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   bool IsMustTail = CLI.CB && CLI.CB->isMustTailCall();
   bool IsSibcall = false;
   if (isTailCall) {
-    IsSibcall = isEligibleForSiblingCallOpt(CLI, CCInfo, ArgLocs);
-    isTailCall = IsSibcall || IsMustTail || ShouldGuaranteeTCO;
+    if (IsSupportedGoTailCall) {
+      IsSibcall = true;
+    } else {
+      IsSibcall = isEligibleForSiblingCallOpt(CLI, CCInfo, ArgLocs);
+      isTailCall = IsSibcall || IsMustTail || ShouldGuaranteeTCO;
+    }
   }
 
   if (isTailCall)

@@ -10,6 +10,7 @@
 ; RUN:   FileCheck %s --check-prefix=OBJ
 
 declare goabiinternal void @internal_callee()
+declare goabiinternal void @internal_tail_callee()
 declare goabi0 void @"abi0_callee<ABI0>"()
 declare goabi0 void @"abi0_result<ABI0>"(
     ptr goret(i64) align 8 "goretindex"="0")
@@ -34,6 +35,25 @@ define goabi0 void @"abi0_to_internal<ABI0>"() "go-nosplit" {
 ; ASM: retq
 entry:
   call goabiinternal void @internal_callee()
+  ret void
+}
+
+define goabi0 void @"abi0_tail_to_internal<ABI0>"() "go-nosplit" {
+; PRE-LABEL: name: 'abi0_tail_to_internal<ABI0>'
+; PRE-NOT: XORPSrr
+; PRE: TAILJMPd64 {{.*}}@internal_tail_callee
+; LATE-LABEL: name: 'abi0_tail_to_internal<ABI0>'
+; LATE: $xmm15 = XORPSrr
+; LATE-NEXT: $r14 = MOV64rm {{.*}}runtime.tlsg
+; LATE-NEXT: TAILJMPd64 {{.*}}@internal_tail_callee
+; ASM-LABEL: "abi0_tail_to_internal<ABI0>":
+; ASM-NOT: callq internal_tail_callee
+; ASM: xorps %xmm15, %xmm15
+; ASM-NEXT: movq %fs:runtime.tlsg@TPOFF, %r14
+; ASM-NEXT: jmp internal_tail_callee
+; ASM-NOT: retq
+entry:
+  musttail call goabiinternal void @internal_tail_callee()
   ret void
 }
 
@@ -173,6 +193,9 @@ declare token @llvm.experimental.gc.statepoint.p0(
 
 ; Each repair has one symbol-free R_TLS_LE relocation, matching native x86 Go
 ; objects. Calls retain their ABI-specific named targets.
+; The tail transfer remains a linker-visible leaf, so nosplit stack accounting
+; does not charge the callee against a frame that never resumes.
+; OBJ: symdef {{[0-9]+}}: abi0_tail_to_internal abi=0 type=1 size={{[0-9]+}} align={{[0-9]+}} flag=24 flag2=0
 ; OBJ-NOT: nonpkgref {{[0-9]+}}: runtime.tlsg
 ; OBJ: reloc {{.*}} type=15 {{.*}} kind=unknown pkg=0 sym=0
 ; OBJ: reloc {{.*}} kind=R_CALL
