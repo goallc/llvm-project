@@ -1585,6 +1585,23 @@ uint64_t GoObjObjectWriter::writeObject() {
   };
 
   std::vector<GoObjSymbol> Symbols;
+  // The Go linker omits dot-prefixed package symbols from ELF/Mach-O symbol
+  // tables. LLVM constant pools and private globals normally use such names,
+  // but external relocations still need an output symbol to target. Give
+  // synthesized section carriers and private read-only globals deterministic,
+  // package-scoped static names
+  // matching the Go compiler's .stmp_ convention. The package hash avoids
+  // collisions when multiple GoObj files are passed to an external linker.
+  std::string StaticDataSymbolPrefix =
+      "goallc." +
+      toHex(SHA256::hash(arrayRefFromStringRef(Config.PackagePath)),
+            /*LowerCase=*/true) +
+      ".stmp_";
+  uint64_t StaticDataSymbolIndex = 0;
+  auto MakeStaticDataSymbolName = [&]() {
+    return (Twine(StaticDataSymbolPrefix) + Twine(StaticDataSymbolIndex++))
+        .str();
+  };
   DenseSet<const MCSymbol *> SeenPrivateRelocationTargets;
   SmallVector<const MCSymbol *, 8> PrivateRelocationTargets;
   for (const GoObjRelocationEntry &Reloc : Relocations) {
@@ -1670,8 +1687,16 @@ uint64_t GoObjObjectWriter::writeObject() {
         Data = ArrayRef<char>(Contents.data() + Begin, Size);
       }
       uint8_t Type = getGoObjSymbolType(&Section);
-      uint16_t ABI = GetSymbolABI(
-          MCSym, MCSym && Asm->getContext().isGoObjFunctionSymbol(MCSym));
+      std::string StaticName;
+      uint16_t ABI;
+      if (MCSym) {
+        ABI =
+            GetSymbolABI(MCSym, Asm->getContext().isGoObjFunctionSymbol(MCSym));
+      } else {
+        StaticName = MakeStaticDataSymbolName();
+        Name = StaticName;
+        ABI = GoObj::SymABIstatic;
+      }
       uint8_t Flag = 0;
       uint8_t Flag2 = 0;
       uint32_t Align = 0;
@@ -1682,6 +1707,8 @@ uint64_t GoObjObjectWriter::writeObject() {
           Flag2 = Flags->second;
         }
         Align = Asm->getContext().getGoObjSymbolAlignment(MCSym).value_or(0);
+      } else {
+        Flag |= GoObj::SymFlagLocal;
       }
       GoObj::DefinedSymbolBlock DefinedBlock =
           MCSym && Asm->getContext().isGoObjSymbolNonPackage(MCSym)
@@ -1740,12 +1767,11 @@ uint64_t GoObjObjectWriter::writeObject() {
     // ranges can never be found by FindContainingSymbol, so relocations must
     // refer to their directly indexed symbols.
     //
-    // Relocation-free constants are the MC equivalent of the Go compiler's
-    // local, content-addressable strings and scalar constants. A private
-    // constant with relocations is instead analogous to a native Go static
-    // lookup or jump table: keep it as an object-local package definition.
-    // Hashing only its zero-filled fixup placeholders would incorrectly merge
-    // tables that refer to different symbols.
+    // These constants are relocation targets, so external object emission
+    // needs a real local symbol for them even when their data is otherwise
+    // content-addressable. Use the same static carrier model as native Go
+    // lookup/jump tables. In particular, do not hash a relocated table using
+    // only its zero-filled fixup placeholders.
     if (getGoObjSymbolType(&Section) != GoObj::SRODATA)
       continue;
     for (const MCSymbol *MCSym : PrivateRelocationTargets) {
@@ -1782,21 +1808,11 @@ uint64_t GoObjObjectWriter::writeObject() {
         Data = ArrayRef<char>(Contents.data() + Begin, *ExactSize);
       uint32_t Align =
           Asm->getContext().getGoObjSymbolAlignment(MCSym).value_or(1);
-      bool HasRelocations = llvm::any_of(
-          Relocations, [&](const GoObjRelocationEntry &Reloc) {
-            return Reloc.Section == &Section && Begin <= Reloc.Offset &&
-                   Reloc.Offset < End;
-          });
+      std::string StaticName = MakeStaticDataSymbolName();
       addDefinedSymbol(Symbols, MCSym, &Section, Begin, End,
-                       HasRelocations ? Config.DefaultDefinedSymbolBlock
-                                      : GoObj::DefinedSymbolBlock::Hasheddef,
-                       MCSym->getName(), GoObj::SRODATA,
-                       HasRelocations
-                           ? 0
-                           : GoObj::SymFlagDupok | GoObj::SymFlagLocal,
-                       0, GoObj::SymABI0, *ExactSize, Align, Data);
-      if (!HasRelocations)
-        Symbols.back().ContentHash = makeGoObjContentHash(0, Data);
+                       Config.DefaultDefinedSymbolBlock, StaticName,
+                       GoObj::SRODATA, GoObj::SymFlagLocal, 0,
+                       GoObj::SymABIstatic, *ExactSize, Align, Data);
     }
   }
 
