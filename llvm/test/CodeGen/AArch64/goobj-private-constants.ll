@@ -1,4 +1,4 @@
-; RUN: llc -mtriple=aarch64-apple-darwin-goobj -filetype=obj < %s -o %t.o
+; RUN: llc -mtriple=aarch64-apple-darwin-goobj -goobj-package-path=example/pkg -filetype=obj < %s -o %t.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | FileCheck %s
 
 @before = internal constant i64 42, section ".rodata", align 8
@@ -10,7 +10,6 @@ entry:
   ret ptr @.str
 }
 
-; CHECK: hasheddef [[STR:[0-9]+]]: .L.str abi=0 type=3 size=24 align={{[0-9]+}} flag=3 flag2=0
-; CHECK-DAG: hash [[STR]]: 1ec75dfa41be6d04ae97fd5b835b6056
-; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: {{.*}}target=.L.str
+; CHECK: symdef [[STR:[0-9]+]]: goallc.{{[0-9a-f]+}}.stmp_{{[0-9]+}} abi=65535 type=3 size=24 align={{[0-9]+}} flag=2 flag2=0
+; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: {{.*}}target=goallc.{{[0-9a-f]+}}.stmp_{{[0-9]+}}
 ; CHECK-DAG: data: {{.*}}62616420646174612077616e742025642c20676f74202564
