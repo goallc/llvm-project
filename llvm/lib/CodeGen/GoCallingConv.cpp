@@ -170,9 +170,11 @@ void getReturnTypes(Type *ReturnType, bool TupleResults,
 static bool classifyRegisterResult(Type *Ty, const DataLayout &DL,
                                    const ABIConfig &Config, unsigned &IntRegs,
                                    unsigned &FPRegs) {
-  if (isPaddingType(Ty) || Ty->isVoidTy() || DL.getTypeAllocSize(Ty) == 0)
+  if (isPaddingType(Ty) || Ty->isVoidTy())
     return true;
 
+  // Go assigns arrays longer than one element to memory even when their
+  // elements, and therefore the array itself, have zero size.
   if (auto *AT = dyn_cast<ArrayType>(Ty)) {
     if (AT->getNumElements() == 0)
       return true;
@@ -188,6 +190,9 @@ static bool classifyRegisterResult(Type *Ty, const DataLayout &DL,
         return false;
     return true;
   }
+
+  if (DL.getTypeAllocSize(Ty) == 0)
+    return true;
 
   if (Ty->isPointerTy()) {
     ++IntRegs;

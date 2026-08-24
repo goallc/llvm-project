@@ -4,6 +4,7 @@
 %large = type [4 x i64]
 %memory.result = type [2 x i64]
 %stack.arg = type { i64, i64, i64 }
+%zero.array.result = type { i64, [3 x {}], double }
 
 declare goabiinternal void @write_statepoint_result(
     ptr goret(%memory.result) align 8 "goretindex"="0")
@@ -40,6 +41,35 @@ entry:
   %memory0 = load i64, ptr %memory.result, align 8
   %sum = add i64 %direct0, %memory0
   ret i64 %sum
+}
+
+; A multi-element array is memory-assigned even when its elements have zero
+; size. Keep the first logical result in memory and the second in a register.
+define goabiinternal i64 @zero_array_memory_result(
+    i64 %direct,
+    ptr goret(%zero.array.result) align 8 "goretindex"="0" %memory.result) {
+; X86-LABEL: zero_array_memory_result:
+; X86: movq $42, 8(%rsp)
+; X86: retq
+; AARCH64-LABEL: zero_array_memory_result:
+; AARCH64: str {{x[0-9]+}}, [sp, #8]
+; AARCH64: ret
+entry:
+  store i64 42, ptr %memory.result, align 8
+  ret i64 %direct
+}
+
+define goabiinternal i64 @call_zero_array_memory_result(i64 %arg) {
+; X86-LABEL: call_zero_array_memory_result:
+; X86: callq zero_array_memory_result
+; AARCH64-LABEL: call_zero_array_memory_result:
+; AARCH64: bl zero_array_memory_result
+entry:
+  %memory.result = alloca %zero.array.result, align 8
+  %direct = call goabiinternal i64 @zero_array_memory_result(
+      i64 %arg,
+      ptr goret(%zero.array.result) align 8 "goretindex"="0" %memory.result)
+  ret i64 %direct
 }
 
 define goabiinternal void @result_after_byval(
