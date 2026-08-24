@@ -57,6 +57,13 @@ LLVM_ABI std::unique_ptr<ScheduleDAGMutation>
 createMacroFusionDAGMutation(ArrayRef<MacroFusionPredTy> Predicates,
                              bool BranchOnly = false);
 
+/// Create a DAG scheduling mutation for instruction pairs that must remain
+/// adjacent for correctness. This mutation is not controlled by the
+/// misched-fusion option.
+LLVM_ABI std::unique_ptr<ScheduleDAGMutation>
+createRequiredInstrPairingDAGMutation(ArrayRef<MacroFusionPredTy> Predicates,
+                                      bool BranchOnly = false);
+
 } // end namespace llvm
 
 #endif // LLVM_CODEGEN_MACROFUSION_H

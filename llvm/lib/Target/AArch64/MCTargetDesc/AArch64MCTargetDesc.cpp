@@ -29,11 +29,22 @@
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/Compiler.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/TargetParser/AArch64TargetParser.h"
 
 using namespace llvm;
+
+static cl::opt<bool> AArch64GoObjCompositeRelocations(
+    "aarch64-goobj-composite-relocations",
+    cl::desc("Keep AArch64 GoObj page-relative references representable as "
+             "composite relocations"),
+    cl::init(false), cl::Hidden);
+
+bool llvm::useAArch64GoObjCompositeRelocations() {
+  return AArch64GoObjCompositeRelocations;
+}
 
 #define GET_INSTRINFO_MC_DESC
 #define GET_INSTRINFO_MC_HELPERS
