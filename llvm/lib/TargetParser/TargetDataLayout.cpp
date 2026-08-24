@@ -440,6 +440,12 @@ static std::string computeX86DataLayout(const Triple &TT) {
   if (TT.isOSIAMCU())
     Ret += "-f128:32";
 
+  // The Go amd64 ABI guarantees only 64-bit stack alignment. Match the ABI
+  // alignment of 128-bit vectors to that guarantee so IR optimizations do not
+  // introduce vector accesses with stronger alignment requirements.
+  if (Is64Bit && TT.isOSBinFormatGoObj())
+    Ret += "-v128:64:64";
+
   // The registers can hold 8, 16, 32 or, in x86-64, 64 bits.
   if (Is64Bit)
     Ret += "-n8:16:32:64";

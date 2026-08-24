@@ -3724,12 +3724,14 @@ TEST(DataLayoutTest, UEFI) {
   EXPECT_THAT(TT.computeDataLayout(), testing::HasSubstr("-m:w-"));
 }
 
-TEST(DataLayoutTest, X86GoObjStackAlignment) {
+TEST(DataLayoutTest, X86GoObjAlignment) {
   Triple TT = Triple("x86_64-unknown-linux-goobj");
 
   EXPECT_THAT(TT.computeDataLayout(), testing::HasSubstr("-S64"));
   EXPECT_THAT(TT.computeDataLayout(),
               testing::Not(testing::HasSubstr("-S128")));
+  EXPECT_THAT(TT.computeDataLayout(),
+              testing::HasSubstr("-v128:64:64"));
 }
 
 TEST(TripleTest, WindowsOrUEFI) {
