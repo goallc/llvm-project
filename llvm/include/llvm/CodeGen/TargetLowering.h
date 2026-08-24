@@ -5161,7 +5161,8 @@ public:
 
   /// Return the fixed frame object for llvm.go.abi0.frame. Targets supporting
   /// the Go calling conventions must create a mutable, aliased object covering
-  /// the complete contiguous ABI0 argument/result area.
+  /// the complete contiguous ABI0 argument/result area. A present but empty
+  /// area is represented by a zero-sized fixed address anchor.
   virtual int getGoABI0FrameIndex(MachineFunction &) const {
     llvm_unreachable("llvm.go.abi0.frame is unsupported on this target");
   }
