@@ -76,14 +76,14 @@ int MachineFrameInfo::CreateVariableSizedObject(Align Alignment,
                                                 const AllocaInst *Alloca) {
   HasVarSizedObjects = true;
   Alignment = clampStackAlignment(!StackRealignable, Alignment, StackAlignment);
-  Objects.push_back(StackObject(0, Alignment, 0, false, false, Alloca, true));
+  Objects.push_back(StackObject(0, Alignment, 0, false, false, Alloca, true,
+                                /*StackID=*/0, /*IsVariableSized=*/true));
   ensureMaxAlignment(Alignment);
   return (int)Objects.size()-NumFixedObjects-1;
 }
 
 int MachineFrameInfo::CreateFixedObject(uint64_t Size, int64_t SPOffset,
                                         bool IsImmutable, bool IsAliased) {
-  assert(Size != 0 && "Cannot allocate zero size fixed stack objects!");
   // The alignment of the frame index can be determined from its offset from
   // the incoming frame position.  If the frame object is at offset 32 and
   // the stack is guaranteed to be 16-byte aligned, then we know that the
@@ -226,7 +226,7 @@ void MachineFrameInfo::print(const MachineFunction &MF, raw_ostream &OS) const{
       OS << "dead\n";
       continue;
     }
-    if (SO.Size == 0)
+    if (SO.IsVariableSized)
       OS << "variable sized";
     else
       OS << "size=" << SO.Size;

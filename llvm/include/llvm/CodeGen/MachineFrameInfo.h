@@ -131,9 +131,14 @@ private:
     // the function.  This field has no meaning for a variable sized element.
     int64_t SPOffset;
 
-    // The size of this object on the stack. 0 means a variable sized object,
-    // ~0ULL means a dead object.
+    // The size of this object on the stack. ~0ULL means a dead object. A zero
+    // size is valid for fixed address anchors and is distinguished from a
+    // variable sized object by IsVariableSized.
     uint64_t Size;
+
+    // Whether this is a variable sized object. Fixed objects may have zero
+    // size when only their ABI-defined address is materialized.
+    bool IsVariableSized;
 
     // The required alignment of this stack slot.
     Align Alignment;
@@ -191,8 +196,10 @@ private:
 
     StackObject(uint64_t Size, Align Alignment, int64_t SPOffset,
                 bool IsImmutable, bool IsSpillSlot, const AllocaInst *Alloca,
-                bool IsAliased, uint8_t StackID = 0)
-        : SPOffset(SPOffset), Size(Size), Alignment(Alignment),
+                bool IsAliased, uint8_t StackID = 0,
+                bool IsVariableSized = false)
+        : SPOffset(SPOffset), Size(Size), IsVariableSized(IsVariableSized),
+          Alignment(Alignment),
           isImmutable(IsImmutable), isSpillSlot(IsSpillSlot), StackID(StackID),
           Alloca(Alloca), isAliased(IsAliased) {}
   };
@@ -735,14 +742,16 @@ public:
     CVBytesOfCalleeSavedRegisters = S;
   }
 
-  /// Create a new object at a fixed location on the stack.
+  /// Create a new object at a fixed location on the stack. Size may be zero
+  /// when the object is an address anchor that occupies no storage.
   /// All fixed objects should be created before other objects are created for
   /// efficiency. By default, fixed objects are not pointed to by LLVM IR
   /// values. This returns an index with a negative value.
   LLVM_ABI int CreateFixedObject(uint64_t Size, int64_t SPOffset,
                                  bool IsImmutable, bool isAliased = false);
 
-  /// Create a spill slot at a fixed location on the stack.
+  /// Create a spill slot at a fixed location on the stack. Size may be zero
+  /// for a zero-sized incoming value that occupies no storage.
   /// Returns an index with a negative value.
   LLVM_ABI int CreateFixedSpillStackObject(uint64_t Size, int64_t SPOffset,
                                            bool IsImmutable = false);
@@ -835,7 +844,7 @@ public:
   bool isVariableSizedObjectIndex(int ObjectIdx) const {
     assert(unsigned(ObjectIdx + NumFixedObjects) < Objects.size() &&
            "Invalid Object Idx!");
-    return Objects[ObjectIdx + NumFixedObjects].Size == 0;
+    return Objects[ObjectIdx + NumFixedObjects].IsVariableSized;
   }
 
   void markAsStatepointSpillSlotObjectIndex(int ObjectIdx) {
