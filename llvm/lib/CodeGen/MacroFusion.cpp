@@ -229,6 +229,12 @@ std::unique_ptr<ScheduleDAGMutation>
 llvm::createMacroFusionDAGMutation(ArrayRef<MacroFusionPredTy> Predicates,
                                    bool BranchOnly) {
   if (EnableMacroFusion)
-    return std::make_unique<MacroFusion>(Predicates, !BranchOnly);
+    return createRequiredInstrPairingDAGMutation(Predicates, BranchOnly);
   return nullptr;
+}
+
+std::unique_ptr<ScheduleDAGMutation>
+llvm::createRequiredInstrPairingDAGMutation(
+    ArrayRef<MacroFusionPredTy> Predicates, bool BranchOnly) {
+  return std::make_unique<MacroFusion>(Predicates, !BranchOnly);
 }
