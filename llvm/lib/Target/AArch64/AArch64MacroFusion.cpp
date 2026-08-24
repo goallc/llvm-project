@@ -13,6 +13,7 @@
 
 #include "AArch64MacroFusion.h"
 #include "AArch64Subtarget.h"
+#include "Utils/AArch64BaseInfo.h"
 #include "llvm/CodeGen/MacroFusion.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 
@@ -271,6 +272,52 @@ static bool isAddressLdStPair(const MachineInstr *FirstMI,
   }
 
   return false;
+}
+
+static bool hasRelocFragment(const MachineInstr &MI, unsigned Fragment) {
+  return llvm::any_of(MI.operands(), [Fragment](const MachineOperand &MO) {
+    return !MO.isReg() &&
+           (MO.getTargetFlags() & AArch64II::MO_FRAGMENT) == Fragment;
+  });
+}
+
+static bool isGoObjAddressLdStPair(const MachineInstr *FirstMI,
+                                   const MachineInstr &SecondMI) {
+  // GoObj has no composite relocation for a 128-bit load or store.
+  if (SecondMI.getOpcode() == AArch64::LDRQui ||
+      SecondMI.getOpcode() == AArch64::STRQui)
+    return false;
+  return isAddressLdStPair(FirstMI, SecondMI);
+}
+
+// GoObj represents an ADRP and its low-12 ADD or LD/ST as one composite
+// relocation, which requires the two instructions to remain adjacent. Keep
+// only genuine page-relative relocation pairs together; ordinary address
+// generation remains controlled by the processor's fusion features.
+static bool isGoObjPageRelocPair(const AArch64Subtarget &ST,
+                                 const MachineInstr *FirstMI,
+                                 const MachineInstr &SecondMI) {
+  if (!ST.getTargetTriple().isOSBinFormatGoObj() ||
+      !hasRelocFragment(SecondMI, AArch64II::MO_PAGEOFF))
+    return false;
+
+  if (FirstMI == nullptr)
+    return isAdrpAddPair(nullptr, SecondMI) ||
+           isGoObjAddressLdStPair(nullptr, SecondMI);
+
+  if (FirstMI->getOpcode() != AArch64::ADRP ||
+      !hasRelocFragment(*FirstMI, AArch64II::MO_PAGE))
+    return false;
+
+  return isAdrpAddPair(FirstMI, SecondMI) ||
+         isGoObjAddressLdStPair(FirstMI, SecondMI);
+}
+
+static bool shouldScheduleGoObjRelocationAdjacent(
+    const TargetInstrInfo &, const TargetSubtargetInfo &TSI,
+    const MachineInstr *FirstMI, const MachineInstr &SecondMI) {
+  const AArch64Subtarget &ST = static_cast<const AArch64Subtarget &>(TSI);
+  return isGoObjPageRelocPair(ST, FirstMI, SecondMI);
 }
 
 /// Compare and conditional select.
@@ -583,4 +630,10 @@ static bool shouldScheduleAdjacent(const TargetInstrInfo &TII,
 std::unique_ptr<ScheduleDAGMutation>
 llvm::createAArch64MacroFusionDAGMutation() {
   return createMacroFusionDAGMutation(shouldScheduleAdjacent);
+}
+
+std::unique_ptr<ScheduleDAGMutation>
+llvm::createAArch64GoObjRelocationDAGMutation() {
+  return createRequiredInstrPairingDAGMutation(
+      shouldScheduleGoObjRelocationAdjacent);
 }
