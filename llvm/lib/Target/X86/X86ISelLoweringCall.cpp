@@ -266,9 +266,6 @@ int X86TargetLowering::getGoABI0FrameIndex(MachineFunction &MF) const {
   MachineFrameInfo &MFI = MF.getFrameInfo();
   if (!MFI.hasGoABIArgSizes())
     report_fatal_error("missing X86 Go ABI argument layout");
-  if (MFI.getGoABIArgSize() == 0)
-    report_fatal_error("llvm.go.abi0.frame requires a non-empty ABI0 frame");
-
   int FI = MFI.CreateFixedObject(MFI.getGoABIArgSize(), /*SPOffset=*/0,
                                  /*IsImmutable=*/false,
                                  /*IsAliased=*/true);
