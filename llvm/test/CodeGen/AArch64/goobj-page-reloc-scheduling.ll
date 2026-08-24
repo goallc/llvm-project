@@ -22,6 +22,8 @@ entry:
   ret void
 }
 
+; Keep the materialized address intact when it is hoisted out of the loop while
+; the store remains in the loop block.
 define goabiinternal void @store_global_loop(i64 %count, i64 %x) {
 entry:
   br label %loop
