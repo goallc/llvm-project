@@ -278,8 +278,19 @@ enum RelocType : uint16_t {
   R_ARM64_LDST64 = 44,
   R_ARM64_LDST128 = 45,
 
+  // Pointer-sized text address relative to the first function in the DWARF
+  // compile unit. Go's linker consumes this in DWARF4 range carriers.
+  R_ADDRCUOFF = 98,
+
   // A zero-width ordering edge between package initialization records.
   R_INITORDER = 102,
+
+  // DWARF5 .debug_addr indexes encoded as fixed-width ULEB128 placeholders.
+  // The Go linker assigns the final per-CU slot and replaces these bytes.
+  R_DWTXTADDR_U1 = 103,
+  R_DWTXTADDR_U2 = 104,
+  R_DWTXTADDR_U3 = 105,
+  R_DWTXTADDR_U4 = 106,
 
   R_WEAK = 1u << 15,
   R_WEAKADDR = R_WEAK | R_ADDR,

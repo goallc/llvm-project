@@ -37,11 +37,24 @@ AUX_TYPES = {
     0: "gotype",
     1: "funcinfo",
     2: "funcdata",
+    3: "dwarf_info",
+    4: "dwarf_loc",
+    5: "dwarf_ranges",
+    6: "dwarf_lines",
     7: "pcsp",
     8: "pcfile",
     9: "pcline",
     10: "pcinline",
     11: "pcdata",
+}
+
+SYMBOL_TYPES = {
+    1: "STEXT",
+    14: "SDWARFFCN",
+    15: "SDWARFABSFCN",
+    18: "SDWARFRANGE",
+    19: "SDWARFLOC",
+    20: "SDWARFLINES",
 }
 
 PKG_INDEX_NAMES = {
@@ -53,9 +66,17 @@ PKG_INDEX_NAMES = {
 }
 
 RELOC_TYPES = {
+    1: "R_ADDR",
     7: "R_CALL",
     9: "R_CALLARM64",
     10: "R_CALLIND",
+    22: "R_USETYPE",
+    31: "R_DWARFSECREF",
+    98: "R_ADDRCUOFF",
+    103: "R_DWTXTADDR_U1",
+    104: "R_DWTXTADDR_U2",
+    105: "R_DWTXTADDR_U3",
+    106: "R_DWTXTADDR_U4",
 }
 
 
@@ -190,7 +211,8 @@ def main(path):
             print(
                 f"{label} {index}: {symbol['name']} abi={symbol['abi']} "
                 f"type={symbol['type']} size={symbol['size']} align={symbol['align']} "
-                f"flag={symbol['flag']} flag2={symbol['flag2']}"
+                f"flag={symbol['flag']} flag2={symbol['flag2']} "
+                f"kind={SYMBOL_TYPES.get(symbol['type'], 'unknown')}"
             )
 
     for index in range((offsets[11] - offsets[10]) // 16):

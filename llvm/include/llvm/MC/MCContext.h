@@ -177,10 +177,21 @@ public:
     std::vector<GoObjDebugInlineFrame> AnchorChildFrames;
   };
 
+  struct GoObjDebugVariable {
+    std::string Name;
+    std::string TypeName;
+    std::string File;
+    uint32_t DeclLine = 0;
+    uint32_t ArgNo = 0;
+    bool IsReturn = false;
+  };
+
   struct GoObjFunctionDebugInfo {
+    std::string Name;
     std::string File;
     uint32_t StartLine = 0;
     std::vector<GoObjDebugLocation> Locations;
+    std::vector<GoObjDebugVariable> Variables;
   };
 
 private:
@@ -286,8 +297,7 @@ private:
   DenseMap<const MCSymbol *, std::vector<const MCSymbol *>> GoObjKeepTargets;
 
   /// Go object zero-width linker marker relocations keyed by source symbol.
-  DenseMap<const MCSymbol *, std::vector<GoObjMarkerReloc>>
-      GoObjMarkerRelocs;
+  DenseMap<const MCSymbol *, std::vector<GoObjMarkerReloc>> GoObjMarkerRelocs;
 
   /// Imported packages and their opaque linker fingerprints, in source order.
   std::vector<GoObjImport> GoObjImports;
@@ -322,6 +332,7 @@ private:
 
   DenseMap<const MCSymbol *, GoObjFunctionDebugInfo> GoObjFunctionDebugInfos;
   DenseSet<const MCSymbol *> GoObjInlineAnchorSymbols;
+  unsigned GoObjDwarfVersion = 0;
 
   /// A mapping from a local label number and an instance count to a symbol.
   /// For example, in the assembly
@@ -762,8 +773,7 @@ public:
     GoObjSymbolHasFramePointers[Sym] = HasFramePointer;
   }
 
-  std::optional<bool>
-  getGoObjSymbolHasFramePointer(const MCSymbol *Sym) const {
+  std::optional<bool> getGoObjSymbolHasFramePointer(const MCSymbol *Sym) const {
     auto It = GoObjSymbolHasFramePointers.find(Sym);
     if (It == GoObjSymbolHasFramePointers.end())
       return std::nullopt;
@@ -819,13 +829,11 @@ public:
     return &It->second;
   }
 
-  void setGoObjWeakRelocs(const MCSymbol *Sym,
-                          std::vector<uint32_t> Offsets) {
+  void setGoObjWeakRelocs(const MCSymbol *Sym, std::vector<uint32_t> Offsets) {
     GoObjWeakRelocs[Sym] = std::move(Offsets);
   }
 
-  const std::vector<uint32_t> *
-  getGoObjWeakRelocs(const MCSymbol *Sym) const {
+  const std::vector<uint32_t> *getGoObjWeakRelocs(const MCSymbol *Sym) const {
     auto It = GoObjWeakRelocs.find(Sym);
     if (It == GoObjWeakRelocs.end())
       return nullptr;
@@ -881,8 +889,7 @@ public:
     GoObjSymbolAlignments[Sym] = Alignment;
   }
 
-  std::optional<uint32_t>
-  getGoObjSymbolAlignment(const MCSymbol *Sym) const {
+  std::optional<uint32_t> getGoObjSymbolAlignment(const MCSymbol *Sym) const {
     auto It = GoObjSymbolAlignments.find(Sym);
     if (It == GoObjSymbolAlignments.end())
       return std::nullopt;
@@ -924,8 +931,9 @@ public:
     return &It->second;
   }
 
-  void setGoObjSymbolUnsafePointEntries(
-      const MCSymbol *Sym, std::vector<GoObjUnsafePointEntry> Entries) {
+  void
+  setGoObjSymbolUnsafePointEntries(const MCSymbol *Sym,
+                                   std::vector<GoObjUnsafePointEntry> Entries) {
     GoObjSymbolUnsafePointEntries[Sym] = std::move(Entries);
   }
 
@@ -965,6 +973,16 @@ public:
     Info.StartLine = StartLine;
   }
 
+  void setGoObjSubprogramDebugInfo(const MCSymbol *Sym, StringRef Name,
+                                   StringRef File, uint32_t StartLine,
+                                   std::vector<GoObjDebugVariable> Variables) {
+    GoObjFunctionDebugInfo &Info = GoObjFunctionDebugInfos[Sym];
+    Info.Name = Name.str();
+    Info.File = File.str();
+    Info.StartLine = StartLine;
+    Info.Variables = std::move(Variables);
+  }
+
   void addGoObjDebugLocation(const MCSymbol *Sym, GoObjDebugLocation Location) {
     GoObjFunctionDebugInfos[Sym].Locations.push_back(std::move(Location));
   }
@@ -982,6 +1000,14 @@ public:
   bool isGoObjInlineAnchor(const MCSymbol *Sym) const {
     return GoObjInlineAnchorSymbols.contains(Sym);
   }
+
+  void setGoObjDwarfVersion(unsigned Version) {
+    assert((Version == 0 || Version == 4 || Version == 5) &&
+           "unsupported GoObj DWARF version");
+    GoObjDwarfVersion = Version;
+  }
+
+  unsigned getGoObjDwarfVersion() const { return GoObjDwarfVersion; }
 
   /// Allocates and returns a new `WasmSignature` instance (with empty parameter
   /// and return type lists).

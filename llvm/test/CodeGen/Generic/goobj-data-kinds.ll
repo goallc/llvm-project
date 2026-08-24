@@ -47,7 +47,7 @@ entry:
 ; CHECK-DAG: symdef {{[0-9]+}}: fips_data abi=0 type=8 size=8 align=8
 ; CHECK-DAG: symdef {{[0-9]+}}: ordinary_text abi=1 type=1
 ; CHECK-DAG: symdef [[TABLE:[0-9]+]]: goallc.{{[0-9a-f]+}}.stmp_{{[0-9]+}} abi=65535 type=4 size=32 align={{[0-9]+}} flag=2 flag2=0
-; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size={{[0-9]+}} type={{[0-9]+}} add=0 target=goallc.{{[0-9a-f]+}}.stmp_{{[0-9]+}} kind=unknown pkg=self sym=[[TABLE]]
+; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size={{[0-9]+}} type={{[0-9]+}} add=0 target=goallc.{{[0-9a-f]+}}.stmp_{{[0-9]+}} kind={{(unknown|R_ADDR)}} pkg=self sym=[[TABLE]]
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off=0 size=8 type=1 add=0 target=noptrdata
 ; ASM: .section .noptrbss,"aw",@nobits
 

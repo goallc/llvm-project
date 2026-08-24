@@ -14,6 +14,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/BinaryFormat/GoObj.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
@@ -37,6 +38,7 @@
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <string>
@@ -67,6 +69,7 @@ struct GoObjSymbol {
     uint32_t PkgIdx = GoObj::PkgIdxInvalid;
     uint32_t SymIdx = 0;
     std::optional<uint32_t> TargetSymbolIndex;
+    const MCSymbol *TargetSymbol = nullptr;
   };
 
   struct Auxiliary {
@@ -122,6 +125,16 @@ struct GoObjFuncDebugLines {
   int32_t StartLine = 1;
 
   bool hasLines() const { return !PCFile.empty() && !PCLine.empty(); }
+};
+
+struct GoObjDwarfRange {
+  uint64_t Begin = 0;
+  uint64_t End = 0;
+};
+
+struct GoObjDwarfCarrierData {
+  SmallString<0> Data;
+  std::vector<GoObjSymbol::Relocation> Relocations;
 };
 
 uint32_t checkedUint32(uint64_t Value, const Twine &What) {
@@ -239,6 +252,49 @@ void appendVarint(SmallVectorImpl<char> &Data, int64_t Value) {
   if (Value < 0)
     UValue = ~UValue;
   appendUvarint(Data, UValue);
+}
+
+void appendDwarfSLEB128(SmallVectorImpl<char> &Data, int64_t Value) {
+  bool More;
+  do {
+    uint8_t Byte = Value & 0x7f;
+    bool Sign = (Byte & 0x40) != 0;
+    Value >>= 7;
+    More = !((Value == 0 && !Sign) || (Value == -1 && Sign));
+    if (More)
+      Byte |= 0x80;
+    Data.push_back(static_cast<char>(Byte));
+  } while (More);
+}
+
+void appendUint32LE(SmallVectorImpl<char> &Data, uint32_t Value) {
+  size_t Offset = Data.size();
+  Data.resize(Offset + 4);
+  support::endian::write32le(Data.data() + Offset, Value);
+}
+
+void appendCString(SmallVectorImpl<char> &Data, StringRef Value) {
+  Data.append(Value.begin(), Value.end());
+  Data.push_back(0);
+}
+
+uint32_t
+appendDwarfRelocation(SmallVectorImpl<char> &Data,
+                      std::vector<GoObjSymbol::Relocation> &Relocations,
+                      uint8_t Size, uint16_t Type, int64_t Addend,
+                      std::optional<uint32_t> TargetSymbolIndex,
+                      const MCSymbol *TargetSymbol = nullptr) {
+  uint32_t Offset = checkedUint32(Data.size(), "DWARF carrier offset");
+  Data.resize(Data.size() + Size, 0);
+  GoObjSymbol::Relocation Reloc;
+  Reloc.Offset = Offset;
+  Reloc.Size = Size;
+  Reloc.Type = Type;
+  Reloc.Addend = Addend;
+  Reloc.TargetSymbolIndex = TargetSymbolIndex;
+  Reloc.TargetSymbol = TargetSymbol;
+  Relocations.push_back(Reloc);
+  return Offset;
 }
 
 uint64_t getPCDeltaUnits(uint64_t Delta, uint32_t PCQuantum) {
@@ -631,11 +687,12 @@ parseAllocaPtrMapRecords(const MCContext::GoObjStackMapEntry &Entry) {
   return Records;
 }
 
-GoObjStatepointStackMaps makeStatepointStackMaps(
-    const MCAssembler &Asm, const GoObjSymbol &Function, uint32_t StackSize,
-    uint32_t ArgSize, uint32_t PCQuantum,
-    ArrayRef<MCContext::GoObjStackMapEntry> StackMapEntries,
-    ArrayRef<GoObjPCTabEntry> PCSPEntries) {
+GoObjStatepointStackMaps
+makeStatepointStackMaps(const MCAssembler &Asm, const GoObjSymbol &Function,
+                        uint32_t StackSize, uint32_t ArgSize,
+                        uint32_t PCQuantum,
+                        ArrayRef<MCContext::GoObjStackMapEntry> StackMapEntries,
+                        ArrayRef<GoObjPCTabEntry> PCSPEntries) {
   struct ResolvedEntry {
     uint64_t CallsitePC;
     const MCContext::GoObjStackMapEntry *Entry;
@@ -1160,6 +1217,153 @@ uint32_t recordFunctionFile(GoObjFuncDebugLines &Info,
   return ObjectFileIndex;
 }
 
+uint32_t addDwarfCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
+                               StringRef Name, uint8_t Type, uint8_t Flag,
+                               GoObjDwarfCarrierData Contents) {
+  GoObjSymbol Sym;
+  Sym.Name = Name.str();
+  Sym.DefinedBlock = GoObj::DefinedSymbolBlock::Symdef;
+  Sym.ABI = GoObj::SymABI0;
+  Sym.Type = Type;
+  Sym.Flag = Flag;
+  Sym.Align = 1;
+  Sym.Size = Contents.Data.size();
+  Sym.Data = std::move(Contents.Data);
+  Sym.Relocations = std::move(Contents.Relocations);
+  uint32_t Index = checkedUint32(Symbols.size(), "symbol count");
+  Symbols.push_back(std::move(Sym));
+  return Index;
+}
+
+void appendDwarfPCLineDelta(SmallVectorImpl<char> &Data, uint64_t DeltaPC,
+                            int64_t DeltaLine) {
+  constexpr int64_t LineBase = -4;
+  constexpr int64_t LineRange = 10;
+  constexpr int64_t OpcodeBase = 11;
+  constexpr uint64_t PCRange = (255 - OpcodeBase) / LineRange;
+
+  int64_t Opcode;
+  if (DeltaLine < LineBase) {
+    Opcode = OpcodeBase + LineRange * std::min<uint64_t>(DeltaPC, PCRange);
+  } else if (DeltaLine < LineBase + LineRange) {
+    Opcode = OpcodeBase + (DeltaLine - LineBase) +
+             LineRange * std::min<uint64_t>(DeltaPC, PCRange);
+    if (DeltaPC >= PCRange && Opcode > 255)
+      Opcode -= LineRange;
+  } else if (DeltaPC <= PCRange) {
+    Opcode = OpcodeBase + (LineRange - 1) + LineRange * DeltaPC;
+    if (Opcode > 255)
+      Opcode = 255;
+  } else {
+    switch (DeltaPC - PCRange) {
+    case PCRange:
+    case (1ULL << 7) - 1:
+    case (1ULL << 16) - 1:
+    case (1ULL << 21) - 1:
+    case (1ULL << 28) - 1:
+    case (1ULL << 35) - 1:
+    case (1ULL << 42) - 1:
+    case (1ULL << 49) - 1:
+    case (1ULL << 56) - 1:
+    case (1ULL << 63) - 1:
+      Opcode = 255;
+      break;
+    default:
+      Opcode = OpcodeBase + LineRange * PCRange - 1;
+      break;
+    }
+  }
+  if (Opcode < OpcodeBase || Opcode > 255)
+    report_fatal_error("invalid DWARF line special opcode");
+
+  DeltaPC -= (Opcode - OpcodeBase) / LineRange;
+  DeltaLine -= (Opcode - OpcodeBase) % LineRange + LineBase;
+  if (DeltaPC != 0) {
+    if (DeltaPC <= PCRange) {
+      Opcode -= LineRange * (PCRange - DeltaPC);
+      if (Opcode < OpcodeBase)
+        report_fatal_error("invalid adjusted DWARF line special opcode");
+      Data.push_back(dwarf::DW_LNS_const_add_pc);
+    } else if ((1ULL << 14) <= DeltaPC && DeltaPC < (1ULL << 16)) {
+      Data.push_back(dwarf::DW_LNS_fixed_advance_pc);
+      size_t Offset = Data.size();
+      Data.resize(Offset + 2);
+      support::endian::write16le(Data.data() + Offset,
+                                 static_cast<uint16_t>(DeltaPC));
+    } else {
+      Data.push_back(dwarf::DW_LNS_advance_pc);
+      appendUvarint(Data, DeltaPC);
+    }
+  }
+  if (DeltaLine != 0) {
+    Data.push_back(dwarf::DW_LNS_advance_line);
+    appendDwarfSLEB128(Data, DeltaLine);
+  }
+  Data.push_back(static_cast<char>(Opcode));
+}
+
+GoObjDwarfCarrierData makeDwarfLines(const GoObjFuncDebugLines &Info,
+                                     uint64_t CodeSize, uint8_t PointerSize,
+                                     uint32_t TextSymbolIndex) {
+  GoObjDwarfCarrierData Result;
+  Result.Data.push_back(0);
+  appendUvarint(Result.Data, 1 + PointerSize);
+  Result.Data.push_back(dwarf::DW_LNE_set_address);
+  appendDwarfRelocation(Result.Data, Result.Relocations, PointerSize,
+                        GoObj::R_ADDR, 0, TextSymbolIndex);
+
+  int32_t File = Info.PCFile.empty() ? static_cast<int32_t>(Info.Files.front())
+                                     : Info.PCFile.front().Value;
+  int32_t Line =
+      Info.PCLine.empty() ? Info.StartLine : Info.PCLine.front().Value;
+  int32_t MachineFile = 0;
+  int32_t MachineLine = 1;
+  uint64_t MachinePC = 0;
+  size_t FI = 0;
+  size_t LI = 0;
+  bool First = true;
+
+  auto EmitRow = [&](uint64_t PC) {
+    bool Wrote = false;
+    int32_t DwarfFile = File + 1;
+    if (DwarfFile != MachineFile) {
+      Result.Data.push_back(dwarf::DW_LNS_set_file);
+      appendUvarint(Result.Data, DwarfFile);
+      MachineFile = DwarfFile;
+      Wrote = true;
+    }
+    if (First || Line != MachineLine || Wrote) {
+      appendDwarfPCLineDelta(Result.Data, PC - MachinePC,
+                             static_cast<int64_t>(Line) - MachineLine);
+      MachinePC = PC;
+      MachineLine = Line;
+      First = false;
+    }
+  };
+
+  EmitRow(0);
+  while (FI < Info.PCFile.size() || LI < Info.PCLine.size()) {
+    uint64_t PC = std::numeric_limits<uint64_t>::max();
+    if (FI < Info.PCFile.size())
+      PC = std::min(PC, Info.PCFile[FI].PC);
+    if (LI < Info.PCLine.size())
+      PC = std::min(PC, Info.PCLine[LI].PC);
+    while (FI < Info.PCFile.size() && Info.PCFile[FI].PC == PC)
+      File = Info.PCFile[FI++].Value;
+    while (LI < Info.PCLine.size() && Info.PCLine[LI].PC == PC)
+      Line = Info.PCLine[LI++].Value;
+    if (PC != 0)
+      EmitRow(PC);
+  }
+
+  Result.Data.push_back(dwarf::DW_LNS_advance_pc);
+  appendUvarint(Result.Data, CodeSize - MachinePC);
+  Result.Data.push_back(0);
+  appendUvarint(Result.Data, 1);
+  Result.Data.push_back(dwarf::DW_LNE_end_sequence);
+  return Result;
+}
+
 uint32_t addAuxCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
                              GoObj::DefinedSymbolBlock Block,
                              ArrayRef<char> Data) {
@@ -1532,12 +1736,15 @@ void GoObjObjectWriter::recordRelocation(const MCFragment &F,
     assert(Info.TargetSize % 8 == 0 && "Target size must be byte-aligned");
     RelocSize = Info.TargetSize / 8;
   }
-  GoObjRelocationEntry Reloc{
-      Target.getAddSym(), Target.getSubSym(), F.getParent(),
-      Asm->getFragmentOffset(F) + Fixup.getOffset(),
-      TargetObjectWriter->getRelocAddend(Target, Fixup),
-      TargetObjectWriter->getRelocType(Target, Fixup), RelocSize,
-      Fixup.isPCRel(), unsigned(Fixup.getKind())};
+  GoObjRelocationEntry Reloc{Target.getAddSym(),
+                             Target.getSubSym(),
+                             F.getParent(),
+                             Asm->getFragmentOffset(F) + Fixup.getOffset(),
+                             TargetObjectWriter->getRelocAddend(Target, Fixup),
+                             TargetObjectWriter->getRelocType(Target, Fixup),
+                             RelocSize,
+                             Fixup.isPCRel(),
+                             unsigned(Fixup.getKind())};
   Relocations.push_back(Reloc);
   FixedValue = 0;
 }
@@ -1844,8 +2051,71 @@ uint64_t GoObjObjectWriter::writeObject() {
     std::vector<GoObjInlineTreeNode> InlineTree;
   };
   std::vector<PendingFuncInfoPatch> PendingFuncInfoPatches;
+  DenseMap<const MCSymbol *, uint32_t> DwarfAbstractSymbols;
+  unsigned DwarfVersion = Asm->getContext().getGoObjDwarfVersion();
+  if (DwarfVersion != 0 && DwarfVersion != 4 && DwarfVersion != 5)
+    report_fatal_error("unsupported GoObj DWARF version");
   auto GetFallbackFile = [&]() {
     return getOrAddFileIndex(FileIndexes, FilePaths, "llvm-ir");
+  };
+
+  auto AppendDwarfTypeReference = [&](GoObjDwarfCarrierData &Carrier,
+                                      StringRef TypeName) {
+    MCSymbol *InfoType = Asm->getContext().getOrCreateSymbol(
+        (Twine("go:info.") + TypeName).str());
+    appendDwarfRelocation(Carrier.Data, Carrier.Relocations, 4,
+                          GoObj::R_DWARFSECREF, 0, std::nullopt, InfoType);
+
+    // Match native dwarfgen's R_USETYPE reachability edge. The Go linker
+    // builds the canonical rich type DIE and resolves go:info.<type>.
+    GoObjSymbol::Relocation UseType;
+    UseType.Type = GoObj::R_USETYPE;
+    UseType.TargetSymbol =
+        Asm->getContext().getOrCreateSymbol((Twine("type:") + TypeName).str());
+    Carrier.Relocations.push_back(UseType);
+  };
+
+  auto GetOrAddDwarfAbstract = [&](const MCSymbol *Callee) {
+    if (!Callee)
+      report_fatal_error("GoObj DWARF abstract function has no callee");
+    if (auto It = DwarfAbstractSymbols.find(Callee);
+        It != DwarfAbstractSymbols.end())
+      return It->second;
+
+    const MCContext::GoObjFunctionDebugInfo *DebugInfo =
+        Asm->getContext().getGoObjFunctionDebugInfo(Callee);
+    StringRef Name = DebugInfo && !DebugInfo->Name.empty()
+                         ? StringRef(DebugInfo->Name)
+                         : GetSymbolName(Callee);
+    uint32_t Line =
+        DebugInfo && DebugInfo->StartLine != 0 ? DebugInfo->StartLine : 1;
+    GoObjDwarfCarrierData Carrier;
+    appendUvarint(Carrier.Data, 5); // DW_ABRV_FUNCTION_ABSTRACT.
+    appendCString(Carrier.Data, Name);
+    Carrier.Data.push_back(1); // DW_INL_inlined.
+    appendUvarint(Carrier.Data, Line);
+    Carrier.Data.push_back(1); // External.
+    if (DebugInfo) {
+      for (const MCContext::GoObjDebugVariable &Var : DebugInfo->Variables) {
+        if (Var.ArgNo != 0) {
+          appendUvarint(Carrier.Data, 34); // Abstract formal parameter.
+          appendCString(Carrier.Data, Var.Name);
+          Carrier.Data.push_back(Var.IsReturn ? 1 : 0);
+        } else {
+          appendUvarint(Carrier.Data, 33); // Abstract local variable.
+          appendCString(Carrier.Data, Var.Name);
+          appendUvarint(Carrier.Data, Var.DeclLine);
+        }
+        AppendDwarfTypeReference(Carrier, Var.TypeName);
+      }
+    }
+    Carrier.Data.push_back(0);
+
+    uint32_t Index = addDwarfCarrierSymbol(
+        Symbols, (Twine("go:info.") + Name + "$abstract").str(),
+        GoObj::SDWARFABSFCN, GoObj::SymFlagDupok, std::move(Carrier));
+    DwarfAbstractSymbols[Callee] = Index;
+    return Index;
   };
 
   if (Config.SourceKind == GoObj::SourceKind::Compiler) {
@@ -2063,10 +2333,9 @@ uint64_t GoObjObjectWriter::writeObject() {
                 "GoObj unsafe-point label is outside its function");
           UnsafePointEntries.push_back({EventPC, Entry.Value});
         }
-        llvm::stable_sort(UnsafePointEntries,
-                          [](const auto &LHS, const auto &RHS) {
-                            return LHS.PC < RHS.PC;
-                          });
+        llvm::stable_sort(
+            UnsafePointEntries,
+            [](const auto &LHS, const auto &RHS) { return LHS.PC < RHS.PC; });
         SmallVector<GoObjPCTabEntry, 8> NormalizedUnsafePointEntries;
         for (const GoObjPCTabEntry &Entry : UnsafePointEntries) {
           if (!NormalizedUnsafePointEntries.empty() &&
@@ -2111,6 +2380,183 @@ uint64_t GoObjObjectWriter::writeObject() {
       NormalizePCTab(LineInfo.PCLine);
       NormalizePCTab(LineInfo.PCInline);
 
+      const auto *FunctionDebugInfo =
+          Asm->getContext().getGoObjFunctionDebugInfo(Symbols[I].Symbol);
+      if (DwarfVersion != 0 && FunctionDebugInfo &&
+          !FunctionDebugInfo->Name.empty()) {
+        // Derive inline DIE ranges from the same final-layout transitions that
+        // feed PCDATA_InlTreeIndex. This keeps runtime traceback and debugger
+        // inline views on one source of truth after scheduling and relaxation.
+        std::vector<std::vector<GoObjDwarfRange>> InlineRanges(
+            LineInfo.InlineTree.size());
+        for (size_t Event = 0; Event < LineInfo.PCInline.size(); ++Event) {
+          uint64_t Begin = LineInfo.PCInline[Event].PC;
+          uint64_t End = Event + 1 < LineInfo.PCInline.size()
+                             ? LineInfo.PCInline[Event + 1].PC
+                             : CodeSize;
+          int32_t Node = LineInfo.PCInline[Event].Value;
+          if (Begin >= End || Node < 0)
+            continue;
+          if (static_cast<size_t>(Node) >= LineInfo.InlineTree.size())
+            report_fatal_error("GoObj DWARF inline index is invalid");
+          while (Node >= 0) {
+            auto &Ranges = InlineRanges[Node];
+            if (!Ranges.empty() && Ranges.back().End == Begin)
+              Ranges.back().End = End;
+            else
+              Ranges.push_back({Begin, End});
+            Node = LineInfo.InlineTree[Node].Parent;
+          }
+        }
+
+        std::vector<uint32_t> AbstractSymbols(LineInfo.InlineTree.size());
+        for (size_t Node = 0; Node < LineInfo.InlineTree.size(); ++Node) {
+          // Final-layout PCDATA keeps frontend inline nodes even when every
+          // instruction attributed to a node was folded into another source
+          // position. Such a node is still needed by FuncInfo/ParentPC, but
+          // DW_TAG_inlined_subroutine cannot describe an empty address range.
+          // Omit only its DWARF DIE; a child with a real range also contributes
+          // that range to every ancestor above, so an empty node cannot hide a
+          // non-empty subtree.
+          if (InlineRanges[Node].empty())
+            continue;
+          AbstractSymbols[Node] =
+              GetOrAddDwarfAbstract(LineInfo.InlineTree[Node].Callee);
+        }
+
+        GoObjDwarfCarrierData RangeCarrier;
+        std::vector<uint32_t> RangeOffsets(LineInfo.InlineTree.size());
+        for (size_t Node = 0; Node < InlineRanges.size(); ++Node) {
+          if (InlineRanges[Node].empty())
+            continue;
+          if (DwarfVersion == 4 && InlineRanges[Node].size() == 1)
+            continue;
+          RangeOffsets[Node] =
+              checkedUint32(RangeCarrier.Data.size(), "DWARF range offset");
+          if (DwarfVersion == 5) {
+            // DW_RLE_base_addressx, followed by DW_RLE_offset_pair entries.
+            RangeCarrier.Data.push_back(dwarf::DW_RLE_base_addressx);
+            appendDwarfRelocation(RangeCarrier.Data, RangeCarrier.Relocations,
+                                  4, GoObj::R_DWTXTADDR_U4, 0, I);
+            for (const GoObjDwarfRange &Range : InlineRanges[Node]) {
+              RangeCarrier.Data.push_back(dwarf::DW_RLE_offset_pair);
+              appendUvarint(RangeCarrier.Data, Range.Begin);
+              appendUvarint(RangeCarrier.Data, Range.End);
+            }
+            RangeCarrier.Data.push_back(dwarf::DW_RLE_end_of_list);
+          } else {
+            for (const GoObjDwarfRange &Range : InlineRanges[Node]) {
+              appendDwarfRelocation(RangeCarrier.Data, RangeCarrier.Relocations,
+                                    PointerSize, GoObj::R_ADDRCUOFF,
+                                    Range.Begin, I);
+              appendDwarfRelocation(RangeCarrier.Data, RangeCarrier.Relocations,
+                                    PointerSize, GoObj::R_ADDRCUOFF, Range.End,
+                                    I);
+            }
+            RangeCarrier.Data.resize(RangeCarrier.Data.size() + 2 * PointerSize,
+                                     0);
+          }
+        }
+        std::optional<uint32_t> DwarfRangeSym;
+        if (!RangeCarrier.Data.empty())
+          DwarfRangeSym = addDwarfCarrierSymbol(Symbols, "", GoObj::SDWARFRANGE,
+                                                0, std::move(RangeCarrier));
+
+        GoObjDwarfCarrierData InfoCarrier;
+        appendUvarint(InfoCarrier.Data, 3); // DW_ABRV_FUNCTION.
+        appendCString(InfoCarrier.Data, Symbols[I].Name);
+        if (DwarfVersion == 5) {
+          appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations, 4,
+                                GoObj::R_DWTXTADDR_U4, 0, I);
+          appendUvarint(InfoCarrier.Data, CodeSize);
+        } else {
+          appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations,
+                                PointerSize, GoObj::R_ADDR, 0, I);
+          appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations,
+                                PointerSize, GoObj::R_ADDR, CodeSize, I);
+        }
+        InfoCarrier.Data.push_back(1);
+        InfoCarrier.Data.push_back(dwarf::DW_OP_call_frame_cfa);
+        appendUint32LE(InfoCarrier.Data, LineInfo.Files.front() + 1);
+        appendUvarint(InfoCarrier.Data, LineInfo.StartLine);
+        InfoCarrier.Data.push_back((Symbols[I].Flag & GoObj::SymFlagLocal) ? 0
+                                                                           : 1);
+
+        for (const MCContext::GoObjDebugVariable &Var :
+             FunctionDebugInfo->Variables) {
+          // These are the current Go DW_ABRV_PUTVAR_START+7/+13 forms: a
+          // source identity, type reference, and block1 location.
+          appendUvarint(InfoCarrier.Data, Var.ArgNo != 0 ? 46 : 40);
+          appendCString(InfoCarrier.Data, Var.Name);
+          if (Var.ArgNo != 0)
+            InfoCarrier.Data.push_back(Var.IsReturn ? 1 : 0);
+          appendUvarint(InfoCarrier.Data, Var.DeclLine);
+          AppendDwarfTypeReference(InfoCarrier, Var.TypeName);
+          // LLVM SSA, statepoint relocation, and register allocation can all
+          // move a value after frontend lowering. Until an exact final-machine
+          // expression is proven, encode optimized-out/unavailable, not a
+          // guessed stack or register location.
+          InfoCarrier.Data.push_back(0);
+        }
+
+        std::function<void(int32_t)> EmitInline = [&](int32_t Node) {
+          const auto &Ranges = InlineRanges[Node];
+          if (Ranges.empty())
+            return;
+          bool UseRanges = DwarfVersion == 5 || Ranges.size() > 1;
+          appendUvarint(InfoCarrier.Data, UseRanges ? 9 : 8);
+          appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations, 4,
+                                GoObj::R_DWARFSECREF, 0, AbstractSymbols[Node]);
+          if (UseRanges) {
+            if (!DwarfRangeSym)
+              report_fatal_error("GoObj DWARF inline ranges have no carrier");
+            appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations, 4,
+                                  GoObj::R_DWARFSECREF, RangeOffsets[Node],
+                                  *DwarfRangeSym);
+          } else {
+            appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations,
+                                  PointerSize, GoObj::R_ADDR, Ranges[0].Begin,
+                                  I);
+            appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations,
+                                  PointerSize, GoObj::R_ADDR, Ranges[0].End, I);
+          }
+          appendUint32LE(InfoCarrier.Data, LineInfo.InlineTree[Node].File + 1);
+          if (Asm->getContext().getTargetTriple().isOSDarwin())
+            appendUint32LE(
+                InfoCarrier.Data,
+                static_cast<uint32_t>(LineInfo.InlineTree[Node].Line));
+          else
+            appendUvarint(
+                InfoCarrier.Data,
+                static_cast<uint32_t>(LineInfo.InlineTree[Node].Line));
+          for (uint32_t Child = 0,
+                        End = checkedUint32(LineInfo.InlineTree.size(),
+                                            "GoObj inline tree size");
+               Child != End; ++Child)
+            if (LineInfo.InlineTree[Child].Parent == Node)
+              EmitInline(static_cast<int32_t>(Child));
+          InfoCarrier.Data.push_back(0);
+        };
+        for (uint32_t Node = 0, End = checkedUint32(LineInfo.InlineTree.size(),
+                                                    "GoObj inline tree size");
+             Node != End; ++Node)
+          if (LineInfo.InlineTree[Node].Parent < 0)
+            EmitInline(static_cast<int32_t>(Node));
+        InfoCarrier.Data.push_back(0);
+
+        uint32_t DwarfInfoSym = addDwarfCarrierSymbol(
+            Symbols, "", GoObj::SDWARFFCN, 0, std::move(InfoCarrier));
+        uint32_t DwarfLinesSym = addDwarfCarrierSymbol(
+            Symbols, "", GoObj::SDWARFLINES, 0,
+            makeDwarfLines(LineInfo, CodeSize, PointerSize, I));
+        Symbols[I].Auxiliaries.emplace_back(GoObj::AuxDwarfInfo, DwarfInfoSym);
+        if (DwarfRangeSym)
+          Symbols[I].Auxiliaries.emplace_back(GoObj::AuxDwarfRanges,
+                                              *DwarfRangeSym);
+        Symbols[I].Auxiliaries.emplace_back(GoObj::AuxDwarfLines,
+                                            DwarfLinesSym);
+      }
+
       auto [FuncID, FuncFlag] =
           Asm->getContext()
               .getGoObjFunctionInfo(Symbols[I].Symbol)
@@ -2154,9 +2600,9 @@ uint64_t GoObjObjectWriter::writeObject() {
       if (const auto *Entries = Asm->getContext().getGoObjSymbolStackMapEntries(
               Symbols[I].Symbol)) {
         if (!Entries->empty()) {
-          GoObjStatepointStackMaps Maps = makeStatepointStackMaps(
-              *Asm, Symbols[I], StackSize, ArgSize, PCQuantum, *Entries,
-              PCSPEntries);
+          GoObjStatepointStackMaps Maps =
+              makeStatepointStackMaps(*Asm, Symbols[I], StackSize, ArgSize,
+                                      PCQuantum, *Entries, PCSPEntries);
           for (uint32_t Offset : Maps.IndirectCallOffsets)
             Symbols[I].Relocations.push_back({Offset, 0, GoObj::R_CALLIND, 0,
                                               GoObj::PkgIdxInvalid, 0,
@@ -2527,11 +2973,11 @@ uint64_t GoObjObjectWriter::writeObject() {
           MergedRelocations.back().Section, MergedRelocations.back().Offset);
       std::optional<uint32_t> CurrentSource =
           FindContainingSymbol(Reloc.Section, Reloc.Offset);
-      SameSource = PreviousSource && CurrentSource &&
-                   *PreviousSource == *CurrentSource;
+      SameSource =
+          PreviousSource && CurrentSource && *PreviousSource == *CurrentSource;
     }
-    if (!SameSource || !TargetObjectWriter->mergeRelocations(
-                           MergedRelocations.back(), Reloc))
+    if (!SameSource ||
+        !TargetObjectWriter->mergeRelocations(MergedRelocations.back(), Reloc))
       MergedRelocations.push_back(Reloc);
   }
 
@@ -2590,6 +3036,26 @@ uint64_t GoObjObjectWriter::writeObject() {
     Source.Relocations.push_back(
         {static_cast<uint32_t>(LocalOffset), Reloc.Size, RelocType, Addend,
          TargetSymRef.PkgIdx, TargetSymRef.SymIdx, std::nullopt});
+  }
+
+  // DWARF carriers are synthesized after MC layout, so their type references
+  // have no ordinary MC fixup. Resolve those named symbols through the same
+  // defined/imported/non-package identity machinery as every other GoObj
+  // relocation.
+  for (GoObjSymbol &Source : Symbols) {
+    for (GoObjSymbol::Relocation &Reloc : Source.Relocations) {
+      if (!Reloc.TargetSymbol)
+        continue;
+      if (Reloc.TargetSymbolIndex)
+        report_fatal_error(
+            "GoObj synthetic relocation has two target identities");
+      int64_t Addend = Reloc.Addend;
+      GoObjSymRef Ref = GetTargetSymRef(Reloc.TargetSymbol, Reloc.Type, Addend);
+      Reloc.Addend = Addend;
+      Reloc.PkgIdx = Ref.PkgIdx;
+      Reloc.SymIdx = Ref.SymIdx;
+      Reloc.TargetSymbol = nullptr;
+    }
   }
 
   // R_KEEP has no bytes or MC fixup. It is a Go linker reachability edge
