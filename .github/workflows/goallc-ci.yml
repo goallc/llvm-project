@@ -103,6 +103,7 @@ jobs:
             "$build/test/CodeGen/AArch64/go-stack-byval.ll"
             "$build/test/CodeGen/AArch64/go-statepoint-stack-args.ll"
             "$build/test/CodeGen/AArch64/goobj-ir-config.ll"
+            "$build/test/CodeGen/AArch64/goobj-page-reloc-scheduling.ll"
             "$build/test/CodeGen/AArch64/goobj-register-argument-homes.ll"
             "$build/test/CodeGen/Generic/go-abi0-frame.ll"
             "$build/test/CodeGen/Generic/go-argument-homes.ll"
