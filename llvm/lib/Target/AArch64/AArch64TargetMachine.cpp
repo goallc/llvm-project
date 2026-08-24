@@ -57,6 +57,16 @@
 
 using namespace llvm;
 
+static cl::opt<bool> AArch64GoObjCompositeRelocations(
+    "aarch64-goobj-composite-relocations",
+    cl::desc("Keep AArch64 GoObj page-relative references representable as "
+             "composite relocations"),
+    cl::init(false), cl::Hidden);
+
+bool llvm::useAArch64GoObjCompositeRelocations() {
+  return AArch64GoObjCompositeRelocations;
+}
+
 static cl::opt<bool> EnableCCMP("aarch64-enable-ccmp",
                                 cl::desc("Enable the CCMP formation pass"),
                                 cl::init(true), cl::Hidden);
@@ -526,7 +536,8 @@ ScheduleDAGInstrs *
 AArch64TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
   const AArch64Subtarget &ST = C->MF->getSubtarget<AArch64Subtarget>();
   ScheduleDAGMILive *DAG = createSchedLive(C);
-  if (ST.getTargetTriple().isOSBinFormatGoObj())
+  if (ST.getTargetTriple().isOSBinFormatGoObj() &&
+      useAArch64GoObjCompositeRelocations())
     DAG->addMutation(createAArch64GoObjRelocationDAGMutation());
   DAG->addMutation(createLoadClusterDAGMutation(DAG->TII, DAG->TRI));
   DAG->addMutation(createStoreClusterDAGMutation(DAG->TII, DAG->TRI));
@@ -542,7 +553,8 @@ ScheduleDAGInstrs *
 AArch64TargetMachine::createPostMachineScheduler(MachineSchedContext *C) const {
   const AArch64Subtarget &ST = C->MF->getSubtarget<AArch64Subtarget>();
   ScheduleDAGMI *DAG = createSchedPostRA<AArch64PostRASchedStrategy>(C);
-  if (ST.getTargetTriple().isOSBinFormatGoObj())
+  if (ST.getTargetTriple().isOSBinFormatGoObj() &&
+      useAArch64GoObjCompositeRelocations())
     DAG->addMutation(createAArch64GoObjRelocationDAGMutation());
   if (ST.hasFusion()) {
     // Run the Macro Fusion after RA again since literals are expanded from

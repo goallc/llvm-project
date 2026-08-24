@@ -1,7 +1,8 @@
-; RUN: llc -mtriple=aarch64-unknown-linux-goobj -goobj-package-path=main -O2 < %s | FileCheck %s --check-prefix=ASM
-; RUN: llc -mtriple=aarch64-unknown-linux-goobj -goobj-package-path=main -O2 -mcpu=cortex-a53 < %s | FileCheck %s --check-prefix=ASM
-; RUN: llc -mtriple=aarch64-unknown-linux-goobj -goobj-package-path=main -O2 -misched-fusion=false < %s | FileCheck %s --check-prefix=ASM
-; RUN: llc -mtriple=aarch64-unknown-linux-goobj -goobj-package-path=main -O2 -filetype=obj < %s -o %t.o
+; RUN: llc -mtriple=aarch64-unknown-linux-goobj -goobj-package-path=main -O2 < %s | FileCheck %s --check-prefix=DEFAULT
+; RUN: llc -mtriple=aarch64-unknown-linux-goobj -goobj-package-path=main -O2 -aarch64-goobj-composite-relocations < %s | FileCheck %s --check-prefix=ASM
+; RUN: llc -mtriple=aarch64-unknown-linux-goobj -goobj-package-path=main -O2 -aarch64-goobj-composite-relocations -mcpu=cortex-a53 < %s | FileCheck %s --check-prefix=ASM
+; RUN: llc -mtriple=aarch64-unknown-linux-goobj -goobj-package-path=main -O2 -aarch64-goobj-composite-relocations -misched-fusion=false < %s | FileCheck %s --check-prefix=ASM
+; RUN: llc -mtriple=aarch64-unknown-linux-goobj -goobj-package-path=main -O2 -aarch64-goobj-composite-relocations -filetype=obj < %s -o %t.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | FileCheck %s --check-prefix=OBJ --implicit-check-not=type=36
 
 @first = global i64 0, align 8
@@ -56,6 +57,11 @@ exit:
 ; ASM:      adrp [[LOOP_ADDR:x[0-9]+]], first
 ; ASM-NEXT: add [[LOOP_ADDR]], [[LOOP_ADDR]], :lo12:first
 ; ASM:      str {{x[0-9]+}}, {{\[}}[[LOOP_ADDR]]{{\]}}
+
+; DEFAULT-LABEL: store_globals:
+; DEFAULT:      adrp [[DEFAULT_FIRST:x[0-9]+]], first
+; DEFAULT-NOT:  add [[DEFAULT_FIRST]], [[DEFAULT_FIRST]], :lo12:first
+; DEFAULT:      str {{x[0-9]+}}, {{\[}}[[DEFAULT_FIRST]], :lo12:first{{\]}}
 
 ; OBJ: reloc 0.0: off=0 size=8 type=3 add=0 target=first
 ; OBJ: reloc 0.1: off=12 size=8 type=3 add=0 target=second
