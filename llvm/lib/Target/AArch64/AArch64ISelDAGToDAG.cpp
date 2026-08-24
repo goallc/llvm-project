@@ -1286,7 +1286,13 @@ bool AArch64DAGToDAGISel::SelectAddrModeIndexed(SDValue N, unsigned Size,
     return true;
   }
 
-  if (N.getOpcode() == AArch64ISD::ADDlow && isWorthFoldingADDlow(N)) {
+  // GoObj can only preserve a page-relative symbol reference for external
+  // linking when the ADRP and low-12 instruction form one composite
+  // relocation. Keep the ADDlow as a MOVaddr pseudo until late expansion so
+  // CFG and machine optimizations move the complete address materialization
+  // instead of separating an ADRP from a folded load or store.
+  if (!Subtarget->getTargetTriple().isOSBinFormatGoObj() &&
+      N.getOpcode() == AArch64ISD::ADDlow && isWorthFoldingADDlow(N)) {
     GlobalAddressSDNode *GAN =
         dyn_cast<GlobalAddressSDNode>(N.getOperand(1).getNode());
     Base = N.getOperand(0);
