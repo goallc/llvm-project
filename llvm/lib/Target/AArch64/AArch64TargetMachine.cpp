@@ -57,16 +57,6 @@
 
 using namespace llvm;
 
-static cl::opt<bool> AArch64GoObjCompositeRelocations(
-    "aarch64-goobj-composite-relocations",
-    cl::desc("Keep AArch64 GoObj page-relative references representable as "
-             "composite relocations"),
-    cl::init(false), cl::Hidden);
-
-bool llvm::useAArch64GoObjCompositeRelocations() {
-  return AArch64GoObjCompositeRelocations;
-}
-
 static cl::opt<bool> EnableCCMP("aarch64-enable-ccmp",
                                 cl::desc("Enable the CCMP formation pass"),
                                 cl::init(true), cl::Hidden);

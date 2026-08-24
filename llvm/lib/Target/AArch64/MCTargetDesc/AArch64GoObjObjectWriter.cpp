@@ -113,6 +113,9 @@ unsigned AArch64GoObjObjectWriter::getRelocType(const MCValue &Target,
 bool AArch64GoObjObjectWriter::mergeRelocations(
     GoObjRelocationEntry &Previous,
     const GoObjRelocationEntry &Current) const {
+  if (!useAArch64GoObjCompositeRelocations())
+    return false;
+
   // getRelocAddend subtracts one instruction from the PC-relative ADRP,
   // while the low-12 fixup is not itself PC-relative. Thus matching source
   // expressions differ internally by the original four-byte relocation size.

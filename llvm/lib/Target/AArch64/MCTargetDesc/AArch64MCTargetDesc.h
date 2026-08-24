@@ -35,6 +35,11 @@ class MCTargetStreamer;
 class Target;
 class Triple;
 
+/// Whether GoObj code generation must keep AArch64 page-relative references
+/// representable as composite relocations for linkers that cannot preserve
+/// split page and low-12 relocations.
+bool useAArch64GoObjCompositeRelocations();
+
 MCCodeEmitter *createAArch64MCCodeEmitter(const MCInstrInfo &MCII,
                                           MCContext &Ctx);
 MCAsmBackend *createAArch64leAsmBackend(const Target &T,

@@ -21,11 +21,6 @@
 
 namespace llvm {
 
-/// Whether GoObj code generation must keep AArch64 page-relative references
-/// representable as composite relocations for linkers that cannot preserve
-/// split page and low-12 relocations.
-bool useAArch64GoObjCompositeRelocations();
-
 class AArch64TargetMachine : public CodeGenTargetMachineImpl {
 protected:
   std::unique_ptr<TargetLoweringObjectFile> TLOF;

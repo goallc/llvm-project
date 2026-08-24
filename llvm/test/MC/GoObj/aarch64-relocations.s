@@ -1,6 +1,8 @@
 # REQUIRES: aarch64-registered-target
-# RUN: llvm-mc -triple=aarch64-apple-darwin-goobj -filetype=obj %s -o %t
+# RUN: llvm-mc -triple=aarch64-apple-darwin-goobj -aarch64-goobj-composite-relocations -filetype=obj %s -o %t
 # RUN: %python %S/Inputs/dump-goobj.py %t | FileCheck %s
+# RUN: llvm-mc -triple=aarch64-apple-darwin-goobj -filetype=obj %s -o %t.split
+# RUN: %python %S/Inputs/dump-goobj.py %t.split | FileCheck %s --check-prefix=SPLIT
 
 # CHECK: header: go object darwin arm64
 # CHECK: nonpkgdef 0: caller abi=0 type=1 size=80
@@ -28,6 +30,9 @@
 # CHECK: reloc 3.14: off=0 size=4 type=36 add=0 target=data
 # CHECK: reloc 4.15: off=0 size=8 type=1 add=0 target=callee
 # CHECK: reloc 4.16: off=8 size=8 type=1 add=8 target=external.data
+
+# SPLIT: reloc 0.2: off=8 size=4 type=36 add=0 target=data
+# SPLIT-NEXT: reloc 0.3: off=12 size=4 type=36 add=0 target=data
 
 .text
 .globl caller
