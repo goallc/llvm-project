@@ -247,6 +247,9 @@ private:
   /// Package-local indices assigned to Go object definitions by the frontend.
   DenseMap<const MCSymbol *, uint32_t> GoObjPackageSymbolIndexes;
 
+  /// Semantic type for static read-only symbols synthesized after IR lowering.
+  std::optional<uint8_t> GoObjStaticRODataType;
+
   /// Compiler-validated cgo directives serialized in the Go object header.
   std::string GoObjCgoPragmas;
 
@@ -710,6 +713,12 @@ public:
     if (It == GoObjPackageSymbolIndexes.end())
       return std::nullopt;
     return It->second;
+  }
+
+  void setGoObjStaticRODataType(uint8_t Type) { GoObjStaticRODataType = Type; }
+
+  std::optional<uint8_t> getGoObjStaticRODataType() const {
+    return GoObjStaticRODataType;
   }
 
   void setGoObjCgoPragmas(StringRef Pragmas) {

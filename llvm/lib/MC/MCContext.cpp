@@ -168,6 +168,7 @@ void MCContext::reset() {
   InlineAsmUsedLabelNames.clear();
   GoObjFunctionSymbols.clear();
   GoObjPackageSymbolIndexes.clear();
+  GoObjStaticRODataType.reset();
   GoObjCgoPragmas.clear();
   GoObjNonPackageSymbols.clear();
   GoObjSymbolStackSizes.clear();
