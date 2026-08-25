@@ -351,15 +351,18 @@ ImplicitNullChecks::areMemoryOpsAliased(const MachineInstr &MI,
     return PrevMI->mayStore() ? AR_WillAliasEverything : AR_MayAlias;
 
   for (MachineMemOperand *MMO1 : MI.memoperands()) {
-    // MMO1 should have a value due it comes from operation we'd like to use
-    // as implicit null check.
-    assert(MMO1->getValue() && "MMO1 should have a Value!");
+    // Some target memory operations do not retain an IR value. Without one,
+    // alias analysis cannot prove that moving this access is safe.
+    if (!MMO1->getValue())
+      return AR_MayAlias;
     for (MachineMemOperand *MMO2 : PrevMI->memoperands()) {
       if (const PseudoSourceValue *PSV = MMO2->getPseudoValue()) {
         if (PSV->mayAlias(MFI))
           return AR_MayAlias;
         continue;
       }
+      if (!MMO2->getValue())
+        return AR_MayAlias;
       if (!AA->isNoAlias(
               MemoryLocation::getAfter(MMO1->getValue(), MMO1->getAAInfo()),
               MemoryLocation::getAfter(MMO2->getValue(), MMO2->getAAInfo())))
