@@ -1201,7 +1201,9 @@ void TargetPassConfig::addMachinePasses() {
   // Run pre-sched2 passes.
   addPreSched2();
 
-  if (EnableImplicitNullChecks)
+  // GoObj uses the producer-owned !make.implicit marker to opt individual
+  // branches into Go's signal-based nil-check lowering.
+  if (EnableImplicitNullChecks || TM->getTargetTriple().isOSBinFormatGoObj())
     addPass(&ImplicitNullChecksID);
 
   // Second pass scheduler.

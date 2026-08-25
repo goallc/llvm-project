@@ -1017,7 +1017,9 @@ Error CodeGenPassBuilder<Derived, TargetMachineT>::addMachinePasses(
   // Run pre-sched2 passes.
   derived().addPreSched2(PMW);
 
-  if (Opt.EnableImplicitNullChecks)
+  // GoObj uses the producer-owned !make.implicit marker to opt individual
+  // branches into Go's signal-based nil-check lowering.
+  if (Opt.EnableImplicitNullChecks || TM.getTargetTriple().isOSBinFormatGoObj())
     addMachineFunctionPass(ImplicitNullChecksPass(), PMW);
 
   // Second pass scheduler.

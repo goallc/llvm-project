@@ -1888,7 +1888,12 @@ void AArch64AsmPrinter::LowerFAULTING_OP(const MachineInstr &FaultingMI) {
   OutStreamer->emitLabel(FaultingLabel);
 
   assert(FK < FaultMaps::FaultKindMax && "Invalid Faulting Kind!");
-  FM.recordFaultingOp(FK, FaultingLabel, HandlerLabel);
+  // GoObj relies on Go's synchronous signal path and has no LLVM fault-map
+  // section. Keep the handler Machine CFG edge for liveness and stack-map
+  // construction, but do not serialize an unsupported runtime contract.
+  bool IsGoObj = Ctx.isGoObj();
+  if (!IsGoObj)
+    FM.recordFaultingOp(FK, FaultingLabel, HandlerLabel);
 
   MCInst MI;
   MI.setOpcode(Opcode);
@@ -1903,7 +1908,10 @@ void AArch64AsmPrinter::LowerFAULTING_OP(const MachineInstr &FaultingMI) {
     MI.addOperand(Dest);
   }
 
-  OutStreamer->AddComment("on-fault: " + HandlerLabel->getName());
+  if (IsGoObj)
+    OutStreamer->AddComment("Go implicit nil check");
+  else
+    OutStreamer->AddComment("on-fault: " + HandlerLabel->getName());
   EmitToStreamer(MI);
 }
 

@@ -48,11 +48,13 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/MC/MCInstrDesc.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Target/TargetMachine.h"
 #include <cassert>
 #include <cstdint>
 #include <iterator>
@@ -68,6 +70,8 @@ static cl::opt<unsigned> MaxInstsToConsider(
     cl::desc("The max number of instructions to consider hoisting loads over "
              "(the algorithm is quadratic over this number)"),
     cl::Hidden, cl::init(8));
+
+static constexpr int64_t GoMinLegalPointer = 4096;
 
 #define DEBUG_TYPE "implicit-null-checks"
 
@@ -136,15 +140,19 @@ class ImplicitNullChecks : public MachineFunctionPass {
     // instruction; and it needs to be hoisted to execute before MemOperation.
     MachineInstr *OnlyDependency;
 
+    // Source location of the explicit check. Go attributes the synchronous
+    // fault to this location rather than to the folded memory operation.
+    DebugLoc CheckDebugLoc;
+
   public:
     explicit NullCheck(MachineInstr *memOperation, MachineInstr *checkOperation,
                        MachineBasicBlock *checkBlock,
                        MachineBasicBlock *notNullSucc,
                        MachineBasicBlock *nullSucc,
-                       MachineInstr *onlyDependency)
+                       MachineInstr *onlyDependency, DebugLoc checkDebugLoc)
         : MemOperation(memOperation), CheckOperation(checkOperation),
           CheckBlock(checkBlock), NotNullSucc(notNullSucc), NullSucc(nullSucc),
-          OnlyDependency(onlyDependency) {}
+          OnlyDependency(onlyDependency), CheckDebugLoc(checkDebugLoc) {}
 
     MachineInstr *getMemOperation() const { return MemOperation; }
 
@@ -157,17 +165,20 @@ class ImplicitNullChecks : public MachineFunctionPass {
     MachineBasicBlock *getNullSucc() const { return NullSucc; }
 
     MachineInstr *getOnlyDependency() const { return OnlyDependency; }
+
+    DebugLoc getCheckDebugLoc() const { return CheckDebugLoc; }
   };
 
   const TargetInstrInfo *TII = nullptr;
   const TargetRegisterInfo *TRI = nullptr;
   AliasAnalysis *AA = nullptr;
   MachineFrameInfo *MFI = nullptr;
+  bool IsGoObj = false;
 
   bool analyzeBlockForNullChecks(MachineBasicBlock &MBB,
                                  SmallVectorImpl<NullCheck> &NullCheckList);
   MachineInstr *insertFaultingInstr(MachineInstr *MI, MachineBasicBlock *MBB,
-                                    MachineBasicBlock *HandlerMBB);
+                                    MachineBasicBlock *HandlerMBB, DebugLoc DL);
   void rewriteNullChecks(ArrayRef<NullCheck> NullCheckList);
 
   enum AliasResult {
@@ -300,6 +311,7 @@ bool ImplicitNullChecks::runOnMachineFunction(MachineFunction &MF) {
   TRI = MF.getRegInfo().getTargetRegisterInfo();
   MFI = &MF.getFrameInfo();
   AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
+  IsGoObj = MF.getTarget().getTargetTriple().isOSBinFormatGoObj();
 
   SmallVector<NullCheck, 16> NullCheckList;
 
@@ -459,7 +471,11 @@ ImplicitNullChecks::isSuitableMemoryOp(const MachineInstr &MI,
 
   // We want the mem access to be issued at a sane offset from PointerReg,
   // so that if PointerReg is null then the access reliably page faults.
-  if (!(-PageSize < Displacement && Displacement < PageSize))
+  // Go's synchronous signal path only classifies addresses below
+  // minLegalPointer as nil faults. A negative displacement from null wraps to
+  // a high address and would therefore become a fatal signal, not panicmem.
+  if (IsGoObj ? !(0 <= Displacement && Displacement < GoMinLegalPointer)
+              : !(-PageSize < Displacement && Displacement < PageSize))
     return SR_Unsuitable;
 
   // Finally, check whether the current memory access aliases with previous one.
@@ -556,6 +572,17 @@ bool ImplicitNullChecks::analyzeBlockForNullChecks(
 
   if (!BranchMD)
     return false;
+
+  // GoObj has no LLVM fault-map runtime. Only consume the producer-owned
+  // marker emitted by GoALLC; an ordinary empty !make.implicit node retains
+  // its generic LLVM meaning on targets that support fault maps.
+  if (IsGoObj) {
+    if (BranchMD->getNumOperands() != 1)
+      return false;
+    const auto *Tag = dyn_cast<MDString>(BranchMD->getOperand(0));
+    if (!Tag || Tag->getString() != "goallc")
+      return false;
+  }
 
   MachineBranchPredicate MBP;
 
@@ -682,8 +709,14 @@ bool ImplicitNullChecks::analyzeBlockForNullChecks(
       return false;
     if (SR == SR_Suitable &&
         canHoistInst(&MI, InstsSeenSoFar, NullSucc, Dependence)) {
+      DebugLoc CheckDebugLoc;
+      if (IsGoObj) {
+        auto Terminator = MBB.getFirstTerminator();
+        if (Terminator != MBB.end())
+          CheckDebugLoc = Terminator->getDebugLoc();
+      }
       NullCheckList.emplace_back(&MI, MBP.ConditionDef, &MBB, NotNullSucc,
-                                 NullSucc, Dependence);
+                                 NullSucc, Dependence, CheckDebugLoc);
       return true;
     }
 
@@ -702,7 +735,8 @@ bool ImplicitNullChecks::analyzeBlockForNullChecks(
 /// (defining the same register), and branches to HandlerMBB if the mem access
 /// faults.  The FAULTING instruction is inserted at the end of MBB.
 MachineInstr *ImplicitNullChecks::insertFaultingInstr(
-    MachineInstr *MI, MachineBasicBlock *MBB, MachineBasicBlock *HandlerMBB) {
+    MachineInstr *MI, MachineBasicBlock *MBB, MachineBasicBlock *HandlerMBB,
+    DebugLoc DL) {
   unsigned NumDefs = MI->getDesc().getNumDefs();
   assert(NumDefs <= 1 && "other cases unhandled!");
 
@@ -719,8 +753,7 @@ MachineInstr *ImplicitNullChecks::insertFaultingInstr(
   else
     FK = FaultMaps::FaultingStore;
 
-  auto MIB = BuildMI(MBB, MI->getDebugLoc(),
-                     TII->get(TargetOpcode::FAULTING_OP), DefReg)
+  auto MIB = BuildMI(MBB, DL, TII->get(TargetOpcode::FAULTING_OP), DefReg)
                  .addImm(FK)
                  .addMBB(HandlerMBB)
                  .addImm(MI->getOpcode());
@@ -765,8 +798,11 @@ void ImplicitNullChecks::rewriteNullChecks(
     // originally. We check earlier ensures that this bit of code motion
     // is legal.  We do not touch the successors list for any basic block
     // since we haven't changed control flow, we've just made it implicit.
+    DebugLoc FaultingDL = NC.getMemOperation()->getDebugLoc();
+    if (IsGoObj && NC.getCheckDebugLoc())
+      FaultingDL = NC.getCheckDebugLoc();
     MachineInstr *FaultingInstr = insertFaultingInstr(
-        NC.getMemOperation(), NC.getCheckBlock(), NC.getNullSucc());
+        NC.getMemOperation(), NC.getCheckBlock(), NC.getNullSucc(), FaultingDL);
     // Now the values defined by MemOperation, if any, are live-in of
     // the block of MemOperation.
     // The original operation may define implicit-defs alongside
