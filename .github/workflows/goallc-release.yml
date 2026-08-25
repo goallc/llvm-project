@@ -99,8 +99,14 @@ jobs:
           mv "$RUNNER_TEMP/$asset_base" "$RUNNER_TEMP/relocated/$asset_base"
           payload="$RUNNER_TEMP/relocated/$asset_base"
 
+          cmake_version_component() {
+            sed -n "s/^[[:space:]]*set(LLVM_VERSION_$1 \\([^)]*\\)).*/\\1/p" \
+              cmake/Modules/LLVMVersion.cmake | tail -n 1
+          }
+          expected_llvm_version="$(cmake_version_component MAJOR).$(cmake_version_component MINOR).$(cmake_version_component PATCH)$(cmake_version_component SUFFIX)"
+
           test "$("$payload/bin/llvm-config" --prefix)" = "$payload"
-          test "$("$payload/bin/llvm-config" --version)" = 23.1.0git
+          test "$("$payload/bin/llvm-config" --version)" = "$expected_llvm_version"
           test "$("$payload/bin/llvm-config" --build-mode)" = Release
           for target in X86 AArch64; do
             "${payload}/bin/llvm-config" --targets-built | tr ' ' '\n' | grep -Fx "$target"
