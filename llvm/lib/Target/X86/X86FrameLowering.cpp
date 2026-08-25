@@ -1804,7 +1804,8 @@ bool X86FrameLowering::has128ByteRedZone(const MachineFunction &MF) const {
          "MF used frame lowering for wrong subtarget");
   const Function &Fn = MF.getFunction();
   const bool IsWin64CC = STI.isCallingConvWin64(Fn.getCallingConv());
-  return Is64Bit && !IsWin64CC && !Fn.hasFnAttribute(Attribute::NoRedZone);
+  return Is64Bit && !IsWin64CC && !isGoObjGoFunction(MF) &&
+         !Fn.hasFnAttribute(Attribute::NoRedZone);
 }
 
 /// Return true if we need to use the restricted Windows x64 prologue and
@@ -1991,8 +1992,12 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF,
   DebugLoc DL;
   Register ArgBaseReg;
 
-  if (isGoObjGoFunction(MF) && MF.getFrameInfo().hasVarSizedObjects())
-    report_fatal_error("GoObj stack growth does not support dynamic allocas");
+  if (isGoObjGoFunction(MF)) {
+    if (MFI.hasVarSizedObjects())
+      report_fatal_error("GoObj stack growth does not support dynamic allocas");
+    StackSize = alignTo(StackSize, SlotSize);
+    MFI.setStackSize(StackSize);
+  }
   emitGoEntryArgsStackMap(MF, MBB);
   emitGoStackCheck(MF, MBB);
 
