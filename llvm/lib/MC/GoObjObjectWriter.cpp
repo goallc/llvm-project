@@ -181,6 +181,22 @@ uint8_t getGoObjSymbolType(const MCSection *Section) {
   return GoObj::SDATA;
 }
 
+std::optional<uint8_t>
+getGoObjExplicitSectionSymbolType(const MCSection *Section) {
+  if (!Section)
+    return std::nullopt;
+  StringRef Name = Section->getName();
+  if (Name == ".text.fips" || Name.starts_with(".text.fips."))
+    return GoObj::STEXTFIPS;
+  if (Name == ".rodata.fips" || Name.starts_with(".rodata.fips."))
+    return GoObj::SRODATAFIPS;
+  if (Name == ".noptrdata.fips" || Name.starts_with(".noptrdata.fips."))
+    return GoObj::SNOPTRDATAFIPS;
+  if (Name == ".data.fips" || Name.starts_with(".data.fips."))
+    return GoObj::SDATAFIPS;
+  return std::nullopt;
+}
+
 void appendSectionContents(SmallVectorImpl<char> &Contents,
                            const MCAssembler &Asm, const MCSection &Section) {
   raw_svector_ostream ContentsOS(Contents);
@@ -2193,6 +2209,22 @@ uint64_t GoObjObjectWriter::writeObject() {
         Symbols[I].Auxiliaries.push_back({GoObj::AuxPcinline, PcinlineSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, UnsafePointSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, StackMapIndexSym});
+    }
+  }
+
+  // Preserve physical kinds while building function metadata, then apply the
+  // semantic kinds carried by explicit frontend sections. Read-only static
+  // symbols synthesized after IR lowering use the module-level fallback.
+  if (Config.SourceKind == GoObj::SourceKind::Compiler) {
+    for (GoObjSymbol &Symbol : Symbols) {
+      std::optional<uint8_t> ExplicitType;
+      ExplicitType = getGoObjExplicitSectionSymbolType(Symbol.Section);
+      if (!ExplicitType && Symbol.ABI == GoObj::SymABIstatic &&
+          Symbol.Type == GoObj::SRODATA)
+        ExplicitType = Asm->getContext().getGoObjStaticRODataType();
+      if (!ExplicitType)
+        continue;
+      Symbol.Type = *ExplicitType;
     }
   }
 

@@ -1019,6 +1019,24 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
     AP.OutContext.setGoObjImports(std::move(ParsedImports));
   }
 
+  if (const NamedMDNode *StaticRODataType =
+          M.getNamedMetadata("goobj.static_rodata_type")) {
+    const MDNode *Entry = StaticRODataType->getNumOperands() == 1
+                              ? StaticRODataType->getOperand(0)
+                              : nullptr;
+    const auto *Type =
+        Entry && Entry->getNumOperands() == 1
+            ? mdconst::dyn_extract<ConstantInt>(Entry->getOperand(0))
+            : nullptr;
+    if (!Type || !Type->getType()->isIntegerTy(8))
+      report_fatal_error("invalid !goobj.static_rodata_type metadata");
+    uint8_t Value = static_cast<uint8_t>(Type->getZExtValue());
+    if (Value != GoObj::SRODATA && Value != GoObj::SRODATAFIPS)
+      report_fatal_error(
+          "!goobj.static_rodata_type is not a read-only data kind");
+    AP.OutContext.setGoObjStaticRODataType(Value);
+  }
+
   // The LLVM symbol name is the sole carrier of ABI0 object identity. Keep the
   // calling convention as an independent lowering contract and reject stale
   // metadata or mismatched names instead of trying to repair either one.
