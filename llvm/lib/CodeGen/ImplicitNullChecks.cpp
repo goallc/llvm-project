@@ -26,6 +26,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
@@ -33,6 +34,7 @@
 #include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/CodeGen/FaultMaps.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstr.h"
@@ -177,6 +179,8 @@ class ImplicitNullChecks : public MachineFunctionPass {
 
   bool analyzeBlockForNullChecks(MachineBasicBlock &MBB,
                                  SmallVectorImpl<NullCheck> &NullCheckList);
+  MachineInstr *insertGoObjFaultingInstr(MachineInstr *MI,
+                                         MachineBasicBlock *MBB, DebugLoc DL);
   MachineInstr *insertFaultingInstr(MachineInstr *MI, MachineBasicBlock *MBB,
                                     MachineBasicBlock *HandlerMBB, DebugLoc DL);
   void rewriteNullChecks(ArrayRef<NullCheck> NullCheckList);
@@ -320,6 +324,23 @@ bool ImplicitNullChecks::runOnMachineFunction(MachineFunction &MF) {
 
   if (!NullCheckList.empty())
     rewriteNullChecks(NullCheckList);
+
+  if (IsGoObj && !NullCheckList.empty()) {
+    // ISel derives this bit from the original CFG. Keep it in sync after
+    // dropping null edges so frame lowering does not account for calls that
+    // are no longer reachable.
+    bool HasCalls = false;
+    for (MachineBasicBlock *MBB : depth_first(&MF)) {
+      if (llvm::any_of(*MBB, [](const MachineInstr &MI) {
+            return (MI.isCall() && !MI.isReturn()) ||
+                   MI.isStackAligningInlineAsm();
+          })) {
+        HasCalls = true;
+        break;
+      }
+    }
+    MFI->setHasCalls(HasCalls);
+  }
 
   return !NullCheckList.empty();
 }
@@ -733,6 +754,30 @@ bool ImplicitNullChecks::analyzeBlockForNullChecks(
   return false;
 }
 
+/// Insert the proven faulting memory operation at the explicit check site for
+/// GoObj. Go's synchronous signal path injects runtime.sigpanic directly; it
+/// does not branch to the explicit panic block and has no LLVM fault map.
+MachineInstr *ImplicitNullChecks::insertGoObjFaultingInstr(
+    MachineInstr *MI, MachineBasicBlock *MBB, DebugLoc DL) {
+  MachineFunction &MF = *MBB->getParent();
+  MachineInstr *FaultingMI = MF.CloneMachineInstr(MI);
+  FaultingMI->setDebugLoc(DL);
+
+  // Hoisting changes physical-register liveness. Match FAULTING_OP lowering by
+  // dropping stale kill/dead flags from the cloned instruction.
+  for (MachineOperand &MO : FaultingMI->operands()) {
+    if (!MO.isReg())
+      continue;
+    if (MO.isUse())
+      MO.setIsKill(false);
+    if (MO.isDef())
+      MO.setIsDead(false);
+  }
+
+  MBB->insert(MBB->end(), FaultingMI);
+  return FaultingMI;
+}
+
 /// Wrap a machine instruction, MI, into a FAULTING machine instruction.
 /// The FAULTING instruction does the same load/store as MI
 /// (defining the same register), and branches to HandlerMBB if the mem access
@@ -798,14 +843,24 @@ void ImplicitNullChecks::rewriteNullChecks(
     }
 
     // Insert a faulting instruction where the conditional branch was
-    // originally. We check earlier ensures that this bit of code motion
-    // is legal.  We do not touch the successors list for any basic block
-    // since we haven't changed control flow, we've just made it implicit.
+    // originally. The earlier checks ensure that this bit of code motion is
+    // legal. Generic FAULTING_OP retains its handler successor for the LLVM
+    // fault-map runtime. GoObj instead relies on runtime.sigpanic, so its
+    // explicit null successor is physically unreachable after the fold.
     DebugLoc FaultingDL = NC.getMemOperation()->getDebugLoc();
     if (IsGoObj && NC.getCheckDebugLoc())
       FaultingDL = NC.getCheckDebugLoc();
-    MachineInstr *FaultingInstr = insertFaultingInstr(
-        NC.getMemOperation(), NC.getCheckBlock(), NC.getNullSucc(), FaultingDL);
+    MachineInstr *FaultingInstr;
+    if (IsGoObj) {
+      FaultingInstr = insertGoObjFaultingInstr(NC.getMemOperation(),
+                                               NC.getCheckBlock(), FaultingDL);
+      NC.getCheckBlock()->removeSuccessor(NC.getNullSucc(),
+                                          /*NormalizeSuccProbs=*/true);
+    } else {
+      FaultingInstr =
+          insertFaultingInstr(NC.getMemOperation(), NC.getCheckBlock(),
+                              NC.getNullSucc(), FaultingDL);
+    }
     // Now the values defined by MemOperation, if any, are live-in of
     // the block of MemOperation.
     // The original operation may define implicit-defs alongside

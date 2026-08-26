@@ -1178,6 +1178,14 @@ void TargetPassConfig::addMachinePasses() {
 
   addPass(&RemoveRedundantDebugValuesID);
 
+  // GoObj removes the explicit null edge after a marked nil check folds.
+  // Do that before shrink wrapping and frame lowering so the standard frame
+  // machinery only accounts for blocks that can still be emitted.
+  if (TM->getTargetTriple().isOSBinFormatGoObj()) {
+    addPass(&ImplicitNullChecksID);
+    addPass(&UnreachableMachineBlockElimID);
+  }
+
   addPass(&FixupStatepointCallerSavedID);
 
   // Insert prolog/epilog code.  Eliminate abstract frame index references...
@@ -1201,9 +1209,7 @@ void TargetPassConfig::addMachinePasses() {
   // Run pre-sched2 passes.
   addPreSched2();
 
-  // GoObj uses the producer-owned !make.implicit marker to opt individual
-  // branches into Go's signal-based nil-check lowering.
-  if (EnableImplicitNullChecks || TM->getTargetTriple().isOSBinFormatGoObj())
+  if (EnableImplicitNullChecks && !TM->getTargetTriple().isOSBinFormatGoObj())
     addPass(&ImplicitNullChecksID);
 
   // Second pass scheduler.
