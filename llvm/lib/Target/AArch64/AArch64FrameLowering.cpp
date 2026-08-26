@@ -1398,8 +1398,13 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
   // smaller than StackSmall is effectively NOSPLIT.  The entry argument map
   // is still emitted independently, but there is no need for a morestack
   // edge because the function cannot exhaust the nosplit stack allowance.
-  if (!MFI.hasCalls() && StackSize < GoStackSmall)
+  if (!MFI.hasCalls() && StackSize < GoStackSmall) {
+    // Native arm64 leaves a zero-frame leaf as AttrLeaf only. Nonzero small
+    // frames additionally become implicit NOSPLIT functions.
+    if (StackSize != 0)
+      MFI.setGoObjNoSplit();
     return;
+  }
 
   const DebugLoc DL;
   const AArch64InstrInfo &TII =

@@ -734,6 +734,7 @@ struct MachineFrameInfo {
   unsigned MaxCallFrameSize = ~0u; ///< ~0u means: not computed yet.
   uint64_t GoABIStackArgsSize = ~UINT64_C(0);
   uint64_t GoABIArgSize = ~UINT64_C(0);
+  bool GoObjNoSplit = false;
   unsigned CVBytesOfCalleeSavedRegisters = 0;
   bool HasOpaqueSPAdjustment = false;
   bool HasVAStart = false;
@@ -759,6 +760,7 @@ struct MachineFrameInfo {
            MaxCallFrameSize == Other.MaxCallFrameSize &&
            GoABIStackArgsSize == Other.GoABIStackArgsSize &&
            GoABIArgSize == Other.GoABIArgSize &&
+           GoObjNoSplit == Other.GoObjNoSplit &&
            CVBytesOfCalleeSavedRegisters ==
                Other.CVBytesOfCalleeSavedRegisters &&
            HasOpaqueSPAdjustment == Other.HasOpaqueSPAdjustment &&
@@ -792,6 +794,7 @@ template <> struct MappingTraits<MachineFrameInfo> {
     YamlIO.mapOptional("goABIStackArgsSize", MFI.GoABIStackArgsSize,
                        ~UINT64_C(0));
     YamlIO.mapOptional("goABIArgSize", MFI.GoABIArgSize, ~UINT64_C(0));
+    YamlIO.mapOptional("goObjNoSplit", MFI.GoObjNoSplit, false);
     YamlIO.mapOptional("cvBytesOfCalleeSavedRegisters",
                        MFI.CVBytesOfCalleeSavedRegisters, 0U);
     YamlIO.mapOptional("hasOpaqueSPAdjustment", MFI.HasOpaqueSPAdjustment,

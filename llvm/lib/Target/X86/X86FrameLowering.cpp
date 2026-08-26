@@ -262,12 +262,32 @@ static StringRef getGoDirectCalleeName(const MachineInstr &MI,
   return {};
 }
 
-static bool isGoLeafLikeRuntimeCall(const MachineInstr &MI,
+static bool hasGoObjBuiltinStorageName(StringRef StorageName,
+                                       StringRef LogicalName) {
+  if (StorageName == LogicalName)
+    return true;
+  if (!StorageName.consume_front(LogicalName) ||
+      !StorageName.consume_front(GoObj::BuiltinSymbolSuffixPrefix) ||
+      !StorageName.consume_back(">") || StorageName.empty())
+    return false;
+  uint32_t Index;
+  return !StorageName.getAsInteger(10, Index);
+}
+
+static bool isGoLeafLikeRuntimeCall(const MachineFunction &MF,
+                                    const MachineInstr &MI,
                                     const X86InstrInfo &TII) {
   StringRef Name = getGoDirectCalleeName(MI, TII);
-  return Name == "runtime.panicdivide" || Name == "runtime.panicwrap" ||
-         Name == "runtime.panicshift" || Name == "runtime.panicBounds" ||
-         Name == "runtime.panicExtend";
+  for (StringRef LogicalName : {"runtime.panicdivide", "runtime.panicwrap",
+                                "runtime.panicshift"}) {
+    if (!hasGoObjBuiltinStorageName(Name, LogicalName))
+      continue;
+    return Name == goabi::getGoObjBuiltinCalleeName(
+                       MF, LogicalName, CallingConv::GoABIInternal);
+  }
+  // panicBounds and panicExtend are assembler helpers rather than entries in
+  // Go's builtin symbol table, so they retain their logical linker names.
+  return Name == "runtime.panicBounds" || Name == "runtime.panicExtend";
 }
 
 static bool isGoSmallLeafLikeFunction(const MachineFunction &MF,
@@ -283,7 +303,7 @@ static bool isGoSmallLeafLikeFunction(const MachineFunction &MF,
       // machine call and must not turn every Go function into a non-leaf.
       if (MI.getOpcode() == TargetOpcode::STACKMAP)
         continue;
-      if (!isGoLeafLikeRuntimeCall(MI, TII))
+      if (!isGoLeafLikeRuntimeCall(MF, MI, TII))
         return false;
       HasLeafLikeCall = true;
     }
@@ -374,8 +394,10 @@ static void emitGoStackCheck(MachineFunction &MF,
   // zero-argument panic helpers as leaf-like when their CALL return PC still
   // fits in StackSmall. Keep entry argument-map emission independent from this
   // decision.
-  if (isGoSmallLeafLikeFunction(MF, TII, StackSize))
+  if (isGoSmallLeafLikeFunction(MF, TII, StackSize)) {
+    MFI.setGoObjNoSplit();
     return;
+  }
   const DebugLoc DL;
   const X86MachineFunctionInfo *X86FI = MF.getInfo<X86MachineFunctionInfo>();
   ArrayRef<X86MachineFunctionInfo::GoArgHome> Homes = X86FI->getGoArgHomes();

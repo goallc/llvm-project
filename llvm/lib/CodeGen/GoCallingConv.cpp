@@ -37,7 +37,8 @@ bool isSupportedMustTailCall(const Function &Caller, const CallBase &CB) {
          CB.getFunctionType()->getReturnType()->isVoidTy();
 }
 
-std::string getGoObjBuiltinCalleeName(MachineFunction &MF, StringRef SymbolName,
+std::string getGoObjBuiltinCalleeName(const MachineFunction &MF,
+                                      StringRef SymbolName,
                                       CallingConv::ID CC) {
   if (SymbolName.empty() ||
       (CC != CallingConv::GoABIInternal && CC != CallingConv::GoABI0))

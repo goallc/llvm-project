@@ -378,6 +378,7 @@ static void convertMFI(ModuleSlotTracker &MST, yaml::MachineFrameInfo &YamlMFI,
     YamlMFI.GoABIStackArgsSize = MFI.getGoABIStackArgsSize();
     YamlMFI.GoABIArgSize = MFI.getGoABIArgSize();
   }
+  YamlMFI.GoObjNoSplit = MFI.isGoObjNoSplit();
   YamlMFI.CVBytesOfCalleeSavedRegisters =
       MFI.getCVBytesOfCalleeSavedRegisters();
   YamlMFI.HasOpaqueSPAdjustment = MFI.hasOpaqueSPAdjustment();
