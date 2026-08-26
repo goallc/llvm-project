@@ -321,6 +321,9 @@ public:
   public:
     Value *Val;
     SDValue Node;
+    /// Memory provenance for pointer arguments. SelectionDAGBuilder may refine
+    /// this from the IR value to a remapped fixed-stack object.
+    MachinePointerInfo PtrInfo;
     /// Original unlegalized argument type.
     Type *OrigTy;
     /// Same as OrigTy, or partially legalized for soft float libcalls.
@@ -346,12 +349,15 @@ public:
     unsigned GoRetIndex = std::numeric_limits<unsigned>::max();
 
     ArgListEntry(Value *Val, SDValue Node, Type *Ty)
-        : Val(Val), Node(Node), OrigTy(Ty), Ty(Ty), IsSExt(false),
-          IsZExt(false), IsNoExt(false), IsInReg(false), IsSRet(false),
-          IsNest(false), IsByVal(false), IsByRef(false), IsGoRet(false),
-          IsInAlloca(false), IsPreallocated(false), IsReturned(false),
-          IsSwiftSelf(false), IsSwiftAsync(false), IsSwiftError(false),
-          IsCFGuardTarget(false) {}
+        : Val(Val), Node(Node),
+          PtrInfo(Val && Val->getType()->isPointerTy()
+                      ? MachinePointerInfo(Val)
+                      : MachinePointerInfo()),
+          OrigTy(Ty), Ty(Ty), IsSExt(false), IsZExt(false), IsNoExt(false),
+          IsInReg(false), IsSRet(false), IsNest(false), IsByVal(false),
+          IsByRef(false), IsGoRet(false), IsInAlloca(false),
+          IsPreallocated(false), IsReturned(false), IsSwiftSelf(false),
+          IsSwiftAsync(false), IsSwiftError(false), IsCFGuardTarget(false) {}
 
     explicit ArgListEntry(Value *Val, SDValue Node = SDValue())
         : ArgListEntry(Val, Node, Val->getType()) {}
@@ -4917,6 +4923,15 @@ public:
           DoesNotReturn(false), IsReturnValueUsed(true), IsConvergent(false),
           IsPatchPoint(false), IsPreallocated(false), NoMerge(false),
           DAG(DAG) {}
+
+    /// Return memory provenance for an outgoing pointer argument part. Calls
+    /// synthesized after IR lowering may not have any.
+    MachinePointerInfo
+    getArgumentPointerInfo(const ISD::OutputArg &Out) const {
+      if (Out.OrigArgIndex >= Args.size())
+        return MachinePointerInfo();
+      return Args[Out.OrigArgIndex].PtrInfo.getWithOffset(Out.PartOffset);
+    }
 
     CallLoweringInfo &setDebugLoc(const SDLoc &dl) {
       DL = dl;

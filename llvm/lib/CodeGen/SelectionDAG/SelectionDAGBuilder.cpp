@@ -9426,14 +9426,16 @@ void SelectionDAGBuilder::LowerCallTo(const CallBase &CB, SDValue Callee,
     isTailCall = canTailCall(CB);
 
   for (auto I = CB.arg_begin(), E = CB.arg_end(); I != E; ++I) {
-    const Value *V = *I;
+    Value *V = *I;
 
     // Skip empty types
     if (V->getType()->isEmptyTy())
       continue;
 
     SDValue ArgNode = getValue(V);
-    TargetLowering::ArgListEntry Entry(ArgNode, V->getType());
+    TargetLowering::ArgListEntry Entry(V, ArgNode);
+    if (V->getType()->isPointerTy())
+      Entry.PtrInfo = getIRMemoryPointerInfo(DAG, FuncInfo, V, 0);
     Entry.setAttributes(&CB, I - CB.arg_begin());
 
     // Use swifterror virtual register as input to the call.
@@ -11170,11 +11172,13 @@ void SelectionDAGBuilder::populateCallLoweringInfo(
   // Attributes for args start at offset 1, after the return attribute.
   for (unsigned ArgI = ArgIdx, ArgE = ArgIdx + NumArgs;
        ArgI != ArgE; ++ArgI) {
-    const Value *V = Call->getOperand(ArgI);
+    Value *V = Call->getOperand(ArgI);
 
     assert(!V->getType()->isEmptyTy() && "Empty type passed to intrinsic.");
 
-    TargetLowering::ArgListEntry Entry(getValue(V), V->getType());
+    TargetLowering::ArgListEntry Entry(V, getValue(V));
+    if (V->getType()->isPointerTy())
+      Entry.PtrInfo = getIRMemoryPointerInfo(DAG, FuncInfo, V, 0);
     Entry.setAttributes(Call, ArgI);
     Args.push_back(Entry);
   }

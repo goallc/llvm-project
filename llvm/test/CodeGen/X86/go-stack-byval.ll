@@ -64,6 +64,8 @@ define goabiinternal void @memory_stack_argument(ptr %source) {
 ; CHECK: movq (%rax), %rax
 ; CHECK: movq %rax, (%rsp)
 ; CHECK: callq consume
+; MIR-LABEL: name: memory_stack_argument
+; MIR: MOV64rm {{.*}} :: (load (s64) from %ir.source)
 entry:
   call goabiinternal void @consume(i64 0, i64 1, i64 2, i64 3, i64 4, i64 5,
                                   i64 6, i64 7, i64 8,
@@ -137,6 +139,19 @@ entry:
       @llvm.experimental.gc.statepoint.p0(
           i64 1, i32 0, ptr elementtype(void (ptr)) @consume_one,
           i32 1, i32 0, ptr byval(i64) align 8 %argument, i32 0, i32 0)
+  ret void
+}
+
+define goabiinternal void @statepoint_memory_stack_argument(ptr %source)
+    gc "statepoint-example" {
+; The statepoint call-lowering path retains the original IR byval source too.
+; MIR-LABEL: name: statepoint_memory_stack_argument
+; MIR: MOV64rm {{.*}} :: (load (s64) from %ir.source)
+entry:
+  %token = call goabiinternal token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 4, i32 0, ptr elementtype(void (ptr)) @consume_one,
+          i32 1, i32 0, ptr byval(i64) align 8 %source, i32 0, i32 0)
   ret void
 }
 

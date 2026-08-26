@@ -10952,7 +10952,8 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
             Outs[i].Flags.getNonZeroByValAlign(),
             Outs[i].Flags.getNonZeroByValAlign(),
             /*isVol = */ false, /*AlwaysInline = */ IsGo,
-            /*CI=*/nullptr, std::nullopt, DstInfo, MachinePointerInfo());
+            /*CI=*/nullptr, std::nullopt, DstInfo,
+            CLI.getArgumentPointerInfo(Outs[i]));
 
         MemOpChains.push_back(Cpy);
       } else {

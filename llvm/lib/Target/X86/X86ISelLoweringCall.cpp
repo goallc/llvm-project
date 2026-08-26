@@ -1532,14 +1532,14 @@ static bool hasCalleePopSRet(const SmallVectorImpl<T> &Args,
 static SDValue
 CreateCopyOfByValArgument(SDValue Src, SDValue Dst, SDValue Chain,
                           ISD::ArgFlagsTy Flags, SelectionDAG &DAG,
-                          const SDLoc &dl,
-                          MachinePointerInfo DstInfo = MachinePointerInfo()) {
+                          const SDLoc &dl, MachinePointerInfo DstInfo,
+                          MachinePointerInfo SrcInfo) {
   SDValue SizeNode = DAG.getIntPtrConstant(Flags.getByValSize(), dl);
   Align Alignment = Flags.getNonZeroByValAlign();
   return DAG.getMemcpy(Chain, dl, Dst, Src, SizeNode, Alignment, Alignment,
                        /*isVolatile*/ false, /*AlwaysInline=*/true,
                        /*CI=*/nullptr, std::nullopt, DstInfo,
-                       MachinePointerInfo());
+                       SrcInfo);
 }
 
 /// Return true if the calling convention is one that we can guarantee TCO for.
@@ -2256,7 +2256,8 @@ SDValue X86TargetLowering::LowerMemOpCallTo(SDValue Chain, SDValue StackPtr,
                                             SelectionDAG &DAG,
                                             const CCValAssign &VA,
                                             ISD::ArgFlagsTy Flags,
-                                            bool isByVal) const {
+                                            bool isByVal,
+                                            MachinePointerInfo SrcInfo) const {
   unsigned LocMemOffset = VA.getLocMemOffset();
   SDValue PtrOff = DAG.getIntPtrConstant(LocMemOffset, dl);
   PtrOff = DAG.getNode(ISD::ADD, dl, getPointerTy(DAG.getDataLayout()),
@@ -2264,7 +2265,8 @@ SDValue X86TargetLowering::LowerMemOpCallTo(SDValue Chain, SDValue StackPtr,
   if (isByVal)
     return CreateCopyOfByValArgument(
         Arg, PtrOff, Chain, Flags, DAG, dl,
-        MachinePointerInfo::getStack(DAG.getMachineFunction(), LocMemOffset));
+        MachinePointerInfo::getStack(DAG.getMachineFunction(), LocMemOffset),
+        SrcInfo);
 
   MaybeAlign Alignment;
   if (Subtarget.isTargetWindowsMSVC() && !Subtarget.is64Bit() &&
@@ -2515,16 +2517,20 @@ SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   // FIXME: There's potential to improve the code by using virtual registers for
   // temporary storage, and letting the register allocator spill if needed.
   SmallVector<SDValue, 8> ByValTemporaries;
+  SmallVector<MachinePointerInfo, 8> ByValTemporaryInfos;
   SDValue ByValTempChain;
   if (isTailCall) {
     // Use null SDValue to mean "no temporary recorded for this arg index".
     ByValTemporaries.assign(OutVals.size(), SDValue());
+    ByValTemporaryInfos.assign(OutVals.size(), MachinePointerInfo());
 
     SmallVector<SDValue, 8> ByValCopyChains;
     for (const CCValAssign &VA : ArgLocs) {
       unsigned ArgIdx = VA.getValNo();
       SDValue Src = OutVals[ArgIdx];
       ISD::ArgFlagsTy Flags = Outs[ArgIdx].Flags;
+      MachinePointerInfo SrcInfo =
+          CLI.getArgumentPointerInfo(Outs[ArgIdx]);
 
       if (!Flags.isByVal())
         continue;
@@ -2555,6 +2561,7 @@ SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
         // preparation can clobber it, so we can copy it to the final location
         // later.
         ByValTemporaries[ArgIdx] = Src;
+        ByValTemporaryInfos[ArgIdx] = SrcInfo;
       } else {
         assert(Copy == CopyViaTemp && "unexpected enum value");
         // If we might be copying this argument from the outgoing argument
@@ -2567,10 +2574,13 @@ SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
         SDValue Temp =
             DAG.getFrameIndex(TempFrameIdx, getPointerTy(DAG.getDataLayout()));
 
-        SDValue CopyChain =
-            CreateCopyOfByValArgument(Src, Temp, Chain, Flags, DAG, dl);
+        MachinePointerInfo TempInfo =
+            MachinePointerInfo::getFixedStack(MF, TempFrameIdx);
+        SDValue CopyChain = CreateCopyOfByValArgument(
+            Src, Temp, Chain, Flags, DAG, dl, TempInfo, SrcInfo);
         ByValCopyChains.push_back(CopyChain);
         ByValTemporaries[ArgIdx] = Temp;
+        ByValTemporaryInfos[ArgIdx] = TempInfo;
       }
     }
     if (!ByValCopyChains.empty())
@@ -2637,6 +2647,8 @@ SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     CCValAssign &VA = ArgLocs[I];
     EVT RegVT = VA.getLocVT();
     SDValue Arg = OutVals[OutIndex];
+    MachinePointerInfo SrcInfo =
+        CLI.getArgumentPointerInfo(Outs[OutIndex]);
     bool isByVal = Flags.isByVal();
 
     // Promote the value if needed.
@@ -2674,8 +2686,9 @@ SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
             std::max(Align(16), Flags.getNonZeroByValAlign()), false);
         SDValue StackSlot =
             DAG.getFrameIndex(FrameIdx, getPointerTy(DAG.getDataLayout()));
-        Chain =
-            CreateCopyOfByValArgument(Arg, StackSlot, Chain, Flags, DAG, dl);
+        Chain = CreateCopyOfByValArgument(
+            Arg, StackSlot, Chain, Flags, DAG, dl,
+            MachinePointerInfo::getFixedStack(MF, FrameIdx), SrcInfo);
         // From now on treat this as a regular pointer
         Arg = StackSlot;
         isByVal = false;
@@ -2720,8 +2733,8 @@ SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
       if (!StackPtr.getNode())
         StackPtr = DAG.getCopyFromReg(Chain, dl, RegInfo->getStackRegister(),
                                       getPointerTy(DAG.getDataLayout()));
-      MemOpChains.push_back(LowerMemOpCallTo(Chain, StackPtr, Arg,
-                                             dl, DAG, VA, Flags, isByVal));
+      MemOpChains.push_back(LowerMemOpCallTo(Chain, StackPtr, Arg, dl, DAG, VA,
+                                             Flags, isByVal, SrcInfo));
     }
   }
 
@@ -2844,7 +2857,9 @@ SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
           SDValue DstAddr = DAG.getFrameIndex(FI, PtrVT);
 
           MemOpChains2.push_back(CreateCopyOfByValArgument(
-              ByValSrc, DstAddr, Chain, Flags, DAG, dl));
+              ByValSrc, DstAddr, Chain, Flags, DAG, dl,
+              MachinePointerInfo::getFixedStack(MF, FI),
+              ByValTemporaryInfos[OutsIndex]));
         }
       } else {
         // Store relative to framepointer.

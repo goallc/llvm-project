@@ -91,6 +91,11 @@ define goabiinternal void @register_arguments_byval_sources(
 ; CHECK: stp x6, x7, [sp, #376]
 ; CHECK: ldp x0, x{{[0-9]+}}, [sp, #368]
 ; CHECK: bl consume_many
+; MIR-LABEL: name: register_arguments_byval_sources
+; Remapped allocas must use the actual fixed-stack provenance. Describing these
+; loads with the old IR allocas would let scheduling move them above the stores
+; which initialize the incoming register homes.
+; MIR: LDRXui %fixed-stack.{{[0-9]+}}{{.*}} :: (load (s64) from %fixed-stack.{{[0-9]+}})
 entry:
   %a.home = alloca i64, align 8
   %b.home = alloca i64, align 8
@@ -141,6 +146,8 @@ define goabiinternal void @memory_stack_argument(ptr %source) {
 ; CHECK: ldr x{{[0-9]+}}, [x{{[0-9]+}}]
 ; CHECK: str x{{[0-9]+}}, [sp, #8]
 ; CHECK: bl consume
+; MIR-LABEL: name: memory_stack_argument
+; MIR: LDRXui {{.*}} :: (load (s64) from %ir.source)
 entry:
   call goabiinternal void @consume(
       i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7,
@@ -215,6 +222,19 @@ entry:
       @llvm.experimental.gc.statepoint.p0(
           i64 1, i32 0, ptr elementtype(void (ptr)) @consume_one,
           i32 1, i32 0, ptr byval(i64) align 8 %argument, i32 0, i32 0)
+  ret void
+}
+
+define goabiinternal void @statepoint_memory_stack_argument(ptr %source)
+    gc "statepoint-example" {
+; The statepoint call-lowering path retains the original IR byval source too.
+; MIR-LABEL: name: statepoint_memory_stack_argument
+; MIR: LDRXui {{.*}} :: (load (s64) from %ir.source)
+entry:
+  %token = call goabiinternal token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 4, i32 0, ptr elementtype(void (ptr)) @consume_one,
+          i32 1, i32 0, ptr byval(i64) align 8 %source, i32 0, i32 0)
   ret void
 }
 
