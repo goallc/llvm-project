@@ -1,10 +1,11 @@
 ; REQUIRES: aarch64-registered-target, x86-registered-target
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -verify-machineinstrs \
-; RUN:   -stop-after=implicit-null-checks -o - %s | FileCheck %s --check-prefix=MIR
+; RUN:   -stop-after=implicit-null-checks -o - %s | \
+; RUN:   FileCheck %s --check-prefixes=MIR,X86-MIR
 ; RUN: llc -mtriple=aarch64-unknown-linux-goobj -verify-machineinstrs \
 ; RUN:   -stop-after=implicit-null-checks -o - %s | FileCheck %s --check-prefix=MIR
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -verify-machineinstrs -o - %s | \
-; RUN:   FileCheck %s --check-prefix=ASM
+; RUN:   FileCheck %s --check-prefixes=ASM,X86-ASM
 ; RUN: llc -mtriple=aarch64-unknown-linux-goobj -verify-machineinstrs -o - %s | \
 ; RUN:   FileCheck %s --check-prefix=ASM
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.x86.o %s
@@ -14,6 +15,9 @@
 ; !{!"goallc"} marker opts a branch into Go's signal-based nil-check contract.
 ; The faulting access must stay in [0, runtime.minLegalPointer), and its debug
 ; location must identify the explicit nil check rather than the later load.
+
+declare goabi0 void @"consume_byval<ABI0>"(ptr byval(i64) align 8)
+declare goabiinternal void @observe(ptr)
 
 ; MIR: [[CHECK_LOC:![0-9]+]] = !DILocation(line: 10,
 ; MIR-LABEL: name: fold_nonnegative
@@ -33,6 +37,30 @@ notnil:
   %addr = getelementptr i8, ptr %p, i64 8, !dbg !8
   %value = load i64, ptr %addr, align 8, !dbg !8
   ret i64 %value
+}
+
+; A byval argument is expanded to a memcpy during call lowering. Preserve the
+; source IR pointer on that memcpy's load so alias analysis can prove that the
+; load may move above an unrelated stack store.
+; X86-MIR-LABEL: name: fold_byval_after_store
+; X86-MIR: FAULTING_OP
+; X86-MIR-SAME: from %ir.p
+; X86-ASM-LABEL: fold_byval_after_store:
+; X86-ASM: Go implicit nil check
+define goabiinternal void @fold_byval_after_store(ptr %p) {
+entry:
+  %slot = alloca i64, align 8
+  %isnil = icmp eq ptr %p, null
+  br i1 %isnil, label %nil, label %notnil, !make.implicit !0
+
+nil:
+  ret void
+
+notnil:
+  store i64 1, ptr %slot, align 8
+  call goabi0 void @"consume_byval<ABI0>"(ptr byval(i64) align 8 %p)
+  call goabiinternal void @observe(ptr %slot)
+  ret void
 }
 
 ; A negative displacement from null wraps to a high address. Go would treat
