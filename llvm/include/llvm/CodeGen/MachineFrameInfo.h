@@ -308,6 +308,11 @@ private:
   uint64_t GoABIStackArgsSize = ~UINT64_C(0);
   uint64_t GoABIArgSize = ~UINT64_C(0);
 
+  /// True when target frame lowering has applied native Go's implicit NOSPLIT
+  /// policy and omitted the stack-growth prologue. GoObj emission consumes
+  /// this bit so linker stack accounting observes the same effective policy.
+  bool GoObjNoSplit = false;
+
   /// The number of bytes of callee saved registers that the target wants to
   /// report for the current function in the CodeView S_FRAMEPROC record.
   unsigned CVBytesOfCalleeSavedRegisters = 0;
@@ -732,6 +737,9 @@ public:
     GoABIStackArgsSize = StackArgsSize;
     GoABIArgSize = ArgSize;
   }
+
+  bool isGoObjNoSplit() const { return GoObjNoSplit; }
+  void setGoObjNoSplit(bool Value = true) { GoObjNoSplit = Value; }
 
   /// Returns how many bytes of callee-saved registers the target pushed in the
   /// prologue. Only used for debug info.

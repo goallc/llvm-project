@@ -7,9 +7,17 @@
 ; RUN:   FileCheck %s --check-prefix=A64-ASM
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj < %s | \
 ; RUN:   FileCheck %s --check-prefix=X86-ASM
+; RUN: llc -mtriple=aarch64-apple-darwin-goobj -filetype=obj < %s -o %t.a64.o
+; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.a64.o | \
+; RUN:   FileCheck %s --check-prefix=A64-OBJ
+; RUN: llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj < %s -o %t.x86.o
+; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.x86.o | \
+; RUN:   FileCheck %s --check-prefix=X86-OBJ
 
 declare goabiinternal void @callee()
-declare goabiinternal void @runtime.panicdivide()
+declare goabiinternal void @"runtime.panicdivide<builtin.2>"()
+declare goabiinternal void @"runtime.panicshift<builtin.3>"()
+declare goabiinternal void @"runtime.panicwrap<builtin.7>"()
 
 define goabiinternal void @zero_frame_leaf() "frame-pointer"="non-leaf" {
 entry:
@@ -41,7 +49,9 @@ entry:
 define goabiinternal void @small_frame_x86_leaf_like_runtime_call()
     "frame-pointer"="non-leaf" {
 entry:
-  call goabiinternal void @runtime.panicdivide()
+  call goabiinternal void @"runtime.panicdivide<builtin.2>"()
+  call goabiinternal void @"runtime.panicshift<builtin.3>"()
+  call goabiinternal void @"runtime.panicwrap<builtin.7>"()
   ret void
 }
 
@@ -51,7 +61,7 @@ entry:
   %buf = alloca [112 x i8], align 8
   %slot = getelementptr inbounds [112 x i8], ptr %buf, i64 0, i64 111
   store volatile i8 1, ptr %slot, align 1
-  call goabiinternal void @runtime.panicdivide()
+  call goabiinternal void @"runtime.panicdivide<builtin.2>"()
   ret void
 }
 
@@ -120,9 +130,25 @@ entry:
 ; X86-ASM: callq "runtime.morestack_noctxt<ABI0>"
 ; X86-ASM-LABEL: small_frame_x86_leaf_like_runtime_call:
 ; X86-ASM-NOT: runtime.morestack
-; X86-ASM: callq runtime.panicdivide
+; X86-ASM: callq "runtime.panicdivide<builtin.2>"
+; X86-ASM: callq "runtime.panicshift<builtin.3>"
+; X86-ASM: callq "runtime.panicwrap<builtin.7>"
 ; X86-ASM-LABEL: x86_leaf_like_runtime_call_at_limit:
 ; X86-ASM: callq "runtime.morestack_noctxt<ABI0>"
 ; X86-ASM-LABEL: nosplit_large_non_leaf:
 ; X86-ASM-NOT: runtime.morestack
 ; X86-ASM: callq callee
+
+; Native arm64 leaves a zero-frame leaf as AttrLeaf only. Its nonzero small
+; leaf gets both AttrLeaf and AttrNoSplit after automatic stack-check elision.
+; A64-OBJ-DAG: symdef {{[0-9]+}}: zero_frame_leaf abi=1 type=1 size={{[0-9]+}} align=0 flag=8 flag2=0
+; A64-OBJ-DAG: symdef {{[0-9]+}}: small_frame_leaf abi=1 type=1 size={{[0-9]+}} align=0 flag=24 flag2=0
+; A64-OBJ-DAG: symdef {{[0-9]+}}: large_frame_leaf abi=1 type=1 size={{[0-9]+}} align=0 flag=8 flag2=0
+; A64-OBJ-DAG: symdef {{[0-9]+}}: small_frame_x86_leaf_like_runtime_call abi=1 type=1 size={{[0-9]+}} align=0 flag=0 flag2=0
+
+; X86 applies AttrNoSplit to every small leaf and to the three decorated
+; zero-argument panic builtins while frame+return-PC remains below StackSmall.
+; X86-OBJ-DAG: symdef {{[0-9]+}}: zero_frame_leaf abi=1 type=1 size={{[0-9]+}} align=0 flag=24 flag2=0
+; X86-OBJ-DAG: symdef {{[0-9]+}}: small_frame_leaf abi=1 type=1 size={{[0-9]+}} align=0 flag=24 flag2=0
+; X86-OBJ-DAG: symdef {{[0-9]+}}: small_frame_x86_leaf_like_runtime_call abi=1 type=1 size={{[0-9]+}} align=0 flag=16 flag2=0
+; X86-OBJ-DAG: symdef {{[0-9]+}}: x86_leaf_like_runtime_call_at_limit abi=1 type=1 size={{[0-9]+}} align=0 flag=0 flag2=0

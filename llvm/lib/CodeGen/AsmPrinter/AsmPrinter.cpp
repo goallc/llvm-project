@@ -3779,6 +3779,8 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
     // assembler's definition rather than the IR-level presence of a call.
     if (!MF.getFrameInfo().hasCalls())
       Flag |= GoObj::SymFlagLeaf;
+    if (MF.getFrameInfo().isGoObjNoSplit())
+      Flag |= GoObj::SymFlagNoSplit;
     if (Flag != 0 || Flag2 != 0)
       OutContext.setGoObjSymbolFlags(CurrentFnSym, Flag, Flag2);
     if (std::optional<std::pair<uint8_t, uint8_t>> Info =

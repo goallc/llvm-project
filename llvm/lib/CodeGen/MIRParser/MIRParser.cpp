@@ -952,6 +952,7 @@ bool MIRParserImpl::initializeFrameInfo(PerFunctionMIParsingState &PFS,
                          "argument sizes"));
     MFI.setGoABIArgSizes(YamlMFI.GoABIStackArgsSize, YamlMFI.GoABIArgSize);
   }
+  MFI.setGoObjNoSplit(YamlMFI.GoObjNoSplit);
   MFI.setCVBytesOfCalleeSavedRegisters(YamlMFI.CVBytesOfCalleeSavedRegisters);
   MFI.setHasOpaqueSPAdjustment(YamlMFI.HasOpaqueSPAdjustment);
   MFI.setHasVAStart(YamlMFI.HasVAStart);
