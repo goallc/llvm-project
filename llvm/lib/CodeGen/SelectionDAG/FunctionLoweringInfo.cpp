@@ -13,8 +13,10 @@
 
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Analysis/UniformityAnalysis.h"
 #include "llvm/CodeGen/Analysis.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
@@ -342,6 +344,7 @@ void FunctionLoweringInfo::clear() {
   ValueMap.clear();
   VirtReg2Value.clear();
   StaticAllocaMap.clear();
+  GoFixedFrameLeafBaseMap.clear();
   LiveOutRegInfo.clear();
   VisitedBBs.clear();
   ArgDbgValues.clear();
@@ -354,6 +357,160 @@ void FunctionLoweringInfo::clear() {
   StatepointRelocationMaps.clear();
   PreferredExtendType.clear();
   PreprocessedDVRDeclares.clear();
+}
+
+const Value *
+FunctionLoweringInfo::getGoFixedFrameLeafBase(const Value *Root,
+                                              unsigned RootLeafIndex) {
+  using Leaf = std::pair<const Value *, unsigned>;
+  const Leaf RootLeaf{Root, RootLeafIndex};
+  if (auto It = GoFixedFrameLeafBaseMap.find(RootLeaf);
+      It != GoFixedFrameLeafBaseMap.end())
+    return It->second;
+
+  if (!Fn->hasGC() || !goabi::isGoCallingConv(Fn->getCallingConv())) {
+    GoFixedFrameLeafBaseMap[RootLeaf] = nullptr;
+    return nullptr;
+  }
+
+  SmallVector<Type *, 4> RootLeafTypes;
+  ComputeValueTypes(MF->getDataLayout(), Root->getType(), RootLeafTypes);
+  if (RootLeafIndex >= RootLeafTypes.size() ||
+      !RootLeafTypes[RootLeafIndex]->isPointerTy()) {
+    GoFixedFrameLeafBaseMap[RootLeaf] = nullptr;
+    return nullptr;
+  }
+
+  SmallVector<Leaf, 8> Worklist{RootLeaf};
+  SmallDenseSet<Leaf, 8> Visited;
+  const Value *Base = nullptr;
+  bool Failed = false;
+
+  auto mergeBase = [&](const Value *Candidate) {
+    if (Base && Base != Candidate) {
+      Failed = true;
+      return;
+    }
+    Base = Candidate;
+  };
+
+  auto getNumLeaves = [&](Type *Ty) {
+    SmallVector<EVT, 4> ValueVTs;
+    ComputeValueVTs(*TLI, MF->getDataLayout(), Ty, ValueVTs);
+    return ValueVTs.size();
+  };
+
+  while (!Worklist.empty() && !Failed) {
+    Leaf Current = Worklist.pop_back_val();
+    if (!Visited.insert(Current).second)
+      continue;
+
+    const Value *V = Current.first;
+    unsigned LeafIndex = Current.second;
+    if (LeafIndex >= getNumLeaves(V->getType())) {
+      Failed = true;
+      break;
+    }
+
+    if (Current != RootLeaf) {
+      if (auto It = GoFixedFrameLeafBaseMap.find(Current);
+          It != GoFixedFrameLeafBaseMap.end()) {
+        if (!It->second)
+          Failed = true;
+        else
+          mergeBase(It->second);
+        continue;
+      }
+    }
+
+    if (const auto *AI = dyn_cast<AllocaInst>(V)) {
+      if (LeafIndex != 0 || !StaticAllocaMap.contains(AI)) {
+        Failed = true;
+        break;
+      }
+      mergeBase(AI);
+      continue;
+    }
+
+    if (const auto *Arg = dyn_cast<Argument>(V)) {
+      if (LeafIndex != 0 || (!Arg->hasByValAttr() && !Arg->hasGoRetAttr())) {
+        Failed = true;
+        break;
+      }
+      mergeBase(Arg);
+      continue;
+    }
+
+    if (const auto *PN = dyn_cast<PHINode>(V)) {
+      for (const Value *Incoming : PN->incoming_values())
+        Worklist.emplace_back(Incoming, LeafIndex);
+      continue;
+    }
+
+    if (const auto *SI = dyn_cast<SelectInst>(V)) {
+      Worklist.emplace_back(SI->getTrueValue(), LeafIndex);
+      Worklist.emplace_back(SI->getFalseValue(), LeafIndex);
+      continue;
+    }
+
+    if (const auto *Freeze = dyn_cast<FreezeInst>(V)) {
+      Worklist.emplace_back(Freeze->getOperand(0), LeafIndex);
+      continue;
+    }
+
+    if (const auto *Insert = dyn_cast<InsertValueInst>(V)) {
+      unsigned InsertIndex = ComputeLinearIndex(
+          Insert->getAggregateOperand()->getType(), Insert->getIndices());
+      unsigned NumInsertedLeaves =
+          getNumLeaves(Insert->getInsertedValueOperand()->getType());
+      if (LeafIndex >= InsertIndex &&
+          LeafIndex < InsertIndex + NumInsertedLeaves)
+        Worklist.emplace_back(Insert->getInsertedValueOperand(),
+                              LeafIndex - InsertIndex);
+      else
+        Worklist.emplace_back(Insert->getAggregateOperand(), LeafIndex);
+      continue;
+    }
+
+    if (const auto *Extract = dyn_cast<ExtractValueInst>(V)) {
+      unsigned ExtractIndex = ComputeLinearIndex(
+          Extract->getAggregateOperand()->getType(), Extract->getIndices());
+      Worklist.emplace_back(Extract->getAggregateOperand(),
+                            ExtractIndex + LeafIndex);
+      continue;
+    }
+
+    if (const auto *Relocate = dyn_cast<GCRelocateInst>(V)) {
+      if (LeafIndex != 0) {
+        Failed = true;
+        break;
+      }
+      Worklist.emplace_back(Relocate->getDerivedPtr(), 0);
+      continue;
+    }
+
+    if (const auto *GEP = dyn_cast<GetElementPtrInst>(V);
+        GEP && LeafIndex == 0 && GEP->hasAllZeroIndices()) {
+      Worklist.emplace_back(GEP->getPointerOperand(), 0);
+      continue;
+    }
+
+    if (const auto *Cast = dyn_cast<CastInst>(V);
+        Cast && LeafIndex == 0 && Cast->isNoopCast(MF->getDataLayout())) {
+      Worklist.emplace_back(Cast->getOperand(0), 0);
+      continue;
+    }
+
+    Failed = true;
+  }
+
+  // Reject unanchored cycles such as `phi [ %self, %backedge ]`.
+  const Value *Result = Failed ? nullptr : Base;
+  if (Result)
+    for (Leaf FixedLeaf : Visited)
+      GoFixedFrameLeafBaseMap.try_emplace(FixedLeaf, Result);
+  GoFixedFrameLeafBaseMap[RootLeaf] = Result;
+  return Result;
 }
 
 /// CreateReg - Allocate a single virtual register for the given type.

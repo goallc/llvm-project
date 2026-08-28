@@ -1798,6 +1798,54 @@ SDValue SelectionDAGBuilder::getCopyFromRegs(const Value *V, Type *Ty) {
 
 /// getValue - Return an SDValue for the given Value.
 SDValue SelectionDAGBuilder::getValue(const Value *V) {
+  auto rematerializeGoFixedFrameLeaves = [&](SDValue Original) {
+    // Scalar pointer lowering, including the existing alloca/byval/goret and
+    // gc.relocate handling, is deliberately unchanged. This path only repairs
+    // fixed-frame identity lost while SelectionDAG scalarizes an aggregate.
+    if (!V->getType()->isAggregateType())
+      return Original;
+
+    SmallVector<EVT, 4> ValueVTs;
+    ComputeValueVTs(DAG.getTargetLoweringInfo(), DAG.getDataLayout(),
+                    V->getType(), ValueVTs);
+    if (ValueVTs.empty())
+      return Original;
+
+    SmallVector<SDValue, 4> Values;
+    Values.reserve(ValueVTs.size());
+    bool Changed = false;
+    for (unsigned I = 0; I != ValueVTs.size(); ++I) {
+      SDValue Leaf(Original.getNode(), Original.getResNo() + I);
+      const Value *Base = FuncInfo.getGoFixedFrameLeafBase(V, I);
+      if (!Base) {
+        Values.push_back(Leaf);
+        continue;
+      }
+
+      int FI = INT_MAX;
+      if (const auto *AI = dyn_cast<AllocaInst>(Base)) {
+        if (auto It = FuncInfo.StaticAllocaMap.find(AI);
+            It != FuncInfo.StaticAllocaMap.end())
+          FI = It->second;
+      } else {
+        FI = FuncInfo.getArgumentFrameIndex(cast<Argument>(Base));
+      }
+      if (FI == INT_MAX) {
+        Values.push_back(Leaf);
+        continue;
+      }
+
+      Values.push_back(DAG.getFrameIndex(FI, ValueVTs[I]));
+      Changed = true;
+    }
+
+    if (!Changed)
+      return Original;
+    if (Values.size() == 1)
+      return Values.front();
+    return DAG.getMergeValues(Values, getCurSDLoc());
+  };
+
   // Typed byval and goret arguments in GC-enabled Go functions denote fixed
   // incoming frame homes. Do not reuse an address exported from the entry
   // block: an intervening statepoint may grow the Go stack, making that
@@ -1818,18 +1866,19 @@ SDValue SelectionDAGBuilder::getValue(const Value *V) {
   // to do this first, so that we don't create a CopyFromReg if we already
   // have a regular SDValue.
   SDValue &N = NodeMap[V];
-  if (N.getNode()) return N;
+  if (N.getNode())
+    return rematerializeGoFixedFrameLeaves(N);
 
   // If there's a virtual register allocated and initialized for this
   // value, use it.
   if (SDValue copyFromReg = getCopyFromRegs(V, V->getType()))
-    return copyFromReg;
+    return rematerializeGoFixedFrameLeaves(copyFromReg);
 
   // Otherwise create a new SDValue and remember it.
   SDValue Val = getValueImpl(V);
   NodeMap[V] = Val;
   resolveDanglingDebugInfo(V, Val);
-  return Val;
+  return rematerializeGoFixedFrameLeaves(Val);
 }
 
 void SelectionDAGBuilder::setValueToPoison(const Value *V, const SDLoc &dl) {
