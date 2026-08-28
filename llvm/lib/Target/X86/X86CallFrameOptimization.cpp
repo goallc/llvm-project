@@ -26,6 +26,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -140,6 +141,18 @@ INITIALIZE_PASS(X86CallFrameOptimizationLegacy, DEBUG_TYPE,
 // we don't even want to try.
 bool X86CallFrameOptimizationImpl::isLegal(MachineFunction &MF) {
   if (NoX86CFOpt.getValue())
+    return false;
+
+  // Go keeps the maximum outgoing argument area in the function's fixed
+  // frame. Besides matching the native ABI implementation, this keeps the
+  // SP-based Go frame model and PCSP accounting stable and lets a loop reuse
+  // the same stack-map-described call area after stack growth. Converting
+  // outgoing stores to PUSHes sets HasPushSequences and disables X86's
+  // reserved call frame for the entire function, adding dynamic SP
+  // adjustments around every call. Keep ordinary stores for GoObj Go
+  // functions so PEI reserves the maximum call frame once in the prologue.
+  if (MF.getTarget().getTargetTriple().isOSBinFormatGoObj() &&
+      goabi::isGoCallingConv(MF.getFunction().getCallingConv()))
     return false;
 
   // We can't encode multiple DW_CFA_GNU_args_size or DW_CFA_def_cfa_offset
