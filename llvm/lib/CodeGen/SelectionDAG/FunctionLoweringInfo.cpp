@@ -13,7 +13,9 @@
 
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/Analysis/UniformityAnalysis.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -25,6 +27,7 @@
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/CodeGen/WinEHFuncInfo.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -32,6 +35,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Statepoint.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -81,6 +85,163 @@ static ISD::NodeType getPreferredExtendForValue(const Instruction *I) {
     ExtendKind = ISD::SIGN_EXTEND;
 
   return ExtendKind;
+}
+
+/// Return true if a statepoint can execute after I. A backedge to I's block is
+/// intentionally scanned from the beginning, since values from the previous
+/// iteration may then be live at an earlier statepoint in the next iteration.
+static bool hasReachableStatepointAfter(const Instruction *I) {
+  for (const Instruction &After :
+       make_range(std::next(I->getIterator()), I->getParent()->end()))
+    if (isa<GCStatepointInst>(After))
+      return true;
+
+  SmallVector<const BasicBlock *, 8> Worklist(successors(I->getParent()));
+  SmallPtrSet<const BasicBlock *, 8> Seen;
+  while (!Worklist.empty()) {
+    const BasicBlock *BB = Worklist.pop_back_val();
+    if (!Seen.insert(BB).second)
+      continue;
+    for (const Instruction &Inst : *BB)
+      if (isa<GCStatepointInst>(Inst))
+        return true;
+    llvm::append_range(Worklist, successors(BB));
+  }
+  return false;
+}
+
+/// Find small scalar projections of a pure goret carrier. This deliberately
+/// recognizes only the straight-line shape produced by Go aggregate result
+/// reconstruction. In particular, a pointer projection is rejected if any
+/// statepoint can execute later: introducing such a value after statepoint
+/// liveness has been computed would otherwise leave it untracked.
+static void findGoRetValueProjections(FunctionLoweringInfo &FuncInfo) {
+  const DataLayout &DL = FuncInfo.MF->getDataLayout();
+
+  for (const auto &[AI, FI] : FuncInfo.StaticAllocaMap) {
+    (void)FI;
+    if (AI->isUsedByMetadata())
+      continue;
+
+    const CallBase *DefiningCall = nullptr;
+    Type *GoRetType = nullptr;
+    unsigned NumGoRetUses = 0;
+    SmallVector<const LoadInst *, 4> Loads;
+    SmallVector<const Value *, 8> Worklist(1, AI);
+    SmallPtrSet<const Value *, 8> Seen;
+    bool Valid = true;
+
+    while (Valid && !Worklist.empty()) {
+      const Value *Pointer = Worklist.pop_back_val();
+      if (!Seen.insert(Pointer).second)
+        continue;
+
+      for (const Use &U : Pointer->uses()) {
+        const User *Usr = U.getUser();
+        if (const auto *GEP = dyn_cast<GetElementPtrInst>(Usr)) {
+          Worklist.push_back(GEP);
+          continue;
+        }
+        if (const auto *BC = dyn_cast<BitCastInst>(Usr)) {
+          Worklist.push_back(BC);
+          continue;
+        }
+        if (const auto *LI = dyn_cast<LoadInst>(Usr)) {
+          if (LI->getPointerOperand() != Pointer || !LI->isSimple() ||
+              !(LI->getType()->isPointerTy() || LI->getType()->isIntegerTy() ||
+                LI->getType()->isFloatingPointTy())) {
+            Valid = false;
+            break;
+          }
+          Loads.push_back(LI);
+          continue;
+        }
+        if (const auto *II = dyn_cast<IntrinsicInst>(Usr)) {
+          if ((II->getIntrinsicID() == Intrinsic::lifetime_start ||
+               II->getIntrinsicID() == Intrinsic::lifetime_end) &&
+              II->getArgOperand(0) == Pointer)
+            continue;
+        }
+        if (const auto *CB = dyn_cast<CallBase>(Usr)) {
+          if (Pointer == AI && isa<GCStatepointInst>(CB) &&
+              CB->isArgOperand(&U)) {
+            unsigned ArgNo = CB->getArgOperandNo(&U);
+            if (CB->paramHasAttr(ArgNo, Attribute::GoRet) &&
+                (!DefiningCall || DefiningCall == CB)) {
+              DefiningCall = CB;
+              GoRetType = CB->getParamGoRetType(ArgNo);
+              ++NumGoRetUses;
+              continue;
+            }
+          }
+        }
+        Valid = false;
+        break;
+      }
+    }
+
+    if (!Valid || !DefiningCall || NumGoRetUses != 1 || !GoRetType ||
+        Loads.empty() || Loads.size() > 8)
+      continue;
+
+    std::optional<TypeSize> CarrierSize = AI->getAllocationSize(DL);
+    TypeSize GoRetSize = DL.getTypeAllocSize(GoRetType);
+    if (!CarrierSize || CarrierSize->isScalable() || GoRetSize.isScalable() ||
+        *CarrierSize != GoRetSize)
+      continue;
+
+    SmallVector<FunctionLoweringInfo::GoRetValueProjection, 4> Projections;
+    SmallSet<int64_t, 8> SeenOffsets;
+    const BasicBlock *ProjectionBB = Loads.front()->getParent();
+    const BasicBlock *CallBB = DefiningCall->getParent();
+    if (ProjectionBB != CallBB) {
+      const auto *Branch = dyn_cast<UncondBrInst>(CallBB->getTerminator());
+      if (!Branch || Branch->getSuccessor(0) != ProjectionBB ||
+          ProjectionBB->getSinglePredecessor() != CallBB)
+        Valid = false;
+    }
+    for (const LoadInst *LI : Loads) {
+      if (!Valid || LI->getParent() != ProjectionBB ||
+          (ProjectionBB == CallBB && !DefiningCall->comesBefore(LI))) {
+        Valid = false;
+        break;
+      }
+
+      int64_t Offset = 0;
+      const Value *Base =
+          GetPointerBaseWithConstantOffset(LI->getPointerOperand(), Offset, DL);
+      TypeSize LoadSize = DL.getTypeStoreSize(LI->getType());
+      if (Base != AI || Offset < 0 || LoadSize.isScalable() ||
+          LoadSize.getFixedValue() > 16 ||
+          static_cast<uint64_t>(Offset) + LoadSize.getFixedValue() >
+              CarrierSize->getFixedValue() ||
+          !SeenOffsets.insert(Offset).second) {
+        Valid = false;
+        break;
+      }
+
+      EVT VT = FuncInfo.TLI->getValueType(DL, LI->getType());
+      if (!VT.isSimple() ||
+          FuncInfo.TLI->getNumRegisters(AI->getContext(), VT) != 1) {
+        Valid = false;
+        break;
+      }
+
+      if (LI->getType()->isPointerTy() && hasReachableStatepointAfter(LI)) {
+        Valid = false;
+        break;
+      }
+
+      Projections.push_back({LI, static_cast<uint64_t>(Offset), Register()});
+    }
+
+    if (!Valid)
+      continue;
+
+    for (auto &Projection : Projections)
+      Projection.Reg = FuncInfo.CreateRegs(Projection.Load);
+    FuncInfo.GoRetValueProjections.try_emplace(AI, std::move(Projections));
+  }
 }
 
 void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
@@ -240,6 +401,8 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
     }
   }
 
+  findGoRetValueProjections(*this);
+
   // Create an initial MachineBasicBlock for each LLVM BasicBlock in F.  This
   // also creates the initial PHI MachineInstrs, though none of the input
   // operands are populated.
@@ -342,6 +505,8 @@ void FunctionLoweringInfo::clear() {
   ValueMap.clear();
   VirtReg2Value.clear();
   StaticAllocaMap.clear();
+  GoRetValueProjections.clear();
+  ActiveGoRetValueProjections.clear();
   LiveOutRegInfo.clear();
   VisitedBBs.clear();
   ArgDbgValues.clear();

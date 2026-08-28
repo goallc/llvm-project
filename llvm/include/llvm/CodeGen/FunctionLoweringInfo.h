@@ -135,6 +135,27 @@ public:
   /// anywhere in the function.
   DenseMap<const AllocaInst*, int> StaticAllocaMap;
 
+  /// A scalar load which can be read directly from the outgoing Go ABI result
+  /// area after a goret call. The virtual register is defined by target call
+  /// lowering and consumed when SelectionDAGBuilder visits the original load.
+  struct GoRetValueProjection {
+    const LoadInst *Load;
+    uint64_t Offset;
+    Register Reg;
+  };
+
+  /// Pure, non-address-observable goret carriers whose scalar users can be
+  /// forwarded from the physical call result area. Candidates are deliberately
+  /// bounded here so aggregate values never enter SelectionDAG as a large
+  /// multi-result SSA node.
+  DenseMap<const AllocaInst *, SmallVector<GoRetValueProjection, 4>>
+      GoRetValueProjections;
+
+  /// Loads become active only after target call lowering has emitted their
+  /// defining copies. This keeps unsupported targets on the ordinary memory
+  /// path even if the target-independent candidate analysis succeeds.
+  DenseMap<const LoadInst *, Register> ActiveGoRetValueProjections;
+
   /// ByValArgFrameIndexMap - Keep track of frame indices for byval arguments.
   DenseMap<const Argument*, int> ByValArgFrameIndexMap;
 
@@ -238,6 +259,28 @@ public:
   LLVM_ABI Register CreateRegs(Type *Ty, bool isDivergent = false);
 
   LLVM_ABI Register InitializeRegForValue(const Value *V);
+
+  ArrayRef<GoRetValueProjection>
+  getGoRetValueProjections(const AllocaInst *AI) const {
+    auto It = GoRetValueProjections.find(AI);
+    return It == GoRetValueProjections.end()
+               ? ArrayRef<GoRetValueProjection>()
+               : ArrayRef<GoRetValueProjection>(It->second);
+  }
+
+  void activateGoRetValueProjections(const AllocaInst *AI) {
+    for (const GoRetValueProjection &Projection : getGoRetValueProjections(AI))
+      ActiveGoRetValueProjections.try_emplace(Projection.Load, Projection.Reg);
+  }
+
+  Register getActiveGoRetValueProjection(const LoadInst *Load) const {
+    auto It = ActiveGoRetValueProjections.find(Load);
+    return It == ActiveGoRetValueProjections.end() ? Register() : It->second;
+  }
+
+  bool isGoRetValueProjectionCarrier(const AllocaInst *AI) const {
+    return GoRetValueProjections.contains(AI);
+  }
 
   /// GetLiveOutRegInfo - Gets LiveOutInfo for a register, returning NULL if the
   /// register is a PHI destination and the PHI's LiveOutInfo is not valid.

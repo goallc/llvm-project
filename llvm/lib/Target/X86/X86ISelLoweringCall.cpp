@@ -23,6 +23,7 @@
 #include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/ObjCARCUtil.h"
+#include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/GoISelLowering.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
@@ -3099,6 +3100,36 @@ SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
         uint64_t Offset = static_cast<uint64_t>(VA.getLocMemOffset());
         SDValue Source = DAG.getNode(ISD::ADD, dl, PtrVT, ResultStackPtr,
                                      DAG.getIntPtrConstant(Offset, dl));
+        const auto *AI =
+            dyn_cast_or_null<AllocaInst>(CLI.Args[Outs[I].OrigArgIndex].Val);
+        FunctionLoweringInfo *FLI = DAG.getFunctionLoweringInfo();
+        ArrayRef<FunctionLoweringInfo::GoRetValueProjection> Projections =
+            AI && FLI ? FLI->getGoRetValueProjections(AI)
+                      : ArrayRef<FunctionLoweringInfo::GoRetValueProjection>();
+        auto *ResultFI = dyn_cast<FrameIndexSDNode>(OutVals[I]);
+        if (!Projections.empty() && ResultFI) {
+          SDValue ProjectionChain = Chain;
+          for (const auto &Projection : Projections) {
+            EVT VT =
+                getValueType(DAG.getDataLayout(), Projection.Load->getType());
+            SDValue ProjectionSource =
+                DAG.getNode(ISD::ADD, dl, PtrVT, Source,
+                            DAG.getIntPtrConstant(Projection.Offset, dl));
+            Align Alignment =
+                commonAlignment(Flags.getNonZeroMemAlign(), Projection.Offset);
+            SDValue Load = DAG.getLoad(
+                VT, dl, ProjectionChain, ProjectionSource,
+                MachinePointerInfo::getStack(MF, Offset + Projection.Offset),
+                Alignment);
+            ProjectionChain = Load.getValue(1);
+            ProjectionChain =
+                DAG.getCopyToReg(ProjectionChain, dl, Projection.Reg, Load);
+          }
+          MF.getFrameInfo().RemoveStackObject(ResultFI->getIndex());
+          FLI->activateGoRetValueProjections(AI);
+          Copies.push_back(ProjectionChain);
+          continue;
+        }
         Copies.push_back(DAG.getMemcpy(
             Chain, dl, OutVals[I], Source,
             DAG.getConstant(Flags.getGoRetSize(), dl, PtrVT),

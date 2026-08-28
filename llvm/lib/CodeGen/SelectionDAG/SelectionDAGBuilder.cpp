@@ -4827,6 +4827,15 @@ void SelectionDAGBuilder::visitLoad(const LoadInst &I) {
   if (I.isAtomic())
     return visitAtomicLoad(I);
 
+  if (Register Reg = FuncInfo.getActiveGoRetValueProjection(&I)) {
+    EVT VT = DAG.getTargetLoweringInfo().getValueType(DAG.getDataLayout(),
+                                                      I.getType());
+    SDValue Forwarded =
+        DAG.getCopyFromReg(DAG.getEntryNode(), getCurSDLoc(), Reg, VT);
+    setValue(&I, Forwarded);
+    return;
+  }
+
   const TargetLowering &TLI = DAG.getTargetLoweringInfo();
   const Value *SV = I.getOperand(0);
   if (TLI.supportSwiftError()) {
@@ -8029,6 +8038,9 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     // valid frame index.
     auto SI = FuncInfo.StaticAllocaMap.find(LifetimeObject);
     if (SI == FuncInfo.StaticAllocaMap.end())
+      return;
+
+    if (FuncInfo.isGoRetValueProjectionCarrier(LifetimeObject))
       return;
 
     const int FrameIndex = SI->second;
