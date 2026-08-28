@@ -138,6 +138,19 @@ public:
   /// ByValArgFrameIndexMap - Keep track of frame indices for byval arguments.
   DenseMap<const Argument*, int> ByValArgFrameIndexMap;
 
+  /// Cache the fixed Go frame object, if any, denoted by one flattened pointer
+  /// leaf of an IR value. Aggregate values are lowered as a sequence of
+  /// SelectionDAG values, so fixed-frame identity has to be tracked per leaf
+  /// rather than per aggregate.
+  DenseMap<std::pair<const Value *, unsigned>, const Value *>
+      GoFixedFrameLeafBaseMap;
+
+  /// Return the alloca, byval argument, or goret argument that completely
+  /// determines one flattened pointer leaf of V. A null result means that the
+  /// leaf must retain ordinary SSA/vreg lowering.
+  LLVM_ABI const Value *getGoFixedFrameLeafBase(const Value *V,
+                                                unsigned LeafIndex);
+
   struct ArgumentValueHome {
     uint64_t Offset;
     uint64_t Size;
