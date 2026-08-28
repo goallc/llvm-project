@@ -809,6 +809,18 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
   // the alloca
   SmallVector<SDValue, 4> Allocas;
   for (Value *V : SI.GCLives) {
+    // Go's statepoint pass keeps fixed-frame bases in gc-live so their
+    // addresses can be rematerialized after stack growth. A private byval or
+    // goret call carrier needs no such address once existing call lowering
+    // proves that it can forward the carrier directly to or from the physical
+    // outgoing call area. Do not make that otherwise dead source FrameIndex
+    // an explicit statepoint operand. Ordinary gc-live allocas, object-content
+    // carriers, and every non-GoObj target retain the generic behavior below.
+    const auto *AI = dyn_cast<AllocaInst>(V);
+    if (AI && (Builder.FuncInfo.isGoByValCallCarrier(AI) ||
+               Builder.FuncInfo.isGoRetValueProjectionCarrier(AI)))
+      continue;
+
     SDValue Incoming = getStatepointGCValue(V, Builder);
     if (FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(Incoming)) {
       // This handles allocas as arguments to the statepoint

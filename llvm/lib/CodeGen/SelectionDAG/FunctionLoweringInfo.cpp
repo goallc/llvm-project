@@ -17,6 +17,7 @@
 #include "llvm/Analysis/UniformityAnalysis.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/Analysis.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
@@ -39,6 +40,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetMachine.h"
 #include <algorithm>
 using namespace llvm;
 
@@ -110,6 +112,20 @@ static bool hasReachableStatepointAfter(const Instruction *I) {
   return false;
 }
 
+static void findGoByValCallCarriers(FunctionLoweringInfo &FuncInfo) {
+  if (FuncInfo.MF->getTarget().getOptLevel() == CodeGenOptLevel::None ||
+      !FuncInfo.MF->getTarget().getTargetTriple().isOSBinFormatGoObj() ||
+      !goabi::isGoCallingConv(FuncInfo.Fn->getCallingConv()))
+    return;
+
+  for (const auto &[AI, FI] : FuncInfo.StaticAllocaMap) {
+    (void)FI;
+    if (isSingleByValCallCarrier(*AI, FuncInfo.MF->getDataLayout(),
+                                 /*AllowGCLiveUses=*/true))
+      FuncInfo.GoByValCallCarriers.insert(AI);
+  }
+}
+
 /// Find small scalar projections of a pure goret carrier. This deliberately
 /// recognizes only the straight-line shape produced by Go aggregate result
 /// reconstruction. In particular, a pointer projection is rejected if any
@@ -117,6 +133,9 @@ static bool hasReachableStatepointAfter(const Instruction *I) {
 /// liveness has been computed would otherwise leave it untracked.
 static void findGoRetValueProjections(FunctionLoweringInfo &FuncInfo) {
   const DataLayout &DL = FuncInfo.MF->getDataLayout();
+  const bool AllowGCLiveUses =
+      FuncInfo.MF->getTarget().getTargetTriple().isOSBinFormatGoObj() &&
+      goabi::isGoCallingConv(FuncInfo.Fn->getCallingConv());
 
   for (const auto &[AI, FI] : FuncInfo.StaticAllocaMap) {
     (void)FI;
@@ -163,6 +182,10 @@ static void findGoRetValueProjections(FunctionLoweringInfo &FuncInfo) {
             continue;
         }
         if (const auto *CB = dyn_cast<CallBase>(Usr)) {
+          if (AllowGCLiveUses && Pointer == AI && isa<GCStatepointInst>(CB) &&
+              CB->isOperandBundleOfType(LLVMContext::OB_gc_live,
+                                        U.getOperandNo()))
+            continue;
           if (Pointer == AI && isa<GCStatepointInst>(CB) &&
               CB->isArgOperand(&U)) {
             unsigned ArgNo = CB->getArgOperandNo(&U);
@@ -221,7 +244,12 @@ static void findGoRetValueProjections(FunctionLoweringInfo &FuncInfo) {
       }
 
       EVT VT = FuncInfo.TLI->getValueType(DL, LI->getType());
-      if (!VT.isSimple() ||
+      // Target call lowering copies each projection through one virtual
+      // register without running the ordinary getCopyToParts legalization.
+      // Keep promoted scalar types (for example i8 on AArch64) on the memory
+      // path; otherwise CopyToReg would introduce an illegal type after the
+      // statepoint DAG has already been built.
+      if (!VT.isSimple() || !FuncInfo.TLI->isTypeLegal(VT) ||
           FuncInfo.TLI->getNumRegisters(AI->getContext(), VT) != 1) {
         Valid = false;
         break;
@@ -401,6 +429,7 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
     }
   }
 
+  findGoByValCallCarriers(*this);
   findGoRetValueProjections(*this);
 
   // Create an initial MachineBasicBlock for each LLVM BasicBlock in F.  This
@@ -505,6 +534,7 @@ void FunctionLoweringInfo::clear() {
   ValueMap.clear();
   VirtReg2Value.clear();
   StaticAllocaMap.clear();
+  GoByValCallCarriers.clear();
   GoRetValueProjections.clear();
   ActiveGoRetValueProjections.clear();
   LiveOutRegInfo.clear();

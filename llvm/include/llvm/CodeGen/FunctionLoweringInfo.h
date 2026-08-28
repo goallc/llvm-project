@@ -151,6 +151,11 @@ public:
   DenseMap<const AllocaInst *, SmallVector<GoRetValueProjection, 4>>
       GoRetValueProjections;
 
+  /// Pure initialization buffers which Go call lowering can forward directly
+  /// into the physical byval argument area. Direct gc-live uses of these
+  /// allocas describe only a rematerializable carrier address.
+  SmallPtrSet<const AllocaInst *, 8> GoByValCallCarriers;
+
   /// Loads become active only after target call lowering has emitted their
   /// defining copies. This keeps unsupported targets on the ordinary memory
   /// path even if the target-independent candidate analysis succeeds.
@@ -280,6 +285,10 @@ public:
 
   bool isGoRetValueProjectionCarrier(const AllocaInst *AI) const {
     return GoRetValueProjections.contains(AI);
+  }
+
+  bool isGoByValCallCarrier(const AllocaInst *AI) const {
+    return GoByValCallCarriers.contains(AI);
   }
 
   /// GetLiveOutRegInfo - Gets LiveOutInfo for a register, returning NULL if the

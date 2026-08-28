@@ -31,6 +31,7 @@
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
@@ -9588,7 +9589,11 @@ static SDValue tryForwardByValStores(SelectionDAG &DAG, const SDLoc &DL,
   if (MFI.isFixedObjectIndex(FI))
     return SDValue();
   const AllocaInst *AI = MFI.getObjectAllocation(FI);
-  if (!AI || !isSingleByValCallCarrier(*AI, DAG.getDataLayout()) ||
+  const bool AllowGCLiveUses =
+      MF.getTarget().getTargetTriple().isOSBinFormatGoObj() &&
+      goabi::isGoCallingConv(MF.getFunction().getCallingConv());
+  if (!AI ||
+      !isSingleByValCallCarrier(*AI, DAG.getDataLayout(), AllowGCLiveUses) ||
       MFI.getObjectSize(FI) != static_cast<int64_t>(Size) ||
       MFI.getObjectAlign(FI) > DstAlign)
     return SDValue();
