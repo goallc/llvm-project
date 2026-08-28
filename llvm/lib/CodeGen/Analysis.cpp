@@ -24,6 +24,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Statepoint.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
 
@@ -32,7 +33,8 @@
 using namespace llvm;
 
 bool llvm::isSingleByValCallCarrier(const AllocaInst &Alloca,
-                                    const DataLayout &DL) {
+                                    const DataLayout &DL,
+                                    bool AllowGCLiveUses) {
   auto *Count = dyn_cast<ConstantInt>(Alloca.getArraySize());
   std::optional<TypeSize> AllocationSize = Alloca.getAllocationSize(DL);
   if (!Alloca.isStaticAlloca() || !Count || !Count->isOne() ||
@@ -95,6 +97,10 @@ bool llvm::isSingleByValCallCarrier(const AllocaInst &Alloca,
         continue;
       }
       if (const auto *CB = dyn_cast<CallBase>(I)) {
+        if (AllowGCLiveUses && V == &Alloca && isa<GCStatepointInst>(CB) &&
+            CB->isOperandBundleOfType(LLVMContext::OB_gc_live,
+                                      U.getOperandNo()))
+          continue;
         if (!CB->isArgOperand(&U))
           return false;
         unsigned ArgNo = CB->getArgOperandNo(&U);

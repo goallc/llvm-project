@@ -100,8 +100,14 @@ LLVM_ABI void computeValueLLTs(const DataLayout &DL, Type &Ty,
 /// exactly one byval argument, with no intervening call or escaping address.
 /// The callee's argument layout describes the outgoing copy, so the source
 /// object has no semantic lifetime at the consuming call's safepoint.
+///
+/// When \p AllowGCLiveUses is true, direct uses of the alloca in gc-live
+/// bundles are ignored. This is only appropriate when the caller separately
+/// guarantees that those uses describe the rematerializable address of a Go
+/// call carrier rather than live object contents.
 LLVM_ABI bool isSingleByValCallCarrier(const AllocaInst &Alloca,
-                                       const DataLayout &DL);
+                                       const DataLayout &DL,
+                                       bool AllowGCLiveUses = false);
 
 /// ExtractTypeInfo - Returns the type info, possibly bitcast, encoded in V.
 LLVM_ABI GlobalValue *ExtractTypeInfo(Value *V);
