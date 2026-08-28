@@ -1,5 +1,5 @@
-; RUN: llc -mtriple=x86_64-unknown-linux-goobj -stop-after=finalize-isel -o - %s | FileCheck %s --check-prefix=MIR
-; RUN: llc -mtriple=aarch64-unknown-linux-goobj -stop-after=finalize-isel -o - %s | FileCheck %s --check-prefix=MIR
+; RUN: llc -mtriple=x86_64-unknown-linux-goobj -stop-after=finalize-isel -o - %s | FileCheck %s --check-prefixes=MIR,X86-MIR
+; RUN: llc -mtriple=aarch64-unknown-linux-goobj -stop-after=finalize-isel -o - %s | FileCheck %s --check-prefixes=MIR,AARCH64-MIR
 ; RUN: llc -mtriple=x86_64-unknown-linux-gnu -stop-after=finalize-isel -o - %s | FileCheck %s --check-prefix=GENERIC
 ; RUN: llc -mtriple=aarch64-unknown-linux-gnu -stop-after=finalize-isel -o - %s | FileCheck %s --check-prefix=GENERIC
 
@@ -11,6 +11,8 @@ declare goabi0 void @roundtrip(
     ptr goret(%pair) align 8 "goretindex"="0")
 declare goabi0 void @make_pointer(
     ptr goret(ptr addrspace(1)) align 8 "goretindex"="0")
+declare goabi0 void @make_byte(
+    ptr goret(i8) align 1 "goretindex"="0")
 declare goabi0 void @consume(
     ptr byval(i64) align 8)
 declare token @llvm.experimental.gc.statepoint.p0(
@@ -98,6 +100,41 @@ entry:
       @llvm.experimental.gc.relocate.p1(
       token %after, i32 0, i32 0)
   ret ptr addrspace(1) %relocated
+}
+
+; Projection forwarding uses a virtual register directly and therefore only
+; accepts value types which are already legal on the target. i8 is legal on
+; X86, but AArch64 promotes it to a wider register type through the ordinary
+; memory path. In particular, do not form an illegal CopyToReg after #110 makes
+; an address-only gc-live use transparent to the carrier analysis.
+;
+; X86-MIR-LABEL: name: byte_result
+; X86-MIR: stack:           []
+; X86-MIR: STATEPOINT {{.*}}@make_byte
+; X86-MIR: RET
+; AARCH64-MIR-LABEL: name: byte_result
+; AARCH64-MIR: stack:
+; AARCH64-MIR: name: result
+; AARCH64-MIR: STATEPOINT {{.*}}@make_byte
+; AARCH64-MIR: RET
+define goabiinternal i8 @byte_result()
+    gc "statepoint-example" {
+entry:
+  %result = alloca i8, align 1
+  %before = call goabiinternal token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 5, i32 0, ptr elementtype(void ()) @safepoint,
+          i32 0, i32 0, i32 0, i32 0)
+      [ "gc-live"(ptr %result) ]
+  %call = call goabi0 token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 6, i32 0, ptr elementtype(void (ptr)) @make_byte,
+          i32 1, i32 0,
+          ptr goret(i8) align 1 "goretindex"="0" %result,
+          i32 0, i32 0)
+      [ "gc-live"(ptr %result) ]
+  %value = load i8, ptr %result, align 1
+  ret i8 %value
 }
 
 ; A deopt use can describe object contents or other externally observable

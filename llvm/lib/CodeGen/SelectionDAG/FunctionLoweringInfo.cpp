@@ -244,7 +244,12 @@ static void findGoRetValueProjections(FunctionLoweringInfo &FuncInfo) {
       }
 
       EVT VT = FuncInfo.TLI->getValueType(DL, LI->getType());
-      if (!VT.isSimple() ||
+      // Target call lowering copies each projection through one virtual
+      // register without running the ordinary getCopyToParts legalization.
+      // Keep promoted scalar types (for example i8 on AArch64) on the memory
+      // path; otherwise CopyToReg would introduce an illegal type after the
+      // statepoint DAG has already been built.
+      if (!VT.isSimple() || !FuncInfo.TLI->isTypeLegal(VT) ||
           FuncInfo.TLI->getNumRegisters(AI->getContext(), VT) != 1) {
         Valid = false;
         break;
