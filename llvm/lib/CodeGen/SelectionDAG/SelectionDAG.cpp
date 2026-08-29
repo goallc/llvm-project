@@ -9583,12 +9583,28 @@ static SDValue tryForwardByValStores(SelectionDAG &DAG, const SDLoc &DL,
   if (MF.getTarget().getOptLevel() == CodeGenOptLevel::None)
     return SDValue();
 
-  // Incoming argument-copy elision has priority. Its result is a fixed
-  // canonical home whose initialization remains required even if that home is
-  // subsequently used as a byval source.
-  if (MFI.isFixedObjectIndex(FI))
-    return SDValue();
+  // Argument-copy elision can remap a Go call carrier to a fixed canonical
+  // register-argument home. Keep that ABI home for the pre-frame morestack
+  // spill/reload path, but forward the carrier's initializing SSA values
+  // directly to the outgoing call area. Once the carrier proof below succeeds,
+  // its hot-path initialization is dead: no use reads the source contents, and
+  // the target's morestack path initializes the home itself.
+  // Ordinary fixed objects, including stack-passed arguments whose value is
+  // already in memory, remain ineligible.
   const AllocaInst *AI = MFI.getObjectAllocation(FI);
+  bool KeepFixedHome = false;
+  if (MFI.isFixedObjectIndex(FI)) {
+    FunctionLoweringInfo *FLI = DAG.getFunctionLoweringInfo();
+    if (!FLI)
+      return SDValue();
+    for (const auto &[Candidate, CandidateFI] : FLI->StaticAllocaMap) {
+      if (CandidateFI != FI || !FLI->isGoByValCallCarrier(Candidate))
+        continue;
+      AI = Candidate;
+      KeepFixedHome = true;
+      break;
+    }
+  }
   const bool AllowGCLiveUses =
       MF.getTarget().getTargetTriple().isOSBinFormatGoObj() &&
       goabi::isGoCallingConv(MF.getFunction().getCallingConv());
@@ -9683,9 +9699,11 @@ static SDValue tryForwardByValStores(SelectionDAG &DAG, const SDLoc &DL,
   };
   for (StoreSDNode *ST : Stores)
     RemoveChainNode(ST);
-  for (LifetimeSDNode *Lifetime : Lifetimes)
-    RemoveChainNode(Lifetime);
-  MFI.RemoveStackObject(FI);
+  if (!KeepFixedHome) {
+    for (LifetimeSDNode *Lifetime : Lifetimes)
+      RemoveChainNode(Lifetime);
+    MFI.RemoveStackObject(FI);
+  }
 
   SmallVector<SDValue, 8> NewStores;
   for (const ForwardedStore &ST : Forwarded) {
