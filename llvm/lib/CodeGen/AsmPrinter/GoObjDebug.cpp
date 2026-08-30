@@ -93,6 +93,33 @@ public:
 
   void beginModule(Module *Module) override {
     M = Module;
+
+    unsigned DwarfVersion = 0;
+    if (const NamedMDNode *Config = M->getNamedMetadata("goobj.debug.config")) {
+      if (Config->getNumOperands() != 1)
+        report_fatal_error("expected one !goobj.debug.config entry");
+      const MDNode *Entry = Config->getOperand(0);
+      if (Entry->getNumOperands() == 0 ||
+          !isa_and_nonnull<MDString>(Entry->getOperand(0)) ||
+          cast<MDString>(Entry->getOperand(0))->getString() != "pcln-v1")
+        report_fatal_error("unsupported GoObj debug configuration");
+      if (Entry->getNumOperands() != 1) {
+        if (Entry->getNumOperands() != 3 ||
+            !isa_and_nonnull<MDString>(Entry->getOperand(1)) ||
+            cast<MDString>(Entry->getOperand(1))->getString() != "dwarf-v1" ||
+            !isa_and_nonnull<MDString>(Entry->getOperand(2)))
+          report_fatal_error("unsupported GoObj DWARF configuration");
+        StringRef Version = cast<MDString>(Entry->getOperand(2))->getString();
+        if (Version == "dwarf4")
+          DwarfVersion = 4;
+        else if (Version == "dwarf5")
+          DwarfVersion = 5;
+        else
+          report_fatal_error("unsupported GoObj DWARF version");
+      }
+    }
+    Asm.OutStreamer->getContext().setGoObjDwarfVersion(DwarfVersion);
+
     if (const NamedMDNode *Funcs = M->getNamedMetadata("goobj.debug.funcs")) {
       for (const MDNode *Entry : Funcs->operands()) {
         if (Entry->getNumOperands() != 2)
@@ -106,6 +133,74 @@ public:
           report_fatal_error("invalid !goobj.debug.funcs entry");
         if (!SubprogramSymbols.try_emplace(SP, Asm.getSymbol(GV)).second)
           report_fatal_error("duplicate !goobj.debug.funcs subprogram");
+      }
+    }
+
+    DenseMap<const DISubprogram *, std::vector<MCContext::GoObjDebugVariable>>
+        Variables;
+    if (const NamedMDNode *Vars = M->getNamedMetadata("goobj.debug.vars")) {
+      if (DwarfVersion == 0)
+        report_fatal_error(
+            "GoObj debug variables require a DWARF configuration");
+      for (const MDNode *Entry : Vars->operands()) {
+        if (Entry->getNumOperands() != 3)
+          report_fatal_error(
+              "expected !goobj.debug.vars entries to have three operands");
+        const auto *Var =
+            dyn_cast_or_null<DILocalVariable>(Entry->getOperand(0));
+        const auto *TypeName = dyn_cast_or_null<MDString>(Entry->getOperand(1));
+        const auto *FlagsMD =
+            dyn_cast_or_null<ConstantAsMetadata>(Entry->getOperand(2));
+        const auto *Flags =
+            FlagsMD ? dyn_cast<ConstantInt>(FlagsMD->getValue()) : nullptr;
+        if (!Var || !TypeName || !Flags)
+          report_fatal_error("invalid !goobj.debug.vars entry");
+        const DISubprogram *SP = Var->getScope()->getSubprogram();
+        if (!SP || !SubprogramSymbols.contains(SP))
+          report_fatal_error(
+              "GoObj debug variable has no exact subprogram symbol");
+
+        MCContext::GoObjDebugVariable Result;
+        Result.Name = Var->getName().str();
+        Result.TypeName = TypeName->getString().str();
+        Result.File = filePath(Var->getFile());
+        Result.DeclLine = Var->getLine();
+        Result.ArgNo = Var->getArg();
+        Result.IsReturn = (Flags->getZExtValue() & 1) != 0;
+        Variables[SP].push_back(std::move(Result));
+      }
+    }
+
+    if (DwarfVersion != 0) {
+      for (const auto &[SP, Symbol] : SubprogramSymbols) {
+        auto &SPVariables = Variables[SP];
+        llvm::sort(SPVariables, [](const auto &LHS, const auto &RHS) {
+          if ((LHS.ArgNo == 0) != (RHS.ArgNo == 0))
+            return LHS.ArgNo != 0;
+          if (LHS.ArgNo != RHS.ArgNo)
+            return LHS.ArgNo < RHS.ArgNo;
+          if (LHS.DeclLine != RHS.DeclLine)
+            return LHS.DeclLine < RHS.DeclLine;
+          if (LHS.Name != RHS.Name)
+            return LHS.Name < RHS.Name;
+          if (LHS.TypeName != RHS.TypeName)
+            return LHS.TypeName < RHS.TypeName;
+          if (LHS.File != RHS.File)
+            return LHS.File < RHS.File;
+          return LHS.IsReturn > RHS.IsReturn;
+        });
+        SPVariables.erase(llvm::unique(SPVariables,
+                                       [](const auto &LHS, const auto &RHS) {
+                                         return LHS.Name == RHS.Name &&
+                                                LHS.TypeName == RHS.TypeName &&
+                                                LHS.File == RHS.File &&
+                                                LHS.DeclLine == RHS.DeclLine &&
+                                                LHS.ArgNo == RHS.ArgNo;
+                                       }),
+                          SPVariables.end());
+        Asm.OutStreamer->getContext().setGoObjSubprogramDebugInfo(
+            Symbol, SP->getName(), filePath(SP->getFile()), SP->getLine(),
+            std::move(SPVariables));
       }
     }
   }
