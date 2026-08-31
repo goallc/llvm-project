@@ -2068,7 +2068,10 @@ uint64_t GoObjObjectWriter::writeObject() {
                                         const MCSymbol *Gotype) {
     if (!Gotype)
       report_fatal_error("GoObj DWARF type reference has no gotype symbol");
-    StringRef TypeName = Gotype->getName();
+    // Strip GoObj's storage-only identity suffixes before forming the linker
+    // DWARF symbol. R_USETYPE must retain the exact gotype identity (including
+    // a builtin index), while go:info.<type> is always the canonical name.
+    StringRef TypeName = GetSymbolName(Gotype);
     if (!TypeName.consume_front("type:") || TypeName.empty())
       report_fatal_error(Twine("invalid GoObj gotype symbol for DWARF: ") +
                          Gotype->getName());
