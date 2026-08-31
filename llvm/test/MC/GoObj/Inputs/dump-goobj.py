@@ -50,11 +50,26 @@ AUX_TYPES = {
 
 SYMBOL_TYPES = {
     1: "STEXT",
+    2: "STEXTFIPS",
+    3: "SRODATA",
+    4: "SRODATAFIPS",
+    5: "SNOPTRDATA",
+    6: "SNOPTRDATAFIPS",
+    7: "SDATA",
+    8: "SDATAFIPS",
+    9: "SBSS",
+    10: "SNOPTRBSS",
+    11: "STLSBSS",
+    12: "SDWARFCUINFO",
+    13: "SDWARFCONST",
     14: "SDWARFFCN",
     15: "SDWARFABSFCN",
+    16: "SDWARFTYPE",
+    17: "SDWARFVAR",
     18: "SDWARFRANGE",
     19: "SDWARFLOC",
     20: "SDWARFLINES",
+    21: "SDWARFADDR",
 }
 
 PKG_INDEX_NAMES = {
