@@ -131,7 +131,6 @@ public:
   struct GoObjStackMapEntry {
     const MCExpr *CallsiteOffsetExpr;
     uint64_t ID;
-    bool IsIndirectCall;
     uint64_t StackSize;
     uint32_t PointerSize;
     uint32_t NumDeoptLocations;
@@ -323,6 +322,11 @@ private:
   /// Go object pcsp entries keyed by MC symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjPCSPEntry>>
       GoObjSymbolPCSPEntries;
+
+  /// Final-layout labels at non-tail indirect call instructions, keyed by
+  /// their containing Go object function.
+  DenseMap<const MCSymbol *, std::vector<const MCSymbol *>>
+      GoObjSymbolIndirectCallLabels;
 
   /// Go object asynchronous-preemption PC-data transitions keyed by symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjUnsafePointEntry>>
@@ -935,6 +939,19 @@ public:
   getGoObjSymbolPCSPEntries(const MCSymbol *Sym) const {
     auto It = GoObjSymbolPCSPEntries.find(Sym);
     if (It == GoObjSymbolPCSPEntries.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void addGoObjSymbolIndirectCallLabel(const MCSymbol *Sym,
+                                       const MCSymbol *Label) {
+    GoObjSymbolIndirectCallLabels[Sym].push_back(Label);
+  }
+
+  const std::vector<const MCSymbol *> *
+  getGoObjSymbolIndirectCallLabels(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolIndirectCallLabels.find(Sym);
+    if (It == GoObjSymbolIndirectCallLabels.end())
       return nullptr;
     return &It->second;
   }

@@ -138,6 +138,7 @@ void X86AsmPrinter::StackMapShadowTracker::emitShadowPadding(
 }
 
 void X86AsmPrinter::EmitAndCountInstruction(MCInst &Inst) {
+  emitGoObjIndirectCallMarker(Inst);
   OutStreamer->emitInstruction(Inst, getSubtargetInfo());
   SMShadowTracker.count(Inst, getSubtargetInfo(), CodeEmitter.get());
 }
@@ -846,6 +847,7 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
     MCInst CallInst;
     CallInst.setOpcode(CallOpcode);
     CallInst.addOperand(CallTargetMCOp);
+    emitGoObjIndirectCallMarker(CallInst);
     OutStreamer->emitInstruction(CallInst, getSubtargetInfo());
     maybeEmitNopAfterCallForWindowsEH(&MI);
   }
@@ -2726,7 +2728,38 @@ void X86AsmPrinter::emitCallInstruction(const llvm::MCInst &MCI) {
   // after it.
   SMShadowTracker.emitShadowPadding(*OutStreamer, getSubtargetInfo());
   // Then emit the call
+  emitGoObjIndirectCallMarker(MCI);
   OutStreamer->emitInstruction(MCI, getSubtargetInfo());
+}
+
+void X86AsmPrinter::emitGoObjIndirectCallMarker(const llvm::MCInst &MCI) {
+  if (!OutContext.isGoObj() || !CurrentFnSym)
+    return;
+
+  switch (MCI.getOpcode()) {
+  case X86::CALL16r:
+  case X86::CALL16m:
+  case X86::CALL32r:
+  case X86::CALL32m:
+  case X86::CALL16r_NT:
+  case X86::CALL16m_NT:
+  case X86::CALL32r_NT:
+  case X86::CALL32m_NT:
+  case X86::FARCALL32m:
+  case X86::FARCALL16m:
+  case X86::CALL64r:
+  case X86::CALL64m:
+  case X86::CALL64r_NT:
+  case X86::CALL64m_NT:
+  case X86::FARCALL64m:
+    break;
+  default:
+    return;
+  }
+
+  MCSymbol *Label = OutContext.createTempSymbol("goobj_callind", true);
+  OutStreamer->emitLabel(Label);
+  OutContext.addGoObjSymbolIndirectCallLabel(CurrentFnSym, Label);
 }
 
 // Determines whether a NOP is required after a CALL, so that Windows EH

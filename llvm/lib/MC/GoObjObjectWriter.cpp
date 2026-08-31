@@ -410,7 +410,6 @@ struct GoObjStatepointStackMaps {
   SmallString<0> Locals;
   SmallString<0> PCData;
   SmallString<0> OpenDefer;
-  SmallVector<uint32_t, 4> IndirectCallOffsets;
   SmallVector<StackObject, 4> StackObjects;
 };
 
@@ -1051,9 +1050,6 @@ makeStatepointStackMaps(const MCAssembler &Asm, const GoObjSymbol &Function,
   }
   if (!EntryArgsEntry)
     report_fatal_error("GoObj function has no entry argument stack map");
-  if (EntryArgsEntry->Entry->IsIndirectCall)
-    report_fatal_error("GoObj entry argument stack map is a callsite");
-
   SmallVector<GoObjStackMapPair, 8> Pairs;
   Pairs.push_back(BuildPair(*EntryArgsEntry->Entry));
   SmallVector<GoObjPCTabEntry, 16> PCDataEntries;
@@ -1066,7 +1062,6 @@ makeStatepointStackMaps(const MCAssembler &Asm, const GoObjSymbol &Function,
     if (Entry.Value == 0 && Entry.PC < Function.Size)
       PCDataEntries.push_back({Entry.PC, -1});
   std::optional<uint64_t> PreviousCallsitePC;
-  SmallVector<uint32_t, 4> IndirectCallOffsets;
   for (const ResolvedEntry &Resolved : ResolvedEntries) {
     if (Resolved.Entry->ID == GoObj::EntryArgsStackMapID)
       continue;
@@ -1074,13 +1069,6 @@ makeStatepointStackMaps(const MCAssembler &Asm, const GoObjSymbol &Function,
       report_fatal_error("GoObj statepoint callsites have duplicate PCs");
     PreviousCallsitePC = Resolved.CallsitePC;
     const MCContext::GoObjStackMapEntry &Entry = *Resolved.Entry;
-    if (Entry.IsIndirectCall) {
-      if (Resolved.CallsitePC >= Function.Size)
-        report_fatal_error(
-            "GoObj indirect statepoint callsite is outside its function");
-      IndirectCallOffsets.push_back(checkedUint32(
-          Resolved.CallsitePC, "GoObj indirect statepoint callsite offset"));
-    }
     if (Entry.PointerSize != PointerSize)
       report_fatal_error(
           "GoObj statepoint pointer size changes within a function");
@@ -1173,7 +1161,6 @@ makeStatepointStackMaps(const MCAssembler &Asm, const GoObjSymbol &Function,
   Result.PCData =
       makePCTab(-1, NormalizedPCDataEntries, Function.Size, PCQuantum);
   Result.OpenDefer = std::move(OpenDeferData);
-  Result.IndirectCallOffsets = std::move(IndirectCallOffsets);
   Result.StackObjects = std::move(FunctionStackObjects);
   return Result;
 }
@@ -2672,10 +2659,6 @@ uint64_t GoObjObjectWriter::writeObject() {
           GoObjStatepointStackMaps Maps =
               makeStatepointStackMaps(*Asm, Symbols[I], StackSize, ArgSize,
                                       PCQuantum, *Entries, PCSPEntries);
-          for (uint32_t Offset : Maps.IndirectCallOffsets)
-            Symbols[I].Relocations.push_back({Offset, 0, GoObj::R_CALLIND, 0,
-                                              GoObj::PkgIdxInvalid, 0,
-                                              std::nullopt});
           ArgsMap = std::move(Maps.Args);
           LocalsMap = std::move(Maps.Locals);
           StackMapIndex = std::move(Maps.PCData);
@@ -3210,6 +3193,33 @@ uint64_t GoObjObjectWriter::writeObject() {
       Source.Relocations.push_back({0, 0, GoObj::R_KEEP, Addend,
                                     TargetSymRef.PkgIdx, TargetSymRef.SymIdx,
                                     std::nullopt});
+    }
+  }
+
+  for (GoObjSymbol &Source : Symbols) {
+    if (!Source.Symbol)
+      continue;
+    const auto *Labels =
+        Asm->getContext().getGoObjSymbolIndirectCallLabels(Source.Symbol);
+    if (!Labels)
+      continue;
+    if ((Source.Type != GoObj::STEXT && Source.Type != GoObj::STEXTFIPS) ||
+        !Source.Symbol->isInSection())
+      report_fatal_error(
+          "GoObj indirect-call labels belong to a non-text symbol");
+    for (const MCSymbol *Label : *Labels) {
+      if (!Label || !Label->isInSection())
+        report_fatal_error("GoObj indirect-call label was not emitted");
+      if (&Label->getSection() != &Source.Symbol->getSection())
+        report_fatal_error(
+            "GoObj indirect-call label is in a different section");
+      uint64_t LabelOffset = Asm->getSymbolOffset(*Label);
+      if (LabelOffset < Source.SectionBegin || LabelOffset >= Source.SectionEnd)
+        report_fatal_error("GoObj indirect-call label is outside its function");
+      uint32_t Offset = checkedUint32(LabelOffset - Source.SectionBegin,
+                                      "GoObj indirect-call offset");
+      Source.Relocations.push_back({Offset, 0, GoObj::R_CALLIND, 0,
+                                    GoObj::PkgIdxInvalid, 0, std::nullopt});
     }
   }
 
