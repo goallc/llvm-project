@@ -183,7 +183,14 @@ public:
     std::string File;
     uint32_t DeclLine = 0;
     uint32_t ArgNo = 0;
+    uint16_t DictIndex = 0;
     bool IsReturn = false;
+  };
+
+  struct GoObjDebugGlobal {
+    const MCSymbol *Symbol = nullptr;
+    std::string Name;
+    std::string TypeName;
   };
 
   struct GoObjFunctionDebugInfo {
@@ -331,8 +338,10 @@ private:
       GoObjSymbolStackMapEntries;
 
   DenseMap<const MCSymbol *, GoObjFunctionDebugInfo> GoObjFunctionDebugInfos;
+  std::vector<GoObjDebugGlobal> GoObjDebugGlobals;
   DenseSet<const MCSymbol *> GoObjInlineAnchorSymbols;
   unsigned GoObjDwarfVersion = 0;
+  std::string GoObjDwarfPackageName;
 
   /// A mapping from a local label number and an instance count to a symbol.
   /// For example, in the assembly
@@ -993,6 +1002,14 @@ public:
     return It == GoObjFunctionDebugInfos.end() ? nullptr : &It->second;
   }
 
+  void addGoObjDebugGlobal(GoObjDebugGlobal Global) {
+    GoObjDebugGlobals.push_back(std::move(Global));
+  }
+
+  ArrayRef<GoObjDebugGlobal> getGoObjDebugGlobals() const {
+    return GoObjDebugGlobals;
+  }
+
   void markGoObjInlineAnchor(const MCSymbol *Sym) {
     GoObjInlineAnchorSymbols.insert(Sym);
   }
@@ -1008,6 +1025,12 @@ public:
   }
 
   unsigned getGoObjDwarfVersion() const { return GoObjDwarfVersion; }
+
+  void setGoObjDwarfPackageName(StringRef Name) {
+    GoObjDwarfPackageName = Name.str();
+  }
+
+  StringRef getGoObjDwarfPackageName() const { return GoObjDwarfPackageName; }
 
   /// Allocates and returns a new `WasmSignature` instance (with empty parameter
   /// and return type lists).

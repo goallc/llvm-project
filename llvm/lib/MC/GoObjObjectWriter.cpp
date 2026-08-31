@@ -1929,6 +1929,11 @@ uint64_t GoObjObjectWriter::writeObject() {
           Flag = Flags->first;
           Flag2 = Flags->second;
         }
+        StringRef NameAfterPackage = Name;
+        if (!Config.PackagePath.empty() &&
+            NameAfterPackage.consume_front(Config.PackagePath) &&
+            NameAfterPackage.starts_with("..dict"))
+          Flag2 |= GoObj::SymFlagDict;
         Align = Asm->getContext().getGoObjSymbolAlignment(MCSym).value_or(0);
       } else {
         Flag |= GoObj::SymFlagLocal;
@@ -2075,6 +2080,41 @@ uint64_t GoObjObjectWriter::writeObject() {
     Carrier.Relocations.push_back(UseType);
   };
 
+  auto AppendDwarfParametricTypes =
+      [&](GoObjDwarfCarrierData &Carrier,
+          ArrayRef<MCContext::GoObjDebugVariable> Variables) {
+        DenseMap<uint16_t, uint32_t> Offsets;
+        for (const MCContext::GoObjDebugVariable &Var : Variables) {
+          if (Var.DictIndex == 0 || Offsets.contains(Var.DictIndex))
+            continue;
+          uint32_t Offset = checkedUint32(Carrier.Data.size(),
+                                          "DWARF dictionary type offset");
+          Offsets[Var.DictIndex] = Offset;
+          appendUvarint(Carrier.Data, 32); // DW_ABRV_DICT_INDEX.
+          appendCString(Carrier.Data,
+                        (Twine(".param") + Twine(Var.DictIndex - 1)).str());
+          AppendDwarfTypeReference(Carrier, Var.TypeName);
+          appendUvarint(Carrier.Data, Var.DictIndex - 1);
+        }
+        return Offsets;
+      };
+
+  auto AppendDwarfVariableTypeReference =
+      [&](GoObjDwarfCarrierData &Carrier,
+          const MCContext::GoObjDebugVariable &Var,
+          const DenseMap<uint16_t, uint32_t> &ParametricTypeOffsets,
+          uint32_t CarrierSymbol) {
+        if (Var.DictIndex == 0) {
+          AppendDwarfTypeReference(Carrier, Var.TypeName);
+          return;
+        }
+        auto It = ParametricTypeOffsets.find(Var.DictIndex);
+        if (It == ParametricTypeOffsets.end())
+          report_fatal_error("GoObj DWARF variable has no dictionary type");
+        appendDwarfRelocation(Carrier.Data, Carrier.Relocations, 4,
+                              GoObj::R_DWARFSECREF, It->second, CarrierSymbol);
+      };
+
   auto GetOrAddDwarfAbstract = [&](const MCSymbol *Callee) {
     if (!Callee)
       report_fatal_error("GoObj DWARF abstract function has no callee");
@@ -2090,12 +2130,15 @@ uint64_t GoObjObjectWriter::writeObject() {
     uint32_t Line =
         DebugInfo && DebugInfo->StartLine != 0 ? DebugInfo->StartLine : 1;
     GoObjDwarfCarrierData Carrier;
+    uint32_t CarrierIndex = checkedUint32(Symbols.size(), "symbol count");
     appendUvarint(Carrier.Data, 5); // DW_ABRV_FUNCTION_ABSTRACT.
     appendCString(Carrier.Data, Name);
     Carrier.Data.push_back(1); // DW_INL_inlined.
     appendUvarint(Carrier.Data, Line);
     Carrier.Data.push_back(1); // External.
     if (DebugInfo) {
+      DenseMap<uint16_t, uint32_t> ParametricTypeOffsets =
+          AppendDwarfParametricTypes(Carrier, DebugInfo->Variables);
       for (const MCContext::GoObjDebugVariable &Var : DebugInfo->Variables) {
         if (Var.ArgNo != 0) {
           appendUvarint(Carrier.Data, 34); // Abstract formal parameter.
@@ -2106,7 +2149,8 @@ uint64_t GoObjObjectWriter::writeObject() {
           appendCString(Carrier.Data, Var.Name);
           appendUvarint(Carrier.Data, Var.DeclLine);
         }
-        AppendDwarfTypeReference(Carrier, Var.TypeName);
+        AppendDwarfVariableTypeReference(Carrier, Var, ParametricTypeOffsets,
+                                         CarrierIndex);
       }
     }
     Carrier.Data.push_back(0);
@@ -2114,6 +2158,8 @@ uint64_t GoObjObjectWriter::writeObject() {
     uint32_t Index = addDwarfCarrierSymbol(
         Symbols, (Twine("go:info.") + Name + "$abstract").str(),
         GoObj::SDWARFABSFCN, GoObj::SymFlagDupok, std::move(Carrier));
+    if (Index != CarrierIndex)
+      report_fatal_error("GoObj DWARF abstract carrier index changed");
     DwarfAbstractSymbols[Callee] = Index;
     return Index;
   };
@@ -2482,6 +2528,11 @@ uint64_t GoObjObjectWriter::writeObject() {
         InfoCarrier.Data.push_back((Symbols[I].Flag & GoObj::SymFlagLocal) ? 0
                                                                            : 1);
 
+        uint32_t DwarfInfoIndex = checkedUint32(Symbols.size(), "symbol count");
+        DenseMap<uint16_t, uint32_t> ParametricTypeOffsets =
+            AppendDwarfParametricTypes(InfoCarrier,
+                                       FunctionDebugInfo->Variables);
+
         for (const MCContext::GoObjDebugVariable &Var :
              FunctionDebugInfo->Variables) {
           // These are the current Go DW_ABRV_PUTVAR_START+7/+13 forms: a
@@ -2491,7 +2542,8 @@ uint64_t GoObjObjectWriter::writeObject() {
           if (Var.ArgNo != 0)
             InfoCarrier.Data.push_back(Var.IsReturn ? 1 : 0);
           appendUvarint(InfoCarrier.Data, Var.DeclLine);
-          AppendDwarfTypeReference(InfoCarrier, Var.TypeName);
+          AppendDwarfVariableTypeReference(
+              InfoCarrier, Var, ParametricTypeOffsets, DwarfInfoIndex);
           // LLVM SSA, statepoint relocation, and register allocation can all
           // move a value after frontend lowering. Until an exact final-machine
           // expression is proven, encode optimized-out/unavailable, not a
@@ -2546,6 +2598,8 @@ uint64_t GoObjObjectWriter::writeObject() {
 
         uint32_t DwarfInfoSym = addDwarfCarrierSymbol(
             Symbols, "", GoObj::SDWARFFCN, 0, std::move(InfoCarrier));
+        if (DwarfInfoSym != DwarfInfoIndex)
+          report_fatal_error("GoObj DWARF function carrier index changed");
         uint32_t DwarfLinesSym = addDwarfCarrierSymbol(
             Symbols, "", GoObj::SDWARFLINES, 0,
             makeDwarfLines(LineInfo, CodeSize, PointerSize, I));
@@ -2655,6 +2709,54 @@ uint64_t GoObjObjectWriter::writeObject() {
         Symbols[I].Auxiliaries.push_back({GoObj::AuxPcinline, PcinlineSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, UnsafePointSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, StackMapIndexSym});
+    }
+  }
+
+  if (DwarfVersion != 0) {
+    uint32_t PointerSize = Asm->getContext().getAsmInfo().getCodePointerSize();
+    StringRef PackageName = Asm->getContext().getGoObjDwarfPackageName();
+    if (!PackageName.empty() && !Config.PackagePath.empty()) {
+      GoObjDwarfCarrierData Carrier;
+      Carrier.Data.append(PackageName.begin(), PackageName.end());
+      addDwarfCarrierSymbol(
+          Symbols, (Twine("go:cuinfo.packagename.") + Config.PackagePath).str(),
+          GoObj::SDWARFCUINFO, GoObj::SymFlagDupok, std::move(Carrier));
+    }
+
+    SmallVector<MCContext::GoObjDebugGlobal, 8> Globals(
+        Asm->getContext().getGoObjDebugGlobals());
+    llvm::sort(Globals, [](const auto &LHS, const auto &RHS) {
+      if (LHS.Name != RHS.Name)
+        return LHS.Name < RHS.Name;
+      if (LHS.TypeName != RHS.TypeName)
+        return LHS.TypeName < RHS.TypeName;
+      return false;
+    });
+    for (const MCContext::GoObjDebugGlobal &Global : Globals) {
+      std::optional<uint32_t> GlobalIndex;
+      for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
+           I != E; ++I) {
+        if (Symbols[I].Symbol == Global.Symbol) {
+          GlobalIndex = I;
+          break;
+        }
+      }
+      if (!GlobalIndex)
+        continue;
+
+      GoObjDwarfCarrierData Carrier;
+      appendUvarint(Carrier.Data, 10); // DW_ABRV_VARIABLE.
+      appendCString(Carrier.Data, Global.Name);
+      Carrier.Data.push_back(static_cast<char>(1 + PointerSize));
+      Carrier.Data.push_back(dwarf::DW_OP_addr);
+      appendDwarfRelocation(Carrier.Data, Carrier.Relocations, PointerSize,
+                            GoObj::R_ADDR, 0, *GlobalIndex);
+      AppendDwarfTypeReference(Carrier, Global.TypeName);
+      Carrier.Data.push_back(1); // External.
+      uint32_t DwarfInfo = addDwarfCarrierSymbol(Symbols, "", GoObj::SDWARFVAR,
+                                                 0, std::move(Carrier));
+      Symbols[*GlobalIndex].Auxiliaries.emplace_back(GoObj::AuxDwarfInfo,
+                                                     DwarfInfo);
     }
   }
 

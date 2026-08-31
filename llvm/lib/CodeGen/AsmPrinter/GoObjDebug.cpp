@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -95,6 +96,7 @@ public:
     M = Module;
 
     unsigned DwarfVersion = 0;
+    StringRef PackageName;
     if (const NamedMDNode *Config = M->getNamedMetadata("goobj.debug.config")) {
       if (Config->getNumOperands() != 1)
         report_fatal_error("expected one !goobj.debug.config entry");
@@ -104,7 +106,7 @@ public:
           cast<MDString>(Entry->getOperand(0))->getString() != "pcln-v1")
         report_fatal_error("unsupported GoObj debug configuration");
       if (Entry->getNumOperands() != 1) {
-        if (Entry->getNumOperands() != 3 ||
+        if ((Entry->getNumOperands() != 3 && Entry->getNumOperands() != 4) ||
             !isa_and_nonnull<MDString>(Entry->getOperand(1)) ||
             cast<MDString>(Entry->getOperand(1))->getString() != "dwarf-v1" ||
             !isa_and_nonnull<MDString>(Entry->getOperand(2)))
@@ -116,9 +118,17 @@ public:
           DwarfVersion = 5;
         else
           report_fatal_error("unsupported GoObj DWARF version");
+        if (Entry->getNumOperands() == 4) {
+          const auto *Name = dyn_cast_or_null<MDString>(Entry->getOperand(3));
+          if (!Name)
+            report_fatal_error("invalid GoObj DWARF package name");
+          PackageName = Name->getString();
+        }
       }
     }
-    Asm.OutStreamer->getContext().setGoObjDwarfVersion(DwarfVersion);
+    MCContext &Context = Asm.OutStreamer->getContext();
+    Context.setGoObjDwarfVersion(DwarfVersion);
+    Context.setGoObjDwarfPackageName(PackageName);
 
     if (const NamedMDNode *Funcs = M->getNamedMetadata("goobj.debug.funcs")) {
       for (const MDNode *Entry : Funcs->operands()) {
@@ -143,9 +153,9 @@ public:
         report_fatal_error(
             "GoObj debug variables require a DWARF configuration");
       for (const MDNode *Entry : Vars->operands()) {
-        if (Entry->getNumOperands() != 3)
-          report_fatal_error(
-              "expected !goobj.debug.vars entries to have three operands");
+        if (Entry->getNumOperands() != 3 && Entry->getNumOperands() != 4)
+          report_fatal_error("expected !goobj.debug.vars entries to have three "
+                             "or four operands");
         const auto *Var =
             dyn_cast_or_null<DILocalVariable>(Entry->getOperand(0));
         const auto *TypeName = dyn_cast_or_null<MDString>(Entry->getOperand(1));
@@ -153,7 +163,16 @@ public:
             dyn_cast_or_null<ConstantAsMetadata>(Entry->getOperand(2));
         const auto *Flags =
             FlagsMD ? dyn_cast<ConstantInt>(FlagsMD->getValue()) : nullptr;
-        if (!Var || !TypeName || !Flags)
+        const ConstantInt *DictIndex = nullptr;
+        if (Entry->getNumOperands() == 4) {
+          const auto *DictIndexMD =
+              dyn_cast_or_null<ConstantAsMetadata>(Entry->getOperand(3));
+          DictIndex = DictIndexMD
+                          ? dyn_cast<ConstantInt>(DictIndexMD->getValue())
+                          : nullptr;
+        }
+        if (!Var || !TypeName || !Flags ||
+            (Entry->getNumOperands() == 4 && !DictIndex))
           report_fatal_error("invalid !goobj.debug.vars entry");
         const DISubprogram *SP = Var->getScope()->getSubprogram();
         if (!SP || !SubprogramSymbols.contains(SP))
@@ -166,6 +185,13 @@ public:
         Result.File = filePath(Var->getFile());
         Result.DeclLine = Var->getLine();
         Result.ArgNo = Var->getArg();
+        if (DictIndex) {
+          uint64_t Value = DictIndex->getZExtValue();
+          if (Value > std::numeric_limits<uint16_t>::max())
+            report_fatal_error(
+                "GoObj debug variable dictionary index overflow");
+          Result.DictIndex = static_cast<uint16_t>(Value);
+        }
         Result.IsReturn = (Flags->getZExtValue() & 1) != 0;
         Variables[SP].push_back(std::move(Result));
       }
@@ -179,6 +205,8 @@ public:
             return LHS.ArgNo != 0;
           if (LHS.ArgNo != RHS.ArgNo)
             return LHS.ArgNo < RHS.ArgNo;
+          if (LHS.DictIndex != RHS.DictIndex)
+            return LHS.DictIndex < RHS.DictIndex;
           if (LHS.DeclLine != RHS.DeclLine)
             return LHS.DeclLine < RHS.DeclLine;
           if (LHS.Name != RHS.Name)
@@ -195,12 +223,38 @@ public:
                                                 LHS.TypeName == RHS.TypeName &&
                                                 LHS.File == RHS.File &&
                                                 LHS.DeclLine == RHS.DeclLine &&
-                                                LHS.ArgNo == RHS.ArgNo;
+                                                LHS.ArgNo == RHS.ArgNo &&
+                                                LHS.DictIndex == RHS.DictIndex;
                                        }),
                           SPVariables.end());
         Asm.OutStreamer->getContext().setGoObjSubprogramDebugInfo(
             Symbol, SP->getName(), filePath(SP->getFile()), SP->getLine(),
             std::move(SPVariables));
+      }
+    }
+
+    if (const NamedMDNode *Globals =
+            M->getNamedMetadata("goobj.debug.globals")) {
+      if (DwarfVersion == 0)
+        report_fatal_error("GoObj debug globals require a DWARF configuration");
+      for (const MDNode *Entry : Globals->operands()) {
+        if (Entry->getNumOperands() != 3)
+          report_fatal_error(
+              "expected !goobj.debug.globals entries to have three operands");
+        const auto *Expr =
+            dyn_cast_or_null<DIGlobalVariableExpression>(Entry->getOperand(0));
+        const auto *CAM =
+            dyn_cast_or_null<ConstantAsMetadata>(Entry->getOperand(1));
+        const auto *GV =
+            CAM ? dyn_cast<GlobalVariable>(CAM->getValue()) : nullptr;
+        const auto *TypeName = dyn_cast_or_null<MDString>(Entry->getOperand(2));
+        if (!Expr || !GV || !TypeName)
+          report_fatal_error("invalid !goobj.debug.globals entry");
+        MCContext::GoObjDebugGlobal Result;
+        Result.Symbol = Asm.getSymbol(GV);
+        Result.Name = Expr->getVariable()->getName().str();
+        Result.TypeName = TypeName->getString().str();
+        Context.addGoObjDebugGlobal(std::move(Result));
       }
     }
   }
