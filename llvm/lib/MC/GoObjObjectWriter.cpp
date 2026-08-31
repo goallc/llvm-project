@@ -2064,8 +2064,14 @@ uint64_t GoObjObjectWriter::writeObject() {
     return getOrAddFileIndex(FileIndexes, FilePaths, "llvm-ir");
   };
 
-  auto AppendDwarfTypeReference = [&](GoObjDwarfCarrierData &Carrier,
-                                      StringRef TypeName) {
+  auto AppendDwarfGotypeReference = [&](GoObjDwarfCarrierData &Carrier,
+                                        const MCSymbol *Gotype) {
+    if (!Gotype)
+      report_fatal_error("GoObj DWARF type reference has no gotype symbol");
+    StringRef TypeName = Gotype->getName();
+    if (!TypeName.consume_front("type:") || TypeName.empty())
+      report_fatal_error(Twine("invalid GoObj gotype symbol for DWARF: ") +
+                         Gotype->getName());
     MCSymbol *InfoType = Asm->getContext().getOrCreateSymbol(
         (Twine("go:info.") + TypeName).str());
     appendDwarfRelocation(Carrier.Data, Carrier.Relocations, 4,
@@ -2075,9 +2081,15 @@ uint64_t GoObjObjectWriter::writeObject() {
     // builds the canonical rich type DIE and resolves go:info.<type>.
     GoObjSymbol::Relocation UseType;
     UseType.Type = GoObj::R_USETYPE;
-    UseType.TargetSymbol =
-        Asm->getContext().getOrCreateSymbol((Twine("type:") + TypeName).str());
+    UseType.TargetSymbol = Gotype;
     Carrier.Relocations.push_back(UseType);
+  };
+
+  auto AppendDwarfTypeReference = [&](GoObjDwarfCarrierData &Carrier,
+                                      StringRef TypeName) {
+    const MCSymbol *Gotype =
+        Asm->getContext().getOrCreateSymbol((Twine("type:") + TypeName).str());
+    AppendDwarfGotypeReference(Carrier, Gotype);
   };
 
   auto AppendDwarfParametricTypes =
@@ -2726,37 +2738,58 @@ uint64_t GoObjObjectWriter::writeObject() {
     SmallVector<MCContext::GoObjDebugGlobal, 8> Globals(
         Asm->getContext().getGoObjDebugGlobals());
     llvm::sort(Globals, [](const auto &LHS, const auto &RHS) {
-      if (LHS.Name != RHS.Name)
-        return LHS.Name < RHS.Name;
-      if (LHS.TypeName != RHS.TypeName)
-        return LHS.TypeName < RHS.TypeName;
-      return false;
+      if (LHS.Symbol->getName() != RHS.Symbol->getName())
+        return LHS.Symbol->getName() < RHS.Symbol->getName();
+      return LHS.Name < RHS.Name;
     });
-    for (const MCContext::GoObjDebugGlobal &Global : Globals) {
+    Globals.erase(llvm::unique(Globals,
+                               [](const auto &LHS, const auto &RHS) {
+                                 return LHS.Symbol == RHS.Symbol &&
+                                        LHS.Name == RHS.Name;
+                               }),
+                  Globals.end());
+    for (size_t First = 0; First != Globals.size();) {
+      size_t Last = First + 1;
+      while (Last != Globals.size() &&
+             Globals[Last].Symbol == Globals[First].Symbol)
+        ++Last;
+
       std::optional<uint32_t> GlobalIndex;
       for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
            I != E; ++I) {
-        if (Symbols[I].Symbol == Global.Symbol) {
+        if (Symbols[I].Symbol == Globals[First].Symbol) {
           GlobalIndex = I;
           break;
         }
       }
-      if (!GlobalIndex)
+      if (!GlobalIndex) {
+        First = Last;
         continue;
+      }
+
+      const MCSymbol *Gotype =
+          Asm->getContext().getGoObjGotypeTarget(Globals[First].Symbol);
+      if (!Gotype)
+        report_fatal_error(Twine("GoObj DWARF global ") +
+                           Globals[First].Symbol->getName() +
+                           " has no !goobj.gotype target");
 
       GoObjDwarfCarrierData Carrier;
-      appendUvarint(Carrier.Data, 10); // DW_ABRV_VARIABLE.
-      appendCString(Carrier.Data, Global.Name);
-      Carrier.Data.push_back(static_cast<char>(1 + PointerSize));
-      Carrier.Data.push_back(dwarf::DW_OP_addr);
-      appendDwarfRelocation(Carrier.Data, Carrier.Relocations, PointerSize,
-                            GoObj::R_ADDR, 0, *GlobalIndex);
-      AppendDwarfTypeReference(Carrier, Global.TypeName);
-      Carrier.Data.push_back(1); // External.
+      for (size_t I = First; I != Last; ++I) {
+        appendUvarint(Carrier.Data, 10); // DW_ABRV_VARIABLE.
+        appendCString(Carrier.Data, Globals[I].Name);
+        Carrier.Data.push_back(static_cast<char>(1 + PointerSize));
+        Carrier.Data.push_back(dwarf::DW_OP_addr);
+        appendDwarfRelocation(Carrier.Data, Carrier.Relocations, PointerSize,
+                              GoObj::R_ADDR, 0, *GlobalIndex);
+        AppendDwarfGotypeReference(Carrier, Gotype);
+        Carrier.Data.push_back(1); // External.
+      }
       uint32_t DwarfInfo = addDwarfCarrierSymbol(Symbols, "", GoObj::SDWARFVAR,
                                                  0, std::move(Carrier));
       Symbols[*GlobalIndex].Auxiliaries.emplace_back(GoObj::AuxDwarfInfo,
                                                      DwarfInfo);
+      First = Last;
     }
   }
 

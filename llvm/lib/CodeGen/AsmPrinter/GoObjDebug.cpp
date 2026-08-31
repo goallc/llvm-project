@@ -18,6 +18,7 @@
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCContext.h"
@@ -233,29 +234,34 @@ public:
       }
     }
 
-    if (const NamedMDNode *Globals =
-            M->getNamedMetadata("goobj.debug.globals")) {
-      if (DwarfVersion == 0)
-        report_fatal_error("GoObj debug globals require a DWARF configuration");
-      for (const MDNode *Entry : Globals->operands()) {
-        if (Entry->getNumOperands() != 3)
-          report_fatal_error(
-              "expected !goobj.debug.globals entries to have three operands");
-        const auto *Expr =
-            dyn_cast_or_null<DIGlobalVariableExpression>(Entry->getOperand(0));
-        const auto *CAM =
-            dyn_cast_or_null<ConstantAsMetadata>(Entry->getOperand(1));
-        const auto *GV =
-            CAM ? dyn_cast<GlobalVariable>(CAM->getValue()) : nullptr;
-        const auto *TypeName = dyn_cast_or_null<MDString>(Entry->getOperand(2));
-        if (!Expr || !GV || !TypeName)
-          report_fatal_error("invalid !goobj.debug.globals entry");
-        MCContext::GoObjDebugGlobal Result;
-        Result.Symbol = Asm.getSymbol(GV);
-        Result.Name = Expr->getVariable()->getName().str();
-        Result.TypeName = TypeName->getString().str();
-        Context.addGoObjDebugGlobal(std::move(Result));
+    if (DwarfVersion != 0) {
+      SmallVector<MCContext::GoObjDebugGlobal, 8> Globals;
+      for (const GlobalVariable &GV : M->globals()) {
+        SmallVector<DIGlobalVariableExpression *, 1> Expressions;
+        GV.getDebugInfo(Expressions);
+        for (const DIGlobalVariableExpression *Expression : Expressions) {
+          const DIGlobalVariable *Variable = Expression->getVariable();
+          if (!Variable)
+            report_fatal_error("GoObj global debug attachment has no variable");
+          MCContext::GoObjDebugGlobal Result;
+          Result.Symbol = Asm.getSymbol(&GV);
+          Result.Name = Variable->getName().str();
+          Globals.push_back(std::move(Result));
+        }
       }
+      llvm::sort(Globals, [](const auto &LHS, const auto &RHS) {
+        if (LHS.Symbol->getName() != RHS.Symbol->getName())
+          return LHS.Symbol->getName() < RHS.Symbol->getName();
+        return LHS.Name < RHS.Name;
+      });
+      Globals.erase(llvm::unique(Globals,
+                                 [](const auto &LHS, const auto &RHS) {
+                                   return LHS.Symbol == RHS.Symbol &&
+                                          LHS.Name == RHS.Name;
+                                 }),
+                    Globals.end());
+      for (MCContext::GoObjDebugGlobal &Global : Globals)
+        Context.addGoObjDebugGlobal(std::move(Global));
     }
   }
 

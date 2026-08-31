@@ -190,7 +190,6 @@ public:
   struct GoObjDebugGlobal {
     const MCSymbol *Symbol = nullptr;
     std::string Name;
-    std::string TypeName;
   };
 
   struct GoObjFunctionDebugInfo {
