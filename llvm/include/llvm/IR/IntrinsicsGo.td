@@ -66,19 +66,4 @@ let TargetPrefix = "x86" in {
       Intrinsic<[llvm_i64_ty, llvm_i64_ty],
                 [llvm_i64_ty, llvm_i64_ty, llvm_i64_ty], [IntrNoMem]>;
 
-  // Go's generic SSA keeps CPU-feature guards in the control-flow graph while
-  // LLVM lowering happens before the target-specific Go SSA rewrites. This
-  // intrinsic preserves the fact that the instruction is guarded, so X86
-  // codegen may select it without enabling the feature for the whole function.
-  def int_x86_go_sse41_round_f64
-      : DefaultAttrsIntrinsic<[llvm_double_ty],
-                              [llvm_double_ty, llvm_i32_ty],
-                              [IntrNoMem, ImmArg<ArgIndex<1>>]>;
-
-  // This is emitted only behind Go's runtime FMA feature check (or when
-  // GOAMD64 already guarantees FMA).
-  def int_x86_go_fma_f64
-      : DefaultAttrsIntrinsic<[llvm_double_ty],
-                              [llvm_double_ty, llvm_double_ty, llvm_double_ty],
-                              [IntrNoMem]>;
 }
