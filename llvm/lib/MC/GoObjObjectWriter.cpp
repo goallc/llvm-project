@@ -1742,10 +1742,12 @@ uint64_t GoObjObjectWriter::writeObject() {
   StringRef ABI0Suffix = GoObj::ABI0SymbolSuffix;
   StringRef BuiltinPrefix = GoObj::BuiltinSymbolSuffixPrefix;
   StringRef LinknameSuffix = GoObj::LinknameSymbolSuffix;
+  StringRef FMVPrefix = GoObj::FMVSymbolSuffixPrefix;
   struct GoObjSymbolIdentity {
     StringRef Name;
     std::optional<uint32_t> BuiltinIndex;
     bool IsLinknameRef = false;
+    bool IsFMVImplementation = false;
     bool IsABI0 = false;
   };
   auto GetSymbolIdentity = [&](const MCSymbol *Sym) {
@@ -1755,6 +1757,20 @@ uint64_t GoObjObjectWriter::writeObject() {
     bool IsABI0 = Name.consume_back(ABI0Suffix);
     if (IsABI0 && (Name.empty() || Name.ends_with(ABI0Suffix)))
       report_fatal_error("invalid Go ABI0 symbol name");
+
+    bool IsFMVImplementation = false;
+    size_t FMVBegin = Name.rfind(FMVPrefix);
+    if (FMVBegin != StringRef::npos) {
+      StringRef Base = Name.take_front(FMVBegin);
+      StringRef Tag = Name.drop_front(FMVBegin + FMVPrefix.size());
+      if (Base.empty() || Base.contains(FMVPrefix) || !Tag.consume_back(">") ||
+          Tag.empty() || !llvm::all_of(Tag, [](char C) {
+            return isAlnum(C) || C == '.' || C == '_' || C == '-';
+          }))
+        report_fatal_error("invalid Go FMV implementation symbol name");
+      Name = Base;
+      IsFMVImplementation = true;
+    }
 
     bool IsLinknameRef = Name.consume_back(LinknameSuffix);
     if (Name.contains(LinknameSuffix))
@@ -1776,21 +1792,30 @@ uint64_t GoObjObjectWriter::writeObject() {
     }
     if (BuiltinIndex && IsLinknameRef)
       report_fatal_error("conflicting Go builtin and linkname symbol identity");
+    if (IsFMVImplementation && (BuiltinIndex || IsLinknameRef))
+      report_fatal_error("conflicting Go FMV implementation symbol identity");
     if ((BuiltinIndex || IsLinknameRef) &&
         (Name.empty() || Name.contains(BuiltinPrefix) ||
          Name.contains(LinknameSuffix)))
       report_fatal_error("invalid Go builtin symbol name");
-    return GoObjSymbolIdentity{Name, BuiltinIndex, IsLinknameRef, IsABI0};
+    if (Name.contains(FMVPrefix))
+      report_fatal_error("invalid Go FMV implementation symbol name");
+    return GoObjSymbolIdentity{Name, BuiltinIndex, IsLinknameRef,
+                               IsFMVImplementation, IsABI0};
   };
   auto GetSymbolName = [&](const MCSymbol *Sym) -> StringRef {
     return GetSymbolIdentity(Sym).Name;
   };
   auto GetSymbolABI = [&](const MCSymbol *Sym, bool IsFunction) {
-    if (GetSymbolIdentity(Sym).IsABI0) {
-      if (!IsFunction)
-        report_fatal_error("Go ABI0 suffix requires a function symbol");
+    GoObjSymbolIdentity Identity = GetSymbolIdentity(Sym);
+    if ((Identity.IsABI0 || Identity.IsFMVImplementation) && !IsFunction)
+      report_fatal_error(Identity.IsFMVImplementation
+                             ? "Go FMV suffix requires a function symbol"
+                             : "Go ABI0 suffix requires a function symbol");
+    if (Identity.IsFMVImplementation)
+      return GoObj::SymABIstatic;
+    if (Identity.IsABI0)
       return GoObj::SymABI0;
-    }
     return IsFunction ? GoObj::SymABIInternal : GoObj::SymABI0;
   };
 
@@ -1828,6 +1853,8 @@ uint64_t GoObjObjectWriter::writeObject() {
     if (Identity.BuiltinIndex || Identity.IsLinknameRef)
       report_fatal_error(
           "Go builtin and linkname suffixes require an undefined symbol");
+    if (Identity.IsFMVImplementation)
+      report_fatal_error("Go FMV suffix requires a function symbol");
     if (Identity.IsABI0)
       report_fatal_error("Go ABI0 suffix requires a function symbol");
     GoObjSymbol GoSym;
@@ -3044,6 +3071,8 @@ uint64_t GoObjObjectWriter::writeObject() {
 
     if (Target->isUndefined()) {
       GoObjSymbolIdentity Identity = GetSymbolIdentity(Target);
+      if (Identity.IsFMVImplementation)
+        report_fatal_error("Go FMV suffix requires a defined function symbol");
       if (const MCContext::GoObjImportedSymbolRef *Metadata =
               Asm->getContext().getGoObjImportedSymbolRef(Target)) {
         if (Identity.BuiltinIndex || Identity.IsLinknameRef)
