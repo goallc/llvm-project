@@ -36,6 +36,14 @@ inline constexpr char BuiltinSymbolSuffixPrefix[] = "<builtin.";
 // name-based non-package reference classification.
 inline constexpr char LinknameSymbolSuffix[] = "<linkname>";
 
+// Compiler-generated function multiversion implementations carry this prefix
+// followed by a non-empty implementation tag and a closing '>'. The suffix is
+// a storage identity only: GoObj serialization strips it, keeps the source
+// function name, and records SymABIstatic so multiple implementations with the
+// same source name remain distinct by symbol index. For ABI0 functions this
+// suffix precedes ABI0SymbolSuffix.
+inline constexpr char FMVSymbolSuffixPrefix[] = "<goallc.fmv.";
+
 // "GoNoSplt" encoded as the stable STACKMAP identifier for the function-level
 // entry argument pointer map. This record is metadata-only: it is present for
 // both split and nosplit functions and never denotes a callsite.
