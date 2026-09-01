@@ -23,17 +23,28 @@ using namespace llvm;
 namespace llvm::goabi {
 
 bool isSupportedMustTailCall(const Function &Caller, const CallBase &CB) {
-  const Function *Callee = CB.getCalledFunction();
   CallingConv::ID CallerCC = Caller.getCallingConv();
   CallingConv::ID CalleeCC = CB.getCallingConv();
-  bool CompatibleCCs =
-      CallerCC == CalleeCC ||
-      (CallerCC == CallingConv::GoABI0 &&
-       CalleeCC == CallingConv::GoABIInternal);
-  return CB.isMustTailCall() && Callee && isGoCallingConv(CallerCC) &&
-         isGoCallingConv(CalleeCC) && CompatibleCCs && !Caller.isVarArg() &&
-         !CB.getFunctionType()->isVarArg() && Caller.arg_empty() &&
-         CB.arg_empty() && Caller.getReturnType()->isVoidTy() &&
+  if (!CB.isMustTailCall() || !isGoCallingConv(CallerCC) ||
+      !isGoCallingConv(CalleeCC) || Caller.isVarArg() ||
+      CB.getFunctionType()->isVarArg())
+    return false;
+
+  // An exact-signature transfer within one Go calling convention reuses the
+  // caller's register and stack argument/result layout. This includes an
+  // indirect transfer: the IR function type and ABI-impacting call attributes
+  // still provide the complete mechanical contract.
+  if (CallerCC == CalleeCC)
+    return Caller.getFunctionType() == CB.getFunctionType() &&
+           hasTupleResultsAttr(Caller) == hasTupleResultsAttr(CB);
+
+  // Keep the ABI0-to-ABIInternal transition deliberately narrow. Unlike a
+  // same-ABI transfer, its argument and result layouts are not interchangeable.
+  const Function *Callee = CB.getCalledFunction();
+  return CallerCC == CallingConv::GoABI0 &&
+         CalleeCC == CallingConv::GoABIInternal && Callee &&
+         Caller.arg_empty() && CB.arg_empty() &&
+         Caller.getReturnType()->isVoidTy() &&
          CB.getFunctionType()->getReturnType()->isVoidTy();
 }
 

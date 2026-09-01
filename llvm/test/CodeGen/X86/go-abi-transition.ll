@@ -57,6 +57,37 @@ entry:
   ret void
 }
 
+declare goabiinternal { double, double } @tuple_tail_target(
+    double, double, double) #0
+
+@tuple_tail_slot = internal global ptr @tuple_tail_target,
+    section ".noptrdata", align 8
+
+define goabiinternal { double, double } @tuple_tail_direct(
+    double %x, double %y, double %z) #0 {
+; ASM-LABEL: tuple_tail_direct:
+; ASM-NOT: callq tuple_tail_target
+; ASM: jmp tuple_tail_target
+; ASM-NOT: retq
+entry:
+  %result = musttail call goabiinternal { double, double }
+      @tuple_tail_target(double %x, double %y, double %z) #0
+  ret { double, double } %result
+}
+
+define goabiinternal { double, double } @tuple_tail_indirect(
+    double %x, double %y, double %z) #0 {
+; ASM-LABEL: tuple_tail_indirect:
+; ASM-NOT: callq
+; ASM: jmpq *
+; ASM-NOT: retq
+entry:
+  %target = load ptr, ptr @tuple_tail_slot, align 8
+  %result = musttail call goabiinternal { double, double }
+      %target(double %x, double %y, double %z) #0
+  ret { double, double } %result
+}
+
 define goabiinternal void @internal_to_abi0() "go-nosplit" {
 ; LATE-LABEL: name: internal_to_abi0
 ; LATE: CALL64pcrel32 {{.*}}@"abi0_callee<ABI0>"
@@ -188,6 +219,8 @@ entry:
 
 declare token @llvm.experimental.gc.statepoint.p0(
     i64 immarg, i32 immarg, ptr, i32 immarg, i32 immarg, ...)
+
+attributes #0 = { "go-nosplit" "go_results_tuple" }
 
 !0 = !{!"r14"}
 
