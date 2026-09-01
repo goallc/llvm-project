@@ -615,7 +615,11 @@ def CC_AArch64_Go : CallingConv<[
   CCIfCC<"CallingConv::GoABIInternal",
     CCIfType<[f64],
       CCAssignToReg<[D0, D1, D2, D3, D4, D5, D6, D7,
-                     D8, D9, D10, D11, D12, D13, D14, D15]>>>
+                     D8, D9, D10, D11, D12, D13, D14, D15]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[v16i8, v8i16, v4i32, v2i64, v8f16, v8bf16, v4f32, v2f64],
+      CCAssignToReg<[Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7,
+                     Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15]>>>
 ]>;
 
 // The order of the callee-saves in this file is important, because the

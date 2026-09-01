@@ -93,9 +93,14 @@ static std::string computeAArch64DataLayout(const Triple &TT) {
            "128-n32:64-S128-Fn32";
   std::string Endian = TT.isLittleEndian() ? "e" : "E";
   std::string Ptr32 = TT.getEnvironment() == Triple::GNUILP32 ? "-p:32:32" : "";
+  // Go's arm64 ABI gives SIMD values 64-bit alignment in memory even though
+  // they are carried in 128-bit vector registers. Describe that ABI alignment
+  // explicitly so aggregate layout and argument homes agree with cmd/compile.
+  std::string VectorAlign =
+      TT.isOSBinFormatGoObj() ? "-v128:64:64" : "";
   return Endian + "-m:e" + Ptr32 +
-         "-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-"
-         "n32:64-S128-Fn32";
+         "-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128"
+         + VectorAlign + "-n32:64-S128-Fn32";
 }
 
 // DataLayout: little or big endian
