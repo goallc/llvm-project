@@ -3233,6 +3233,12 @@ void AArch64AsmPrinter::emitCBPseudoExpansion(const MachineInstr *MI) {
 #include "AArch64GenMCPseudoLowering.inc"
 
 void AArch64AsmPrinter::EmitToStreamer(MCStreamer &S, const MCInst &Inst) {
+  if (OutContext.isGoObj() && CurrentFnSym &&
+      isIndirectCallOpcode(Inst.getOpcode())) {
+    MCSymbol *Label = OutContext.createTempSymbol("goobj_callind", true);
+    S.emitLabel(Label);
+    OutContext.addGoObjSymbolIndirectCallLabel(CurrentFnSym, Label);
+  }
   S.emitInstruction(Inst, *STI);
 #ifndef NDEBUG
   ++InstsEmitted;
