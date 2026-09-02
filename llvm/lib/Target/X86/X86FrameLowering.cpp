@@ -204,6 +204,10 @@ static unsigned getFPStoreOpcode(unsigned Size) {
     return X86::MOVSDmr;
   case 16:
     return X86::MOVUPSmr;
+  case 32:
+    return X86::VMOVUPSYmr;
+  case 64:
+    return X86::VMOVUPSZmr;
   default:
     report_fatal_error("unsupported Go ABI FP spill size");
   }
@@ -217,6 +221,10 @@ static unsigned getFPLoadOpcode(unsigned Size) {
     return X86::MOVSDrm_alt;
   case 16:
     return X86::MOVUPSrm;
+  case 32:
+    return X86::VMOVUPSYrm;
+  case 64:
+    return X86::VMOVUPSZrm;
   default:
     report_fatal_error("unsupported Go ABI FP reload size");
   }

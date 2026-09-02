@@ -446,10 +446,11 @@ static std::string computeX86DataLayout(const Triple &TT) {
     Ret += "-f128:32";
 
   // The Go amd64 ABI guarantees only 64-bit stack alignment. Match the ABI
-  // alignment of 128-bit vectors to that guarantee so IR optimizations do not
-  // introduce vector accesses with stronger alignment requirements.
+  // alignment of fixed-width SIMD values to that guarantee so IR
+  // optimizations do not introduce vector accesses with stronger alignment
+  // requirements.
   if (Is64Bit && TT.isOSBinFormatGoObj())
-    Ret += "-v128:64:64";
+    Ret += "-v128:64:64-v256:64:64-v512:64:64";
 
   // The registers can hold 8, 16, 32 or, in x86-64, 64 bits.
   if (Is64Bit)
