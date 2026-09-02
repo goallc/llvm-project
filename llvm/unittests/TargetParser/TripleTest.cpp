@@ -3732,6 +3732,10 @@ TEST(DataLayoutTest, X86GoObjAlignment) {
               testing::Not(testing::HasSubstr("-S128")));
   EXPECT_THAT(TT.computeDataLayout(),
               testing::HasSubstr("-v128:64:64"));
+  EXPECT_THAT(TT.computeDataLayout(),
+              testing::HasSubstr("-v256:64:64"));
+  EXPECT_THAT(TT.computeDataLayout(),
+              testing::HasSubstr("-v512:64:64"));
 }
 
 TEST(DataLayoutTest, AArch64GoObjVectorAlignment) {
