@@ -1092,6 +1092,11 @@ def CC_X86_64_Go : CallingConv<[
     CCIfType<[f32, f64],
       CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4,
                      XMM5, XMM6, XMM7, XMM8, XMM9,
+                     XMM10, XMM11, XMM12, XMM13, XMM14]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[v16i8, v8i16, v4i32, v2i64, v8f16, v8bf16, v4f32, v2f64],
+      CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4,
+                     XMM5, XMM6, XMM7, XMM8, XMM9,
                      XMM10, XMM11, XMM12, XMM13, XMM14]>>>
 ]>;
 

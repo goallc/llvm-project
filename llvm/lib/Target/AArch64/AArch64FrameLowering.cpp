@@ -1323,6 +1323,8 @@ static unsigned getAArch64GoSpillOpcode(unsigned Size, bool IsFP, bool Reload) {
       return Reload ? AArch64::LDRSui : AArch64::STRSui;
     case 8:
       return Reload ? AArch64::LDRDui : AArch64::STRDui;
+    case 16:
+      return Reload ? AArch64::LDRQui : AArch64::STRQui;
     }
   } else {
     switch (Size) {

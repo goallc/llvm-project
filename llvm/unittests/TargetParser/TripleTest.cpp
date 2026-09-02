@@ -3734,6 +3734,14 @@ TEST(DataLayoutTest, X86GoObjAlignment) {
               testing::HasSubstr("-v128:64:64"));
 }
 
+TEST(DataLayoutTest, AArch64GoObjVectorAlignment) {
+  Triple TT = Triple("aarch64-unknown-linux-goobj");
+
+  EXPECT_THAT(TT.computeDataLayout(),
+              testing::HasSubstr("-v128:64:64"));
+  EXPECT_THAT(TT.computeDataLayout(), testing::HasSubstr("-S128"));
+}
+
 TEST(TripleTest, WindowsOrUEFI) {
   EXPECT_TRUE(Triple("x86_64-pc-windows-msvc").isOSWindowsOrUEFI());
   EXPECT_TRUE(Triple("x86_64-w64-windows-gnu").isOSWindowsOrUEFI());

@@ -196,6 +196,32 @@ static unsigned getIntegerLoadOpcode(unsigned Size) {
   }
 }
 
+static unsigned getFPStoreOpcode(unsigned Size) {
+  switch (Size) {
+  case 4:
+    return X86::MOVSSmr;
+  case 8:
+    return X86::MOVSDmr;
+  case 16:
+    return X86::MOVUPSmr;
+  default:
+    report_fatal_error("unsupported Go ABI FP spill size");
+  }
+}
+
+static unsigned getFPLoadOpcode(unsigned Size) {
+  switch (Size) {
+  case 4:
+    return X86::MOVSSrm_alt;
+  case 8:
+    return X86::MOVSDrm_alt;
+  case 16:
+    return X86::MOVUPSrm;
+  default:
+    report_fatal_error("unsupported Go ABI FP reload size");
+  }
+}
+
 static void emitGoRegSpills(MachineFunction &MF, MachineBasicBlock &MBB,
                             ArrayRef<X86MachineFunctionInfo::GoArgHome> Homes,
                             bool Reload) {
@@ -211,9 +237,8 @@ static void emitGoRegSpills(MachineFunction &MF, MachineBasicBlock &MBB,
       if (goabi::isGoABIInternalCallingConv(MF.getFunction().getCallingConv()))
         Offset += MF.getDataLayout().getPointerSize();
       if (Piece.IsFP) {
-        unsigned Opc =
-            Reload ? (Piece.Size == 4 ? X86::MOVSSrm_alt : X86::MOVSDrm_alt)
-                   : (Piece.Size == 4 ? X86::MOVSSmr : X86::MOVSDmr);
+        unsigned Opc = Reload ? getFPLoadOpcode(Piece.Size)
+                              : getFPStoreOpcode(Piece.Size);
         if (Reload)
           addRegOffset(BuildMI(&MBB, DL, TII.get(Opc), Piece.Reg), X86::RSP,
                        false, Offset);

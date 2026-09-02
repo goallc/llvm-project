@@ -8952,7 +8952,7 @@ static unsigned getAArch64GoStackBias(CallingConv::ID CallConv) {
 
 static bool isAArch64GoFloatPiece(Type *Ty) {
   return Ty && (Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||
-                Ty->isDoubleTy());
+                Ty->isDoubleTy() || isa<FixedVectorType>(Ty));
 }
 
 struct AArch64GoFormalArgInfo {

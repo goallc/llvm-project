@@ -18,6 +18,24 @@ entry:
   ret double %b
 }
 
+define goabiinternal <16 x i8> @second_vec128(<16 x i8> %a, <16 x i8> %b) {
+; X86-LABEL: second_vec128:
+; X86: mov{{[a-z0-9]+}} %xmm1, %xmm0
+; X86: retq
+entry:
+  ret <16 x i8> %b
+}
+
+define goabiinternal <16 x i8> @call_second_vec128(
+    <16 x i8> %a, <16 x i8> %b) {
+; X86-LABEL: call_second_vec128:
+; X86: callq second_vec128
+entry:
+  %ret = call goabiinternal <16 x i8> @second_vec128(
+      <16 x i8> %a, <16 x i8> %b)
+  ret <16 x i8> %ret
+}
+
 ; GoObj guarantees only 8-byte incoming stack alignment. A function which
 ; clobbers the reserved Go zero register must therefore use an unaligned fixed
 ; XMM15 spill instead of requiring stack realignment.

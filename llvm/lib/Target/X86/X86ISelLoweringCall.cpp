@@ -64,7 +64,7 @@ static goabi::ABIConfig getX86GoABIConfig(const X86Subtarget &Subtarget,
 
 static bool isX86GoFloatPiece(Type *Ty) {
   return Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||
-         Ty->isDoubleTy();
+         Ty->isDoubleTy() || isa<FixedVectorType>(Ty);
 }
 
 struct X86GoFormalArgInfo {

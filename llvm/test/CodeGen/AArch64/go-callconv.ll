@@ -17,6 +17,24 @@ entry:
   ret double %b
 }
 
+define goabiinternal <16 x i8> @second_vec128(<16 x i8> %a, <16 x i8> %b) {
+; A64-LABEL: second_vec128:
+; A64: mov v0.16b, v1.16b
+; A64: ret
+entry:
+  ret <16 x i8> %b
+}
+
+define goabiinternal <16 x i8> @call_second_vec128(
+    <16 x i8> %a, <16 x i8> %b) {
+; A64-LABEL: call_second_vec128:
+; A64: bl second_vec128
+entry:
+  %ret = call goabiinternal <16 x i8> @second_vec128(
+      <16 x i8> %a, <16 x i8> %b)
+  ret <16 x i8> %ret
+}
+
 define goabiinternal i64 @call_second_int() {
 ; A64-LABEL: call_second_int:
 ; A64: mov w8, #11
