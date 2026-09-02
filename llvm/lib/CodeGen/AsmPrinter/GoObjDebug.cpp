@@ -44,7 +44,8 @@ class GoObjDebugHandler final : public AsmPrinterHandler {
   const MCSymbol *CurrentFunction = nullptr;
   DebugLoc PreviousLocation;
   DenseMap<const DISubprogram *, const MCSymbol *> SubprogramSymbols;
-  DenseMap<const DILocation *, uint64_t> InlineSiteIDs;
+  DenseMap<std::pair<const DILocation *, const DISubprogram *>, uint64_t>
+      InlineSiteIDs;
   uint64_t NextInlineSiteID = 1;
 
   static std::string filePath(const DIFile *File) {
@@ -75,11 +76,19 @@ class GoObjDebugHandler final : public AsmPrinterHandler {
   getInlineFrames(const DILocation *Loc) {
     SmallVector<MCContext::GoObjDebugInlineFrame, 4> Reversed;
     while (const DILocation *Call = Loc->getInlinedAt()) {
+      const DISubprogram *Callee = Loc->getScope()->getSubprogram();
+      if (!Callee)
+        report_fatal_error("GoObj inline location has no callee subprogram");
       MCContext::GoObjDebugInlineFrame Frame;
-      Frame.Callee = getSubprogramSymbol(Loc->getScope()->getSubprogram());
+      Frame.Callee = getSubprogramSymbol(Callee);
       Frame.CallFile = filePath(Call->getFile());
       Frame.CallLine = Call->getLine();
-      auto [It, Inserted] = InlineSiteIDs.try_emplace(Call, 0);
+      // A callsite DILocation describes the caller position, but not the
+      // inlinee. LLVM may therefore share it between different callees. Keep
+      // the complete edge identity instead of rewriting otherwise valid debug
+      // locations into distinct nodes in a late machine pass.
+      auto [It, Inserted] =
+          InlineSiteIDs.try_emplace(std::make_pair(Call, Callee), 0);
       if (Inserted)
         It->second = NextInlineSiteID++;
       Frame.SiteID = It->second;
@@ -318,8 +327,8 @@ public:
         report_fatal_error(
             "GoObj inline anchor has no following source instruction");
       Location.AnchorChildFrames = getInlineFrames(It->getDebugLoc().get());
-      if (Location.AnchorChildFrames.size() !=
-              Location.InlineFrames.size() + 1 ||
+      if (Location.AnchorChildFrames.size() <=
+              Location.InlineFrames.size() ||
           !std::equal(Location.InlineFrames.begin(),
                       Location.InlineFrames.end(),
                       Location.AnchorChildFrames.begin(),
@@ -331,6 +340,11 @@ public:
                       }))
         report_fatal_error(
             "GoObj inline anchor does not precede its child frame");
+      // Scheduling can move a non-faulting instruction from a deeper inline
+      // frame ahead of that frame's preserved debug label. The anchor still
+      // belongs to the first direct child after the parent prefix; descendants
+      // get their own anchors at their final label or instruction boundary.
+      Location.AnchorChildFrames.resize(Location.InlineFrames.size() + 1);
     }
     Context.addGoObjDebugLocation(CurrentFunction, std::move(Location));
     PreviousLocation = DL;
