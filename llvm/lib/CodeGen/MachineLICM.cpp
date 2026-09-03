@@ -22,6 +22,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
 #include "llvm/CodeGen/MachineDomTreeUpdater.h"
@@ -1076,6 +1077,20 @@ static bool isCopyFeedingInvariantStore(const MachineInstr &MI,
 /// Returns true if the instruction may be a suitable candidate for LICM.
 /// e.g. If the instruction is a call, then it's obviously not safe to hoist it.
 bool MachineLICMImpl::IsLICMCandidate(MachineInstr &I, MachineLoop *CurLoop) {
+  // A Go frame index is an abstract address into a movable goroutine stack.
+  // SelectionDAG deliberately rematerializes it in each statepoint
+  // continuation, but hoisting the selected frame-address instruction out of
+  // a loop can move that materialization above a stack-growing statepoint.
+  // Keep the direct FrameIndex definition in its continuation; dependent
+  // address arithmetic then remains non-invariant as well.
+  const Function &F = I.getMF()->getFunction();
+  if (goabi::isGoCallingConv(F.getCallingConv()) &&
+      llvm::any_of(I.operands(),
+                   [](const MachineOperand &MO) { return MO.isFI(); })) {
+    LLVM_DEBUG(dbgs() << "LICM: Go frame address may change at a statepoint.\n");
+    return false;
+  }
+
   // Check if it's safe to move the instruction.
   bool DontMoveAcrossStore = !HoistConstLoads || !AllowedToHoistLoads[CurLoop];
   if ((!I.isSafeToMove(DontMoveAcrossStore)) &&
