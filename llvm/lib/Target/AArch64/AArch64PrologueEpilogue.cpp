@@ -689,16 +689,19 @@ void AArch64PrologueEmitter::emitGoFrameRecord(MachineBasicBlock::iterator MBBI,
         .addImm(-8)
         .setMIFlag(MachineInstr::FrameSetup);
   } else {
-    emitFrameOffset(MBB, MBBI, DL, AArch64::X16, AArch64::SP,
+    // Go reserves R27 as REGTMP, so it is safe to use even when a
+    // shrink-wrapped prologue has ordinary caller-saved registers live into its
+    // save point.
+    emitFrameOffset(MBB, MBBI, DL, AArch64::X27, AArch64::SP,
                     StackOffset::getFixed(-StackSize), TII,
                     MachineInstr::FrameSetup);
     BuildMI(MBB, MBBI, DL, TII->get(AArch64::STPXi))
         .addReg(AArch64::FP)
         .addReg(AArch64::LR)
-        .addReg(AArch64::X16)
+        .addReg(AArch64::X27)
         .addImm(-1)
         .setMIFlag(MachineInstr::FrameSetup);
-    emitFrameOffset(MBB, MBBI, DL, AArch64::SP, AArch64::X16, StackOffset{},
+    emitFrameOffset(MBB, MBBI, DL, AArch64::SP, AArch64::X27, StackOffset{},
                     TII, MachineInstr::FrameSetup, false, NeedsWinCFI,
                     &HasWinCFI, EmitAsyncCFI, StackOffset::getFixed(StackSize));
   }
@@ -1452,10 +1455,10 @@ void AArch64EpilogueEmitter::emitGoFrameRestore(
         .addReg(AArch64::SP)
         .addImm(-1)
         .setMIFlag(MachineInstr::FrameDestroy);
-    emitFrameOffset(MBB, MBBI, DL, AArch64::X16, AArch64::SP,
+    emitFrameOffset(MBB, MBBI, DL, AArch64::X27, AArch64::SP,
                     StackOffset::getFixed(StackSize), TII,
                     MachineInstr::FrameDestroy);
-    emitFrameOffset(MBB, MBBI, DL, AArch64::SP, AArch64::X16, StackOffset{},
+    emitFrameOffset(MBB, MBBI, DL, AArch64::SP, AArch64::X27, StackOffset{},
                     TII, MachineInstr::FrameDestroy, false, NeedsWinCFI,
                     &HasWinCFI, EmitCFI);
   }
