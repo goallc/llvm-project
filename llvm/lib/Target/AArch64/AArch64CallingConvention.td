@@ -768,6 +768,11 @@ def CSR_AArch64_NoneRegs : CalleeSavedRegs<(add LR, FP)>;
 
 def CSR_AArch64_Go : CalleeSavedRegs<(add X18, X28, LR, FP)>;
 
+// Go 'returned' arguments use X0 for both the first i64 argument and result.
+// Preserve X0 in addition to the registers preserved by the Go ABI.
+def CSR_AArch64_Go_ThisReturn
+    : CalleeSavedRegs<(add CSR_AArch64_Go, X0)>;
+
 def CSR_AArch64_RT_MostRegs :  CalleeSavedRegs<(add CSR_AArch64_AAPCS,
                                                 (sequence "X%u", 9, 15))>;
 
