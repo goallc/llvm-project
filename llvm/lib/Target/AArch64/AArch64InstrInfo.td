@@ -11482,6 +11482,21 @@ let Predicates = [HasMOPS, HasMTE] in {
   }
 }
 
+// A call cannot be used to lower an inline memcpy. Keep large copies compact
+// by expanding this pseudo to a load/store loop in the assembly printer.
+let Defs = [NZCV], Size = 16, mayLoad = 1, mayStore = 1 in {
+  def InlineMemcpyLoopPseudo :
+    Pseudo<(outs GPR64common:$dst_wb, GPR64common:$src_wb,
+                 GPR64common:$size_wb, GPR64common:$tmp0,
+                 GPR64common:$tmp1),
+           (ins GPR64common:$dst, GPR64common:$src,
+                GPR64common:$size, i64imm:$stride), [],
+           "$dst = $dst_wb,$src = $src_wb,$size = $size_wb,"
+           "@earlyclobber $dst_wb,@earlyclobber $src_wb,"
+           "@earlyclobber $size_wb,@earlyclobber $tmp0,"
+           "@earlyclobber $tmp1">, Sched<[]>;
+}
+
 // MOPS operations always contain three 4-byte instructions
 let Predicates = [HasMOPS], Defs = [NZCV], Size = 12, mayStore = 1 in {
   let mayLoad = 1 in {

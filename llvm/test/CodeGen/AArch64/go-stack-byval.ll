@@ -1,6 +1,10 @@
 ; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O2 -verify-machineinstrs < %s | FileCheck %s
 ; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O2 -verify-machineinstrs \
 ; RUN:   -stop-after=finalize-isel < %s | FileCheck %s --check-prefix=MIR
+; RUN: llc -mtriple=aarch64-unknown-linux-gnu -mattr=+strict-align -O2 \
+; RUN:   -verify-machineinstrs < %s | FileCheck %s --check-prefix=STRICT
+; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O2 -verify-machineinstrs \
+; RUN:   -filetype=obj -o /dev/null < %s
 
 %pair = type { i64, i64 }
 
@@ -22,6 +26,7 @@ declare goabiinternal void @consume_pair(
 declare goabiinternal float @consume_memory_float(
     ptr byval(float) align 4, float)
 declare goabiinternal void @consume_one(ptr byval(i64) align 8)
+declare goabiinternal void @consume_large(ptr byval([4099 x i8]) align 1)
 declare goabiinternal void @observe(ptr)
 declare goabiinternal void @safepoint()
 declare void @llvm.lifetime.start.p0(ptr captures(none))
@@ -153,6 +158,37 @@ entry:
       i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7,
       i64 8, i64 9, i64 10, i64 11, i64 12, i64 13, i64 14, i64 15,
       ptr byval(i64) align 8 %source)
+  ret void
+}
+
+define goabiinternal void @large_memory_stack_argument(ptr %source) {
+; CHECK-LABEL: large_memory_stack_argument:
+; A Go byval copy cannot call libc after reserving its outgoing frame. Keep a
+; large inline copy as a compact loop rather than thousands of DAG stores.
+; CHECK: [[LOOP:.Laarch64_memcpy_loop[0-9]+]]:
+; CHECK-NEXT: ldp [[TMP0:x[0-9]+]], [[TMP1:x[0-9]+]], [[[SRC:x[0-9]+]]], #16
+; CHECK-NEXT: stp [[TMP0]], [[TMP1]], [[[DST:x[0-9]+]]], #16
+; CHECK-NEXT: subs [[SIZE:x[0-9]+]], [[SIZE]], #16
+; CHECK-NEXT: b.ne [[LOOP]]
+; CHECK: ldrb [[TAIL8:w[0-9]+]], [[[SRC]], #2]
+; CHECK: ldrh [[TAIL16:w[0-9]+]], [[[SRC]]]
+; CHECK: strb [[TAIL8]], [[[DST]], #2]
+; CHECK: strh [[TAIL16]], [[[DST]]]
+; CHECK: bl consume_large
+; MIR-LABEL: name: large_memory_stack_argument
+; MIR: InlineMemcpyLoopPseudo
+; MIR-SAME: 16
+; MIR-SAME: (store (s32768)
+; MIR-SAME: (load (s32768)
+; STRICT-LABEL: large_memory_stack_argument:
+; STRICT: [[STRICT_LOOP:.Laarch64_memcpy_loop[0-9]+]]:
+; STRICT-NEXT: ldrb [[BYTE:w[0-9]+]], [{{x[0-9]+}}], #1
+; STRICT-NEXT: strb [[BYTE]], [{{x[0-9]+}}], #1
+; STRICT-NEXT: subs [[STRICT_SIZE:x[0-9]+]], [[STRICT_SIZE]], #1
+; STRICT-NEXT: b.ne [[STRICT_LOOP]]
+entry:
+  call goabiinternal void @consume_large(
+      ptr byval([4099 x i8]) align 1 %source)
   ret void
 }
 

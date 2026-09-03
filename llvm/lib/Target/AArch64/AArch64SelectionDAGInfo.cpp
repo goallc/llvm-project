@@ -32,6 +32,67 @@ static cl::opt<bool> UseMOPS("aarch64-use-mops", cl::Hidden,
                                       "for memcpy/memset/memmove"),
                              cl::init(true));
 
+static SDValue emitInlineMemcpyLoop(SelectionDAG &DAG, const SDLoc &DL,
+                                    SDValue Chain, SDValue Dst, SDValue Src,
+                                    SDValue Size, Align DstAlign,
+                                    Align SrcAlign, bool IsVolatile,
+                                    bool AlwaysInline,
+                                    MachinePointerInfo DstPtrInfo,
+                                    MachinePointerInfo SrcPtrInfo) {
+  auto *ConstantSize = dyn_cast<ConstantSDNode>(Size);
+  if (!AlwaysInline || IsVolatile || !ConstantSize ||
+      Dst.getValueType() != MVT::i64 || Src.getValueType() != MVT::i64 ||
+      Size.getValueType() != MVT::i64)
+    return SDValue();
+
+  uint64_t CopySize = ConstantSize->getZExtValue();
+  const AArch64Subtarget &STI =
+      DAG.getMachineFunction().getSubtarget<AArch64Subtarget>();
+
+  // Ordinary AArch64 memory permits unaligned accesses. Strict-alignment
+  // targets instead use the widest access supported by both pointers.
+  uint64_t Stride = 16;
+  if (STI.requiresStrictAlign()) {
+    uint64_t MinAlign = std::min(DstAlign.value(), SrcAlign.value());
+    Stride = MinAlign >= 8 ? 8 : MinAlign >= 4 ? 4 : MinAlign >= 2 ? 2 : 1;
+  }
+
+  uint64_t LoopSize = CopySize - CopySize % Stride;
+  if (LoopSize < 256)
+    return SDValue();
+
+  MachineFunction &MF = DAG.getMachineFunction();
+  Align LoopDstAlign = std::min(DstAlign, Align(Stride));
+  Align LoopSrcAlign = std::min(SrcAlign, Align(Stride));
+  auto *DstOp =
+      MF.getMachineMemOperand(DstPtrInfo, MachineMemOperand::MOStore,
+                              LocationSize::precise(LoopSize), LoopDstAlign);
+  auto *SrcOp =
+      MF.getMachineMemOperand(SrcPtrInfo, MachineMemOperand::MOLoad,
+                              LocationSize::precise(LoopSize), LoopSrcAlign);
+
+  SDValue Ops[] = {Dst, Src, DAG.getConstant(LoopSize, DL, MVT::i64),
+                   DAG.getTargetConstant(Stride, DL, MVT::i64), Chain};
+  const EVT ResultTys[] = {MVT::i64, MVT::i64, MVT::i64,
+                           MVT::i64, MVT::i64, MVT::Other};
+  MachineSDNode *Loop =
+      DAG.getMachineNode(AArch64::InlineMemcpyLoopPseudo, DL, ResultTys, Ops);
+  DAG.setNodeMemRefs(Loop, {DstOp, SrcOp});
+
+  uint64_t TailSize = CopySize - LoopSize;
+  SDValue LoopChain(Loop, 5);
+  if (!TailSize)
+    return LoopChain;
+
+  return DAG.getMemcpy(
+      LoopChain, DL, SDValue(Loop, 0), SDValue(Loop, 1),
+      DAG.getConstant(TailSize, DL, MVT::i64),
+      commonAlignment(DstAlign, LoopSize), commonAlignment(SrcAlign, LoopSize),
+      IsVolatile, AlwaysInline,
+      /*CI=*/nullptr, std::nullopt, DstPtrInfo.getWithOffset(LoopSize),
+      SrcPtrInfo.getWithOffset(LoopSize));
+}
+
 AArch64SelectionDAGInfo::AArch64SelectionDAGInfo()
     : SelectionDAGGenTargetInfo(AArch64GenSDNodeInfo) {}
 
@@ -233,6 +294,11 @@ SDValue AArch64SelectionDAGInfo::EmitTargetCodeForMemcpy(
     return EmitMOPS(AArch64::MOPSMemoryCopyPseudo, DAG, DL, Chain, Dst, Src,
                     Size, DstAlign, SrcAlign, isVolatile, DstPtrInfo,
                     SrcPtrInfo);
+
+  if (SDValue Loop = emitInlineMemcpyLoop(DAG, DL, Chain, Dst, Src, Size,
+                                          DstAlign, SrcAlign, isVolatile,
+                                          AlwaysInline, DstPtrInfo, SrcPtrInfo))
+    return Loop;
 
   auto *AFI = DAG.getMachineFunction().getInfo<AArch64FunctionInfo>();
   SMEAttrs Attrs = AFI->getSMEFnAttrs();
