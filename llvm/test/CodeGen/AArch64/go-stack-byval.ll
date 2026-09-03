@@ -3,6 +3,8 @@
 ; RUN:   -stop-after=finalize-isel < %s | FileCheck %s --check-prefix=MIR
 ; RUN: llc -mtriple=aarch64-unknown-linux-gnu -mattr=+strict-align -O2 \
 ; RUN:   -verify-machineinstrs < %s | FileCheck %s --check-prefix=STRICT
+; RUN: llc -mtriple=aarch64-unknown-linux-gnu -mattr=-fp-armv8 -O2 \
+; RUN:   -verify-machineinstrs < %s | FileCheck %s --check-prefix=NOFP
 ; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O2 -verify-machineinstrs \
 ; RUN:   -filetype=obj -o /dev/null < %s
 
@@ -27,6 +29,9 @@ declare goabiinternal float @consume_memory_float(
     ptr byval(float) align 4, float)
 declare goabiinternal void @consume_one(ptr byval(i64) align 8)
 declare goabiinternal void @consume_large(ptr byval([4099 x i8]) align 1)
+declare goabiinternal void @consume_large_align8(ptr byval([256 x i8]) align 8)
+declare goabiinternal void @consume_large_align4(ptr byval([256 x i8]) align 4)
+declare goabiinternal void @consume_large_align2(ptr byval([256 x i8]) align 2)
 declare goabiinternal void @observe(ptr)
 declare goabiinternal void @safepoint()
 declare void @llvm.lifetime.start.p0(ptr captures(none))
@@ -164,31 +169,108 @@ entry:
 define goabiinternal void @large_memory_stack_argument(ptr %source) {
 ; CHECK-LABEL: large_memory_stack_argument:
 ; A Go byval copy cannot call libc after reserving its outgoing frame. Keep a
-; large inline copy as a compact loop rather than thousands of DAG stores.
-; CHECK: [[LOOP:.Laarch64_memcpy_loop[0-9]+]]:
-; CHECK-NEXT: ldp [[TMP0:x[0-9]+]], [[TMP1:x[0-9]+]], [[[SRC:x[0-9]+]]], #16
-; CHECK-NEXT: stp [[TMP0]], [[TMP1]], [[[DST:x[0-9]+]]], #16
-; CHECK-NEXT: subs [[SIZE:x[0-9]+]], [[SIZE]], #16
-; CHECK-NEXT: b.ne [[LOOP]]
-; CHECK: ldrb [[TAIL8:w[0-9]+]], [[[SRC]], #2]
-; CHECK: ldrh [[TAIL16:w[0-9]+]], [[[SRC]]]
-; CHECK: strb [[TAIL8]], [[[DST]], #2]
-; CHECK: strh [[TAIL16]], [[[DST]]]
+; large inline copy as a real CFG loop rather than thousands of DAG stores.
+; Match Go's native arm64 loop throughput: two 32-byte vector pairs per
+; iteration.
+; CHECK: [[LOOP:.LBB[0-9]+_[0-9]+]]:
+; CHECK: ldp q{{[0-9]+}}, q{{[0-9]+}}, [x{{[0-9]+}}], #32
+; CHECK: subs x{{[0-9]+}}, x{{[0-9]+}}, #64
+; CHECK: stp q{{[0-9]+}}, q{{[0-9]+}}, [x{{[0-9]+}}], #32
+; CHECK: ldp q{{[0-9]+}}, q{{[0-9]+}}, [x{{[0-9]+}}], #32
+; CHECK: stp q{{[0-9]+}}, q{{[0-9]+}}, [x{{[0-9]+}}], #32
+; CHECK: b.ne [[LOOP]]
+; CHECK: ldrb [[TAIL8:w[0-9]+]], [[[TAIL_SRC:x[0-9]+]], #2]
+; CHECK: ldrh [[TAIL16:w[0-9]+]], [[[TAIL_SRC]]]
+; CHECK: strb [[TAIL8]], [[[TAIL_DST:x[0-9]+]], #2]
+; CHECK: strh [[TAIL16]], [[[TAIL_DST]]]
 ; CHECK: bl consume_large
 ; MIR-LABEL: name: large_memory_stack_argument
-; MIR: InlineMemcpyLoopPseudo
-; MIR-SAME: 16
-; MIR-SAME: (store (s32768)
-; MIR-SAME: (load (s32768)
+; MIR: noPhis: false
+; MIR: bb.0.entry:
+; MIR: ADJCALLSTACKDOWN 4112
+; MIR: bb.1.entry (call-frame-size 4112):
+; MIR: successors: %bb.1(0x7e000000), %bb.2(0x02000000)
+; MIR: PHI
+; MIR: PHI
+; MIR: PHI
+; MIR: LDPQpost {{.*}} :: (load (s32768)
+; MIR: STPQpost {{.*}} :: (store (s32768)
+; MIR: LDPQpost {{.*}} :: (load (s32768)
+; MIR: STPQpost {{.*}} :: (store (s32768)
+; MIR: SUBSXri {{.*}}, 64, 0
+; MIR: Bcc 1, %bb.1
+; MIR: bb.2.entry (call-frame-size 4112):
+; MIR: ADJCALLSTACKUP 4112
 ; STRICT-LABEL: large_memory_stack_argument:
-; STRICT: [[STRICT_LOOP:.Laarch64_memcpy_loop[0-9]+]]:
-; STRICT-NEXT: ldrb [[BYTE:w[0-9]+]], [{{x[0-9]+}}], #1
-; STRICT-NEXT: strb [[BYTE]], [{{x[0-9]+}}], #1
-; STRICT-NEXT: subs [[STRICT_SIZE:x[0-9]+]], [[STRICT_SIZE]], #1
-; STRICT-NEXT: b.ne [[STRICT_LOOP]]
+; Strict alignment permits only byte accesses here, so unroll four copies per
+; iteration.
+; STRICT: [[STRICT_LOOP:.LBB[0-9]+_[0-9]+]]:
+; STRICT: ldrb [[BYTE0:w[0-9]+]], [{{x[0-9]+}}], #1
+; STRICT: subs x{{[0-9]+}}, x{{[0-9]+}}, #4
+; STRICT: strb [[BYTE0]], [{{x[0-9]+}}], #1
+; STRICT: ldrb [[BYTE1:w[0-9]+]], [{{x[0-9]+}}], #1
+; STRICT: strb [[BYTE1]], [{{x[0-9]+}}], #1
+; STRICT: ldrb [[BYTE2:w[0-9]+]], [{{x[0-9]+}}], #1
+; STRICT: strb [[BYTE2]], [{{x[0-9]+}}], #1
+; STRICT: ldrb [[BYTE3:w[0-9]+]], [{{x[0-9]+}}], #1
+; STRICT: strb [[BYTE3]], [{{x[0-9]+}}], #1
+; STRICT: b.ne [[STRICT_LOOP]]
+; NOFP-LABEL: large_memory_stack_argument:
+; Without FP/SIMD, retain the same 64-byte stride with four GPR pairs.
+; NOFP: [[NOFP_LOOP:.LBB[0-9]+_[0-9]+]]:
+; NOFP: ldp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: subs x{{[0-9]+}}, x{{[0-9]+}}, #64
+; NOFP: stp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: ldp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: stp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: ldp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: stp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: ldp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: stp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: b.ne [[NOFP_LOOP]]
 entry:
   call goabiinternal void @consume_large(
       ptr byval([4099 x i8]) align 1 %source)
+  ret void
+}
+
+; Exercise every wider scalar access used when strict alignment is required.
+define goabiinternal void @large_memory_stack_argument_align8(ptr %source) {
+; STRICT-LABEL: large_memory_stack_argument_align8:
+; STRICT: [[STRICT_ALIGN8_LOOP:.LBB[0-9]+_[0-9]+]]:
+; STRICT: ldr x{{[0-9]+}}, [x{{[0-9]+}}], #8
+; STRICT: subs x{{[0-9]+}}, x{{[0-9]+}}, #32
+; STRICT: str x{{[0-9]+}}, [x{{[0-9]+}}], #8
+; STRICT: b.ne [[STRICT_ALIGN8_LOOP]]
+entry:
+  call goabiinternal void @consume_large_align8(
+      ptr byval([256 x i8]) align 8 %source)
+  ret void
+}
+
+define goabiinternal void @large_memory_stack_argument_align4(ptr %source) {
+; STRICT-LABEL: large_memory_stack_argument_align4:
+; STRICT: [[STRICT_ALIGN4_LOOP:.LBB[0-9]+_[0-9]+]]:
+; STRICT: ldr w{{[0-9]+}}, [x{{[0-9]+}}], #4
+; STRICT: subs x{{[0-9]+}}, x{{[0-9]+}}, #16
+; STRICT: str w{{[0-9]+}}, [x{{[0-9]+}}], #4
+; STRICT: b.ne [[STRICT_ALIGN4_LOOP]]
+entry:
+  call goabiinternal void @consume_large_align4(
+      ptr byval([256 x i8]) align 4 %source)
+  ret void
+}
+
+define goabiinternal void @large_memory_stack_argument_align2(ptr %source) {
+; STRICT-LABEL: large_memory_stack_argument_align2:
+; STRICT: [[STRICT_ALIGN2_LOOP:.LBB[0-9]+_[0-9]+]]:
+; STRICT: ldrh w{{[0-9]+}}, [x{{[0-9]+}}], #2
+; STRICT: subs x{{[0-9]+}}, x{{[0-9]+}}, #8
+; STRICT: strh w{{[0-9]+}}, [x{{[0-9]+}}], #2
+; STRICT: b.ne [[STRICT_ALIGN2_LOOP]]
+entry:
+  call goabiinternal void @consume_large_align2(
+      ptr byval([256 x i8]) align 2 %source)
   ret void
 }
 

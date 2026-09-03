@@ -83,6 +83,7 @@
 #include "llvm/IR/Use.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/AtomicOrdering.h"
+#include "llvm/Support/BranchProbability.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/CommandLine.h"
@@ -3314,6 +3315,189 @@ AArch64TargetLowering::EmitDynamicProbedAlloc(MachineInstr &MI,
 }
 
 MachineBasicBlock *
+AArch64TargetLowering::EmitGoInlineMemcpyLoop(MachineInstr &MI,
+                                              MachineBasicBlock *MBB) const {
+  MachineFunction &MF = *MBB->getParent();
+  MachineRegisterInfo &MRI = MF.getRegInfo();
+  const TargetInstrInfo *TII = Subtarget->getInstrInfo();
+  const DebugLoc DL = MI.getDebugLoc();
+
+  Register DstResult = MI.getOperand(0).getReg();
+  Register SrcResult = MI.getOperand(1).getReg();
+  Register InitialDst = MI.getOperand(2).getReg();
+  Register InitialSrc = MI.getOperand(3).getReg();
+  Register InitialSize = MI.getOperand(4).getReg();
+  uint64_t AccessSize = MI.getOperand(5).getImm();
+  uint64_t Iterations = MI.getOperand(6).getImm();
+  uint64_t LoopStride = AccessSize == 16 ? 64 : 4 * AccessSize;
+
+  MachineMemOperand *LoadMMO = nullptr;
+  MachineMemOperand *StoreMMO = nullptr;
+  for (MachineMemOperand *MMO : MI.memoperands()) {
+    if (MMO->isLoad())
+      LoadMMO = MMO;
+    if (MMO->isStore())
+      StoreMMO = MMO;
+  }
+  assert(LoadMMO && StoreMMO && "inline memcpy loop requires memory operands");
+
+  const BasicBlock *LLVMBB = MBB->getBasicBlock();
+  unsigned CallFrameSize = TII->getCallFrameSizeAt(MI);
+  MachineFunction::iterator InsertPt = std::next(MBB->getIterator());
+  MachineBasicBlock *LoopMBB = MF.CreateMachineBasicBlock(LLVMBB);
+  MachineBasicBlock *ExitMBB = MF.CreateMachineBasicBlock(LLVMBB);
+  LoopMBB->setCallFrameSize(CallFrameSize);
+  ExitMBB->setCallFrameSize(CallFrameSize);
+  MF.insert(InsertPt, LoopMBB);
+  MF.insert(InsertPt, ExitMBB);
+
+  ExitMBB->splice(ExitMBB->end(), MBB, std::next(MI.getIterator()), MBB->end());
+  ExitMBB->transferSuccessorsAndUpdatePHIs(MBB);
+  MBB->addSuccessor(LoopMBB);
+  BranchProbability BackedgeProbability =
+      BranchProbability::getBranchProbability(Iterations - 1, Iterations);
+  LoopMBB->addSuccessor(LoopMBB, BackedgeProbability);
+  LoopMBB->addSuccessor(ExitMBB, BackedgeProbability.getCompl());
+
+  Register LoopDst = MRI.createVirtualRegister(&AArch64::GPR64commonRegClass);
+  Register LoopSrc = MRI.createVirtualRegister(&AArch64::GPR64commonRegClass);
+  Register LoopSize = MRI.createVirtualRegister(&AArch64::GPR64commonRegClass);
+
+  Register NextDst = LoopDst;
+  Register NextSrc = LoopSrc;
+  bool UseVectorPairs = AccessSize == 16 && Subtarget->hasFPARMv8();
+  unsigned CopiesPerIteration = UseVectorPairs ? 2 : 4;
+
+  for (unsigned I = 0; I != CopiesPerIteration; ++I) {
+    Register NewSrc = MRI.createVirtualRegister(&AArch64::GPR64commonRegClass);
+    Register NewDst = MRI.createVirtualRegister(&AArch64::GPR64commonRegClass);
+
+    if (UseVectorPairs) {
+      Register Tmp0 = MRI.createVirtualRegister(&AArch64::FPR128RegClass);
+      Register Tmp1 = MRI.createVirtualRegister(&AArch64::FPR128RegClass);
+      BuildMI(LoopMBB, DL, TII->get(AArch64::LDPQpost))
+          .addDef(NewSrc)
+          .addDef(Tmp0)
+          .addDef(Tmp1)
+          .addReg(NextSrc)
+          .addImm(2)
+          .addMemOperand(LoadMMO)
+          .setMIFlags(MI.getFlags());
+      BuildMI(LoopMBB, DL, TII->get(AArch64::STPQpost))
+          .addDef(NewDst)
+          .addReg(Tmp0)
+          .addReg(Tmp1)
+          .addReg(NextDst)
+          .addImm(2)
+          .addMemOperand(StoreMMO)
+          .setMIFlags(MI.getFlags());
+    } else if (AccessSize == 16) {
+      Register Tmp0 = MRI.createVirtualRegister(&AArch64::GPR64RegClass);
+      Register Tmp1 = MRI.createVirtualRegister(&AArch64::GPR64RegClass);
+      BuildMI(LoopMBB, DL, TII->get(AArch64::LDPXpost))
+          .addDef(NewSrc)
+          .addDef(Tmp0)
+          .addDef(Tmp1)
+          .addReg(NextSrc)
+          .addImm(2)
+          .addMemOperand(LoadMMO)
+          .setMIFlags(MI.getFlags());
+      BuildMI(LoopMBB, DL, TII->get(AArch64::STPXpost))
+          .addDef(NewDst)
+          .addReg(Tmp0)
+          .addReg(Tmp1)
+          .addReg(NextDst)
+          .addImm(2)
+          .addMemOperand(StoreMMO)
+          .setMIFlags(MI.getFlags());
+    } else {
+      unsigned LoadOpcode;
+      unsigned StoreOpcode;
+      const TargetRegisterClass *DataRC;
+      switch (AccessSize) {
+      case 8:
+        LoadOpcode = AArch64::LDRXpost;
+        StoreOpcode = AArch64::STRXpost;
+        DataRC = &AArch64::GPR64RegClass;
+        break;
+      case 4:
+        LoadOpcode = AArch64::LDRWpost;
+        StoreOpcode = AArch64::STRWpost;
+        DataRC = &AArch64::GPR32RegClass;
+        break;
+      case 2:
+        LoadOpcode = AArch64::LDRHHpost;
+        StoreOpcode = AArch64::STRHHpost;
+        DataRC = &AArch64::GPR32RegClass;
+        break;
+      case 1:
+        LoadOpcode = AArch64::LDRBBpost;
+        StoreOpcode = AArch64::STRBBpost;
+        DataRC = &AArch64::GPR32RegClass;
+        break;
+      default:
+        llvm_unreachable("invalid inline memcpy loop access size");
+      }
+      Register Tmp = MRI.createVirtualRegister(DataRC);
+      BuildMI(LoopMBB, DL, TII->get(LoadOpcode))
+          .addDef(NewSrc)
+          .addDef(Tmp)
+          .addReg(NextSrc)
+          .addImm(AccessSize)
+          .addMemOperand(LoadMMO)
+          .setMIFlags(MI.getFlags());
+      BuildMI(LoopMBB, DL, TII->get(StoreOpcode))
+          .addDef(NewDst)
+          .addReg(Tmp)
+          .addReg(NextDst)
+          .addImm(AccessSize)
+          .addMemOperand(StoreMMO)
+          .setMIFlags(MI.getFlags());
+    }
+
+    NextSrc = NewSrc;
+    NextDst = NewDst;
+  }
+
+  Register NextSize = MRI.createVirtualRegister(&AArch64::GPR64commonRegClass);
+  BuildMI(LoopMBB, DL, TII->get(AArch64::SUBSXri), NextSize)
+      .addReg(LoopSize)
+      .addImm(LoopStride)
+      .addImm(0)
+      .setMIFlags(MI.getFlags());
+  BuildMI(LoopMBB, DL, TII->get(AArch64::Bcc))
+      .addImm(AArch64CC::NE)
+      .addMBB(LoopMBB)
+      .setMIFlags(MI.getFlags());
+
+  BuildMI(*LoopMBB, LoopMBB->begin(), DL, TII->get(TargetOpcode::PHI), LoopSize)
+      .addReg(InitialSize)
+      .addMBB(MBB)
+      .addReg(NextSize)
+      .addMBB(LoopMBB);
+  BuildMI(*LoopMBB, LoopMBB->begin(), DL, TII->get(TargetOpcode::PHI), LoopSrc)
+      .addReg(InitialSrc)
+      .addMBB(MBB)
+      .addReg(NextSrc)
+      .addMBB(LoopMBB);
+  BuildMI(*LoopMBB, LoopMBB->begin(), DL, TII->get(TargetOpcode::PHI), LoopDst)
+      .addReg(InitialDst)
+      .addMBB(MBB)
+      .addReg(NextDst)
+      .addMBB(LoopMBB);
+
+  BuildMI(*ExitMBB, ExitMBB->begin(), DL, TII->get(TargetOpcode::COPY),
+          SrcResult)
+      .addReg(NextSrc);
+  BuildMI(*ExitMBB, ExitMBB->begin(), DL, TII->get(TargetOpcode::COPY),
+          DstResult)
+      .addReg(NextDst);
+
+  MI.eraseFromParent();
+  return ExitMBB;
+}
+
+MachineBasicBlock *
 AArch64TargetLowering::EmitCheckMatchingVL(MachineInstr &MI,
                                            MachineBasicBlock *MBB) const {
   MachineFunction *MF = MBB->getParent();
@@ -3637,6 +3821,9 @@ MachineBasicBlock *AArch64TargetLowering::EmitInstrWithCustomInserter(
 
   case AArch64::PROBED_STACKALLOC_DYN:
     return EmitDynamicProbedAlloc(MI, BB);
+
+  case AArch64::GoInlineMemcpyLoopPseudo:
+    return EmitGoInlineMemcpyLoop(MI, BB);
 
   case AArch64::CHECK_MATCHING_VL_PSEUDO:
     return EmitCheckMatchingVL(MI, BB);

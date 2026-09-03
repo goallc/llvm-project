@@ -11482,19 +11482,17 @@ let Predicates = [HasMOPS, HasMTE] in {
   }
 }
 
-// A call cannot be used to lower an inline memcpy. Keep large copies compact
-// by expanding this pseudo to a load/store loop in the assembly printer.
-let Defs = [NZCV], Size = 16, mayLoad = 1, mayStore = 1 in {
-  def InlineMemcpyLoopPseudo :
-    Pseudo<(outs GPR64common:$dst_wb, GPR64common:$src_wb,
-                 GPR64common:$size_wb, GPR64common:$tmp0,
-                 GPR64common:$tmp1),
+// A Go outgoing byval copy cannot call libc after reserving its call frame.
+// Keep large copies compact by expanding this pseudo to a real machine-CFG
+// loop during instruction selection.
+let mayLoad = 1, mayStore = 1, usesCustomInserter = 1,
+    hasNoSchedulingInfo = 1 in {
+  def GoInlineMemcpyLoopPseudo :
+    Pseudo<(outs GPR64common:$dst_wb, GPR64common:$src_wb),
            (ins GPR64common:$dst, GPR64common:$src,
-                GPR64common:$size, i64imm:$stride), [],
-           "$dst = $dst_wb,$src = $src_wb,$size = $size_wb,"
-           "@earlyclobber $dst_wb,@earlyclobber $src_wb,"
-           "@earlyclobber $size_wb,@earlyclobber $tmp0,"
-           "@earlyclobber $tmp1">, Sched<[]>;
+                GPR64common:$size, i64imm:$access_size,
+                i64imm:$iterations), [],
+           "$dst = $dst_wb,$src = $src_wb">, Sched<[]>;
 }
 
 // MOPS operations always contain three 4-byte instructions
