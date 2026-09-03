@@ -386,6 +386,8 @@ AArch64RegisterInfo::getThisReturnPreservedMask(const MachineFunction &MF,
   // In case that the calling convention does not use the same register for
   // both, the function should return NULL (does not currently apply)
   assert(CC != CallingConv::GHC && "should not be GHC calling convention.");
+  if (goabi::isGoCallingConv(CC))
+    return CSR_AArch64_Go_ThisReturn_RegMask;
   if (MF.getSubtarget<AArch64Subtarget>().isTargetDarwin())
     return CSR_Darwin_AArch64_AAPCS_ThisReturn_RegMask;
   return CSR_AArch64_AAPCS_ThisReturn_RegMask;
