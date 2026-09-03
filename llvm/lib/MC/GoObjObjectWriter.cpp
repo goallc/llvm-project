@@ -98,6 +98,7 @@ struct GoObjSymbol {
   SmallString<0> Data;
   std::optional<std::array<uint8_t, GoObj::HashSize>> ContentHash;
   std::optional<std::array<uint8_t, GoObj::Hash64Size>> ContentHash64;
+  bool ComputeContentHash = false;
   std::vector<Relocation> Relocations;
   std::vector<Auxiliary> Auxiliaries;
 };
@@ -1395,6 +1396,20 @@ std::array<uint8_t, GoObj::HashSize> makeGoObjContentHash(char SectionMarker,
   return Hash;
 }
 
+std::string trimGoObjInlineHash(StringRef Name) {
+  // Match cmd/internal/obj.TrimInlineHash. The Go compiler inserts the
+  // base64 encoding of an 8-byte inline-call-stack hash between '#'
+  // delimiters. Content-addressable definitions and RefName omit it.
+  constexpr size_t InlineHashLength = 12;
+  size_t Begin = Name.find('#');
+  if (Begin == StringRef::npos || Name.size() < Begin + InlineHashLength + 2 ||
+      Name[Begin + InlineHashLength + 1] != '#')
+    return Name.str();
+  return (Name.take_front(Begin) +
+          Name.drop_front(Begin + InlineHashLength + 2))
+      .str();
+}
+
 std::array<uint8_t, GoObj::HashSize>
 makeGoObjContentHash(const GoObjSymbol &Symbol, ArrayRef<GoObjSymbol> Symbols) {
   SHA256 Hasher;
@@ -1960,13 +1975,28 @@ uint64_t GoObjObjectWriter::writeObject() {
                        Type, Flag, Flag2, ABI, Size, Align, Data);
       if (MCSym) {
         StringRef Hash = Asm->getContext().getGoObjSymbolContentHash(MCSym);
+        bool ComputeContentHash =
+            Asm->getContext().isGoObjSymbolContentAddressable(MCSym);
+        if (ComputeContentHash && !Hash.empty())
+          report_fatal_error("GoObj symbol has both a content hash and a "
+                             "deferred hash marker");
+        if (ComputeContentHash) {
+          if (Type != GoObj::STEXT && Type != GoObj::STEXTFIPS)
+            report_fatal_error(
+                "deferred GoObj content hash belongs to a non-text symbol");
+          Symbols.back().DefinedBlock = GoObj::DefinedSymbolBlock::Hasheddef;
+          Symbols.back().Name = trimGoObjInlineHash(Symbols.back().Name);
+          Symbols.back().ComputeContentHash = true;
+        }
         if (Hash.size() == GoObj::Hash64Size) {
           Symbols.back().DefinedBlock = GoObj::DefinedSymbolBlock::Hashed64def;
+          Symbols.back().Name = trimGoObjInlineHash(Symbols.back().Name);
           std::array<uint8_t, GoObj::Hash64Size> Value;
           std::copy(Hash.bytes_begin(), Hash.bytes_end(), Value.begin());
           Symbols.back().ContentHash64 = Value;
         } else if (Hash.size() == GoObj::HashSize) {
           Symbols.back().DefinedBlock = GoObj::DefinedSymbolBlock::Hasheddef;
+          Symbols.back().Name = trimGoObjInlineHash(Symbols.back().Name);
           std::array<uint8_t, GoObj::HashSize> Value;
           std::copy(Hash.bytes_begin(), Hash.bytes_end(), Value.begin());
           Symbols.back().ContentHash = Value;
@@ -1988,9 +2018,20 @@ uint64_t GoObjObjectWriter::writeObject() {
             break;
           }
         }
-        if (std::optional<uint64_t> ExactSize =
-                Asm->getContext().getGoObjSymbolSize(
+        if (const MCSymbol *ExactEnd =
+                Asm->getContext().getGoObjContentAddressableEnd(
                     SectionSymbols[I].Symbol)) {
+          if (!ExactEnd->isInSection() || &ExactEnd->getSection() != &Section)
+            report_fatal_error(
+                "GoObj content-addressable function end is invalid");
+          uint64_t ExactEndOffset = Asm->getSymbolOffset(*ExactEnd);
+          if (ExactEndOffset < Begin || ExactEndOffset > End)
+            report_fatal_error("GoObj content-addressable function size "
+                               "overlaps another symbol");
+          End = ExactEndOffset;
+        } else if (std::optional<uint64_t> ExactSize =
+                       Asm->getContext().getGoObjSymbolSize(
+                           SectionSymbols[I].Symbol)) {
           if (*ExactSize > SectionSize - Begin || Begin + *ExactSize > End)
             report_fatal_error(
                 "GoObj global size overlaps the next section symbol");
@@ -3022,20 +3063,6 @@ uint64_t GoObjObjectWriter::writeObject() {
   };
   std::vector<IndexedRef> IndexedRefs;
   DenseMap<uint64_t, uint32_t> IndexedRefIndexes;
-  auto TrimInlineHash = [](StringRef Name) {
-    // Match cmd/internal/obj.TrimInlineHash. The Go compiler inserts the
-    // base64 encoding of an 8-byte inline-call-stack hash between '#'
-    // delimiters. RefName is a tooling aid and intentionally omits it.
-    constexpr size_t InlineHashLength = 12;
-    size_t Begin = Name.find('#');
-    if (Begin == StringRef::npos ||
-        Name.size() < Begin + InlineHashLength + 2 ||
-        Name[Begin + InlineHashLength + 1] != '#')
-      return Name.str();
-    return (Name.take_front(Begin) +
-            Name.drop_front(Begin + InlineHashLength + 2))
-        .str();
-  };
   auto RecordIndexedRef = [&](GoObjSymRef Ref, StringRef Name, uint8_t Flags2) {
     uint64_t Key = (static_cast<uint64_t>(Ref.PkgIdx) << 32) | Ref.SymIdx;
     auto It = IndexedRefIndexes.find(Key);
@@ -3079,7 +3106,8 @@ uint64_t GoObjObjectWriter::writeObject() {
           report_fatal_error("conflicting GoObj symbol reference identity");
         GoObjSymRef Ref{GetPackageIndex(Metadata->PackagePrefix),
                         Metadata->SymIdx};
-        RecordIndexedRef(Ref, TrimInlineHash(Identity.Name), Metadata->Flags2);
+        RecordIndexedRef(Ref, trimGoObjInlineHash(Identity.Name),
+                         Metadata->Flags2);
         return Ref;
       }
       bool IsFunction;
@@ -3320,6 +3348,140 @@ uint64_t GoObjObjectWriter::writeObject() {
                         return LHS.Offset < RHS.Offset;
                       });
   }
+
+  // Match cmd/internal/obj.(*writer).contentHash for text symbols. Their
+  // identity depends on final machine bytes and resolved GoObj SymRefs, so it
+  // must be computed here rather than in the Go frontend.
+  std::vector<uint8_t> ContentHashState(Symbols.size());
+  std::function<void(uint32_t)> ComputeContentHash = [&](uint32_t SymbolIndex) {
+    if (SymbolIndex >= Symbols.size())
+      report_fatal_error("GoObj content hash references an invalid symbol");
+    GoObjSymbol &Symbol = Symbols[SymbolIndex];
+    if (Symbol.ContentHash) {
+      ContentHashState[SymbolIndex] = 2;
+      return;
+    }
+    if (!Symbol.ComputeContentHash)
+      report_fatal_error("GoObj hashed definition has no content hash source");
+    if (ContentHashState[SymbolIndex] == 1)
+      report_fatal_error("mutually recursive GoObj content hashes");
+    if (ContentHashState[SymbolIndex] == 2)
+      return;
+    ContentHashState[SymbolIndex] = 1;
+
+    SHA256 Hasher;
+    const char Version = 1;
+    Hasher.update(StringRef(&Version, 1));
+
+    char Header[9];
+    support::endian::write64le(Header, Symbol.Size);
+    if (Symbol.Type == GoObj::STEXT)
+      Header[8] = 't';
+    else if (Symbol.Type == GoObj::STEXTFIPS)
+      Header[8] = 'f';
+    else
+      report_fatal_error("deferred GoObj content hash is not text");
+    Hasher.update(StringRef(Header, sizeof(Header)));
+    Hasher.update(trimGoObjInlineHash(Symbol.Name));
+
+    ArrayRef<char> Data(Symbol.Data);
+    while (!Data.empty() && Data.back() == 0)
+      Data = Data.drop_back();
+    if (!Data.empty())
+      Hasher.update(StringRef(Data.data(), Data.size()));
+
+    GoObjSymRef Self = DefinedSymRefs[SymbolIndex];
+    for (const GoObjSymbol::Relocation &Reloc : Symbol.Relocations) {
+      char Encoded[14];
+      support::endian::write32le(Encoded, Reloc.Offset);
+      Encoded[4] = static_cast<char>(Reloc.Size);
+      Encoded[5] = static_cast<char>(Reloc.Type);
+      support::endian::write64le(Encoded + 6,
+                                 static_cast<uint64_t>(Reloc.Addend));
+      Hasher.update(StringRef(Encoded, sizeof(Encoded)));
+
+      GoObjSymRef Target{Reloc.PkgIdx, Reloc.SymIdx};
+      if (Target.PkgIdx == GoObj::PkgIdxInvalid) {
+        Hasher.update("nil symbol");
+        continue;
+      }
+      if (Target.PkgIdx == Self.PkgIdx && Target.SymIdx == Self.SymIdx) {
+        Hasher.update("self symbol");
+        continue;
+      }
+
+      char Kind;
+      char Index[4];
+      switch (Target.PkgIdx) {
+      case GoObj::PkgIdxHashed64: {
+        Kind = 0;
+        Hasher.update(StringRef(&Kind, 1));
+        if (Target.SymIdx >= Hashed64defSymbols.size())
+          report_fatal_error("invalid GoObj short-hashed reference");
+        const GoObjSymbol &TargetSymbol =
+            Symbols[Hashed64defSymbols[Target.SymIdx]];
+        if (TargetSymbol.ContentHash64)
+          Hasher.update(ArrayRef<uint8_t>(*TargetSymbol.ContentHash64));
+        else if (TargetSymbol.Data.size() == GoObj::Hash64Size)
+          Hasher.update(
+              StringRef(TargetSymbol.Data.data(), TargetSymbol.Data.size()));
+        else
+          report_fatal_error("GoObj short-hashed target has invalid data");
+        break;
+      }
+      case GoObj::PkgIdxHashed: {
+        Kind = 1;
+        Hasher.update(StringRef(&Kind, 1));
+        if (Target.SymIdx >= HasheddefSymbols.size())
+          report_fatal_error("invalid GoObj hashed reference");
+        uint32_t TargetIndex = HasheddefSymbols[Target.SymIdx];
+        ComputeContentHash(TargetIndex);
+        Hasher.update(ArrayRef<uint8_t>(*Symbols[TargetIndex].ContentHash));
+        break;
+      }
+      case GoObj::PkgIdxNone: {
+        Kind = 2;
+        Hasher.update(StringRef(&Kind, 1));
+        if (Target.SymIdx < NonpkgdefSymbols.size()) {
+          Hasher.update(Symbols[NonpkgdefSymbols[Target.SymIdx]].Name);
+        } else {
+          uint32_t RefIndex = Target.SymIdx - NonpkgdefSymbols.size();
+          if (RefIndex >= NonPkgRefs.size())
+            report_fatal_error("invalid GoObj non-package reference");
+          Hasher.update(NonPkgRefs[RefIndex].Name);
+        }
+        break;
+      }
+      case GoObj::PkgIdxBuiltin:
+        Kind = 3;
+        Hasher.update(StringRef(&Kind, 1));
+        support::endian::write32le(Index, Target.SymIdx);
+        Hasher.update(StringRef(Index, sizeof(Index)));
+        break;
+      case GoObj::PkgIdxSelf:
+        Hasher.update(Config.PackagePath);
+        support::endian::write32le(Index, Target.SymIdx);
+        Hasher.update(StringRef(Index, sizeof(Index)));
+        break;
+      default:
+        if (Target.PkgIdx >= PackagePrefixes.size())
+          report_fatal_error("invalid GoObj imported package reference");
+        Hasher.update(PackagePrefixes[Target.PkgIdx]);
+        support::endian::write32le(Index, Target.SymIdx);
+        Hasher.update(StringRef(Index, sizeof(Index)));
+        break;
+      }
+    }
+
+    std::array<uint8_t, 32> FullHash = Hasher.final();
+    std::array<uint8_t, GoObj::HashSize> Hash;
+    std::copy_n(FullHash.begin(), Hash.size(), Hash.begin());
+    Symbol.ContentHash = Hash;
+    ContentHashState[SymbolIndex] = 2;
+  };
+  for (uint32_t SymbolIndex : HasheddefSymbols)
+    if (Symbols[SymbolIndex].ComputeContentHash)
+      ComputeContentHash(SymbolIndex);
 
   SmallString<0> Body;
   raw_svector_ostream BodyOS(Body);
