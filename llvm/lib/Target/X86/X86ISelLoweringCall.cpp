@@ -345,9 +345,38 @@ handleMaskRegisterForCallingConv(unsigned NumElts, CallingConv::ID CC,
   return {MVT::INVALID_SIMPLE_VALUE_TYPE, 0};
 }
 
+static MVT getGoABIWideVectorCarrier(CallingConv::ID CC, EVT VT,
+                                     const X86Subtarget &Subtarget) {
+  if (!goabi::isGoABIInternalCallingConv(CC) || !VT.isFixedLengthVector())
+    return MVT::INVALID_SIMPLE_VALUE_TYPE;
+
+  // Go assigns one floating-point register slot to each fixed-width SIMD
+  // value. Keep that physical carrier independent of whether the source lane
+  // type is legal for this function's target features: AVX, for example,
+  // provides a YMM carrier even though LLVM otherwise splits v32i8 until
+  // AVX2. The frontend guarantees the corresponding width feature at every
+  // Go ABI boundary.
+  switch (VT.getFixedSizeInBits()) {
+  case 256:
+    if (!Subtarget.hasAVX())
+      report_fatal_error("256-bit Go ABI SIMD carrier requires AVX");
+    return MVT::v8f32;
+  case 512:
+    if (!Subtarget.useAVX512Regs())
+      report_fatal_error("512-bit Go ABI SIMD carrier requires AVX-512");
+    return MVT::v16f32;
+  default:
+    return MVT::INVALID_SIMPLE_VALUE_TYPE;
+  }
+}
+
 MVT X86TargetLowering::getRegisterTypeForCallingConv(LLVMContext &Context,
                                                      CallingConv::ID CC,
                                                      EVT VT) const {
+  if (MVT Carrier = getGoABIWideVectorCarrier(CC, VT, Subtarget);
+      Carrier != MVT::INVALID_SIMPLE_VALUE_TYPE)
+    return Carrier;
+
   if (VT.isVector()) {
     if (VT.getVectorElementType() == MVT::i1 && Subtarget.hasAVX512()) {
       unsigned NumElts = VT.getVectorNumElements();
@@ -384,6 +413,10 @@ MVT X86TargetLowering::getRegisterTypeForCallingConv(LLVMContext &Context,
 unsigned X86TargetLowering::getNumRegistersForCallingConv(LLVMContext &Context,
                                                           CallingConv::ID CC,
                                                           EVT VT) const {
+  if (getGoABIWideVectorCarrier(CC, VT, Subtarget) !=
+      MVT::INVALID_SIMPLE_VALUE_TYPE)
+    return 1;
+
   if (VT.isVector()) {
     if (VT.getVectorElementType() == MVT::i1 && Subtarget.hasAVX512()) {
       unsigned NumElts = VT.getVectorNumElements();

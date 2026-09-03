@@ -121,7 +121,64 @@ entry:
 ; CHECK-LABEL: name: vector512_stack_result
 ; CHECK: VMOVDQU64Zmr $rsp, 1, $noreg, 8, $noreg, {{.*}}$zmm0
 
+define goabiinternal <32 x i8> @vector256_avx2_callee(
+    <32 x i8> %value, double %after) #0 {
+entry:
+  ret <32 x i8> %value
+}
+
+; CHECK-LABEL: name: vector256_avx2_callee
+; CHECK: liveins:
+; CHECK-NEXT: - { reg: '$ymm0'
+; CHECK: RET 0, $ymm0
+
+define goabiinternal <32 x i8> @vector256_avx_caller(
+    <32 x i8> %value, double %after) #4 {
+entry:
+  %result = call goabiinternal <32 x i8> @vector256_avx2_callee(
+      <32 x i8> %value, double %after)
+  ret <32 x i8> %result
+}
+
+; AVX does not make LLVM's integer v32i8 operations legal, but it does provide
+; the YMM carrier used by Go for every 256-bit SIMD lane shape. The call must
+; therefore keep the same one-slot ABI when the callee additionally uses AVX2.
+; CHECK-LABEL: name: vector256_avx_caller
+; CHECK: liveins:
+; CHECK-NEXT: - { reg: '$ymm0'
+; CHECK-NEXT: - { reg: '$xmm1'
+; CHECK: CALL64pcrel32 @vector256_avx2_callee{{.*}}implicit $ymm0, implicit $xmm1, implicit-def $ymm0
+; CHECK: RET 0, $ymm0
+
+define goabiinternal <64 x i8> @vector512_bw_callee(
+    <64 x i8> %value, double %after) #1 {
+entry:
+  ret <64 x i8> %value
+}
+
+; CHECK-LABEL: name: vector512_bw_callee
+; CHECK: liveins:
+; CHECK-NEXT: - { reg: '$zmm0'
+; CHECK: RET 0, $zmm0
+
+define goabiinternal <64 x i8> @vector512_f_caller(
+    <64 x i8> %value, double %after) #5 {
+entry:
+  %result = call goabiinternal <64 x i8> @vector512_bw_callee(
+      <64 x i8> %value, double %after)
+  ret <64 x i8> %result
+}
+
+; CHECK-LABEL: name: vector512_f_caller
+; CHECK: liveins:
+; CHECK-NEXT: - { reg: '$zmm0'
+; CHECK-NEXT: - { reg: '$xmm1'
+; CHECK: CALL64pcrel32 @vector512_bw_callee{{.*}}implicit $zmm0, implicit $xmm1, implicit-def $zmm0
+; CHECK: RET 0, $zmm0
+
 attributes #0 = { "target-features"="+avx,+avx2" }
 attributes #1 = { "target-features"="+avx,+avx2,+avx512f,+avx512bw" }
 attributes #2 = { "go_results_tuple" "target-features"="+avx,+avx2" }
 attributes #3 = { "go_results_tuple" "target-features"="+avx,+avx2,+avx512f,+avx512bw" }
+attributes #4 = { "target-features"="+avx" }
+attributes #5 = { "target-features"="+avx,+avx2,+avx512f" }
