@@ -133,11 +133,11 @@ entry:
 ; ASM: ldr x0, [sp, #8]
 ; ASM-NEXT: b [[LARGE_CHECK]]
 ; ASM: [[LARGE_BODY]]:
-; ASM: stp x29, x30, [x16, #-8]
-; ASM-NEXT: mov sp, x16
+; ASM: stp x29, x30, [x27, #-8]
+; ASM-NEXT: mov sp, x27
 ; ASM: sub x29, sp, #8
 ; ASM: ldp x29, x30, [sp, #-8]
-; ASM: mov sp, x16
+; ASM: mov sp, x27
 
 ; ASM-LABEL: largeclosure:
 ; ASM: [[CLOSURE_CHECK:.LBB[0-9_]+]]:

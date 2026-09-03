@@ -1,0 +1,101 @@
+# REQUIRES: aarch64-registered-target
+# RUN: llc -mtriple=aarch64-apple-darwin-goobj -start-before=prolog-epilog \
+# RUN:   -verify-machineinstrs -o - %s | FileCheck %s --check-prefix=ASM
+# RUN: llc -mtriple=aarch64-apple-darwin-goobj -start-before=prolog-epilog \
+# RUN:   -verify-machineinstrs -goobj-package-path=main -filetype=obj %s -o %t.o
+# RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o \
+# RUN:   | FileCheck %s --check-prefix=OBJ
+
+# X16 is live into the shrink-wrapped save point as it is for indirect
+# statepoint calls. The large-frame prologue must use Go's reserved R27/REGTMP
+# rather than clobbering X16. PCSP must still describe only the framed range.
+# ASM-LABEL: large_indirect_call:
+# ASM: sub x27, sp, #288
+# ASM-NEXT: stp x29, x30, [x27, #-8]
+# ASM-NEXT: mov sp, x27
+# ASM: blr x16
+# ASM: add x27, sp, #288
+# ASM: mov sp, x27
+# ASM: ret
+# OBJ: aux 0.3: type=pcsp target= pc=[0-12:0,12-19:288,19-20:0]
+
+--- |
+  target triple = "aarch64-apple-darwin-goobj"
+
+  define goabiinternal void @large_indirect_call(ptr %target, i1 %take_call)
+      #0 gc "statepoint-example" {
+  entry:
+    %buffer = alloca [256 x i8], align 16
+    br i1 %take_call, label %call, label %exit
+
+  call:
+    store volatile i8 1, ptr %buffer, align 1
+    %token = call goabiinternal token (i64, i32, ptr, i32, i32, ...)
+        @llvm.experimental.gc.statepoint.p0(
+            i64 1, i32 0, ptr elementtype(void ()) %target,
+            i32 0, i32 0, i32 0, i32 0)
+    br label %exit
+
+  exit:
+    ret void
+  }
+
+  declare token @llvm.experimental.gc.statepoint.p0(
+      i64 immarg, i32 immarg, ptr, i32 immarg, i32 immarg, ...)
+
+  attributes #0 = { "frame-pointer"="non-leaf" }
+...
+---
+name:            large_indirect_call
+alignment:       4
+tracksRegLiveness: true
+noPhis:          true
+noVRegs:         true
+liveins:
+  - { reg: '$x16' }
+  - { reg: '$w1' }
+frameInfo:
+  maxAlignment:    16
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: non-leaf
+  maxCallFrameSize: 8
+  goABIStackArgsSize: 0
+  goABIArgSize:    16
+  localFrameSize:  256
+  savePoint:
+    - point:           '%bb.1'
+      registers:       []
+  restorePoint:
+    - point:           '%bb.1'
+      registers:       []
+fixedStack:
+  - { id: 0, type: spill-slot, offset: 16, size: 1, alignment: 16,
+      stack-id: default }
+  - { id: 1, type: spill-slot, offset: 8, size: 8, alignment: 8,
+      stack-id: default }
+stack:
+  - { id: 0, name: buffer, type: default, offset: 0, size: 256,
+      alignment: 16, stack-id: default, local-offset: -256 }
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    successors: %bb.1(0x40000000), %bb.2(0x40000000)
+    liveins: $w1, $x16
+
+    TBZW killed renamable $w1, 0, %bb.2
+    B %bb.1
+
+  bb.1.call:
+    successors: %bb.2(0x80000000)
+    liveins: $x16
+
+    renamable $w8 = MOVi32imm 1
+    STRBBui killed renamable $w8, %stack.0.buffer, 0 :: (volatile store (s8), align 16)
+    ADJCALLSTACKDOWN 8, 0, implicit-def dead $sp, implicit $sp
+    STATEPOINT 1, 0, 0, killed renamable $x16, 2, 22, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, csr_aarch64_go, implicit-def $sp, implicit-def dead early-clobber $lr
+    ADJCALLSTACKUP 8, 0, implicit-def dead $sp, implicit $sp
+
+  bb.2.exit:
+    RET_ReallyLR
+...

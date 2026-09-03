@@ -47,6 +47,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -187,7 +188,21 @@ StatepointLoweringState::allocateStackSlot(EVT ValueType,
 
   // Couldn't find a free slot, so create a new one:
 
-  SDValue SpillSlot = Builder.DAG.CreateStackTemporary(ValueType);
+  // A statepoint spill only needs the alignment required by the legal types
+  // used to store the value. Using the preferred alignment of an illegal
+  // vector can otherwise force dynamic stack realignment even though the
+  // value is split into naturally aligned legal vector stores. Preserve as
+  // much of the original preferred alignment as the target's natural stack
+  // alignment provides without realignment.
+  Align SpillAlign = Builder.DAG.getReducedAlign(ValueType, /*UseABI=*/false);
+  const DataLayout &DL = Builder.DAG.getDataLayout();
+  if (MaybeAlign StackAlign = DL.getStackAlignment()) {
+    Type *SpillType = ValueType.getTypeForEVT(*Builder.DAG.getContext());
+    Align PreferredAlign = DL.getPrefTypeAlign(SpillType);
+    SpillAlign = std::max(SpillAlign, std::min(PreferredAlign, *StackAlign));
+  }
+  SDValue SpillSlot =
+      Builder.DAG.CreateStackTemporary(ValueType.getStoreSize(), SpillAlign);
   const unsigned FI = cast<FrameIndexSDNode>(SpillSlot)->getIndex();
   MFI.markAsStatepointSpillSlotObjectIndex(FI);
 

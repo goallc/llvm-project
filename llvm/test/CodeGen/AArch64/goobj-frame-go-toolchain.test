@@ -1,0 +1,9 @@
+# This compiles a Go declaration, appends an LLVM-generated large-frame GoObj,
+# links it with the Go linker, and executes the result. The LLVM function grows
+# the goroutine stack and calls runtime.GC while its 8 KiB frame is active.
+
+# REQUIRES: aarch64-registered-target, system-darwin, target-aarch64, native
+# RUN: %python %S/Inputs/goobj-frame-go-toolchain.py --llc llc --work-dir %t.dir \
+# RUN:   | FileCheck %s
+
+# CHECK: goobj AArch64 frame test output: 123

@@ -110,14 +110,15 @@ AArch64InstrInfo::AArch64InstrInfo(const AArch64Subtarget &STI)
       RI(STI.getTargetTriple(), STI.getHwMode()), Subtarget(STI) {}
 
 int64_t AArch64InstrInfo::getGoObjSPAdjust(const MachineInstr &MI) const {
-  // Large Go frames form the final SP in X16, save the frame record relative
-  // to it, and then copy X16 to SP in one architectural update. The copy does
-  // not encode the adjustment, so recover it from PEI's finalized frame size.
+  // Large Go frames form the final SP in Go's reserved R27/REGTMP, save the
+  // frame record relative to it, and then copy R27 to SP in one architectural
+  // update. The copy does not encode the adjustment, so recover it from PEI's
+  // finalized frame size.
   if ((MI.getFlag(MachineInstr::FrameSetup) ||
        MI.getFlag(MachineInstr::FrameDestroy)) &&
       MI.getOpcode() == AArch64::ADDXri &&
       MI.getOperand(0).getReg() == AArch64::SP &&
-      MI.getOperand(1).getReg() == AArch64::X16 &&
+      MI.getOperand(1).getReg() == AArch64::X27 &&
       MI.getOperand(2).getImm() == 0 && MI.getOperand(3).getImm() == 0 &&
       AArch64FrameLowering::usesGoFrameLayout(*MI.getMF())) {
     int64_t StackSize =
