@@ -2829,6 +2829,33 @@ uint64_t GoObjObjectWriter::writeObject() {
       DefinedSymbolIndexes[Symbols[I].Symbol] = I;
   }
 
+  // Funcdata entries are positional. The frontend supplies the native Go
+  // traceback argument layout, and this writer owns the preceding synthesized
+  // stack-map slots, so join the two only after every MC definition has a
+  // stable symbol index. FUNCDATA_ArgInfo is slot 5.
+  constexpr unsigned ArgInfoFuncdataIndex = 5;
+  for (GoObjSymbol &Symbol : Symbols) {
+    if (!Symbol.Symbol)
+      continue;
+    const MCSymbol *ArgInfo =
+        Asm->getContext().getGoObjFunctionArgInfo(Symbol.Symbol);
+    if (!ArgInfo)
+      continue;
+    auto Target = DefinedSymbolIndexes.find(ArgInfo);
+    if (Target == DefinedSymbolIndexes.end())
+      report_fatal_error("GoObj function arginfo is not a defined symbol");
+
+    unsigned FuncdataCount = llvm::count_if(
+        Symbol.Auxiliaries, [](const GoObjSymbol::Auxiliary &Aux) {
+          return Aux.Type == GoObj::AuxFuncdata;
+        });
+    if (FuncdataCount > ArgInfoFuncdataIndex)
+      report_fatal_error("GoObj function already has an arginfo funcdata slot");
+    while (FuncdataCount++ < ArgInfoFuncdataIndex)
+      Symbol.Auxiliaries.emplace_back(GoObj::AuxFuncdata, GoObjSymRef{});
+    Symbol.Auxiliaries.emplace_back(GoObj::AuxFuncdata, Target->second);
+  }
+
   std::vector<uint32_t> SymdefSymbols;
   std::vector<uint32_t> Hashed64defSymbols;
   std::vector<uint32_t> HasheddefSymbols;

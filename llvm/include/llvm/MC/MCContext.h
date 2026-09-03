@@ -287,6 +287,9 @@ private:
   /// Go object function ID and function flags keyed by MC symbol.
   DenseMap<const MCSymbol *, std::pair<uint8_t, uint8_t>> GoObjFunctionInfos;
 
+  /// Go object traceback argument data keyed by function MC symbol.
+  DenseMap<const MCSymbol *, const MCSymbol *> GoObjFunctionArgInfos;
+
   /// Native Go content-addressable identity hashes keyed by MC symbol.
   DenseMap<const MCSymbol *, std::string> GoObjSymbolContentHashes;
 
@@ -815,6 +818,15 @@ public:
     if (It == GoObjFunctionInfos.end())
       return std::nullopt;
     return It->second;
+  }
+
+  void setGoObjFunctionArgInfo(const MCSymbol *Sym, const MCSymbol *ArgInfo) {
+    GoObjFunctionArgInfos[Sym] = ArgInfo;
+  }
+
+  const MCSymbol *getGoObjFunctionArgInfo(const MCSymbol *Sym) const {
+    auto It = GoObjFunctionArgInfos.find(Sym);
+    return It == GoObjFunctionArgInfos.end() ? nullptr : It->second;
   }
 
   void setGoObjSymbolContentHash(const MCSymbol *Sym, std::string Hash) {
