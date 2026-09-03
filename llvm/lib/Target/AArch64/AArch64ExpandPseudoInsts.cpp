@@ -18,6 +18,7 @@
 #include "AArch64MachineFunctionInfo.h"
 #include "AArch64Subtarget.h"
 #include "MCTargetDesc/AArch64AddressingModes.h"
+#include "MCTargetDesc/AArch64MCTargetDesc.h"
 #include "Utils/AArch64BaseInfo.h"
 #include "llvm/BinaryFormat/GoObj.h"
 #include "llvm/CodeGen/GoCallingConv.h"
@@ -1649,6 +1650,11 @@ bool AArch64ExpandPseudoImpl::expandMI(MachineBasicBlock &MBB,
     }
 
     transferImpOps(MI, FirstMIB, LastMIB);
+    if (MF.getTarget().getTargetTriple().isOSBinFormatGoObj() &&
+        useAArch64GoObjCompositeRelocations() && Insn.size() == 2 &&
+        FirstMIB->getOpcode() == AArch64::ADRP &&
+        LastMIB->getOpcode() == AArch64::ADDXri)
+      finalizeBundle(MBB, FirstMIB->getIterator(), MBBI->getIterator());
     MI.eraseFromParent();
     return true;
   }
