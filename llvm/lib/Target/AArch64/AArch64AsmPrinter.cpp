@@ -145,8 +145,6 @@ public:
 
   void LowerMOPS(MCStreamer &OutStreamer, const MachineInstr &MI);
 
-  void LowerInlineMemcpyLoop(MCStreamer &OutStreamer, const MachineInstr &MI);
-
   void LowerSTACKMAP(MCStreamer &OutStreamer, StackMaps &SM,
                      const MachineInstr &MI);
   void LowerPATCHPOINT(MCStreamer &OutStreamer, StackMaps &SM,
@@ -1762,81 +1760,6 @@ void AArch64AsmPrinter::LowerMOPS(llvm::MCStreamer &OutStreamer,
 
     EmitToStreamer(OutStreamer, MCIB);
   }
-}
-
-void AArch64AsmPrinter::LowerInlineMemcpyLoop(MCStreamer &OutStreamer,
-                                              const MachineInstr &MI) {
-  Register Dst = MI.getOperand(0).getReg();
-  Register Src = MI.getOperand(1).getReg();
-  Register Size = MI.getOperand(2).getReg();
-  Register Tmp0 = MI.getOperand(3).getReg();
-  Register Tmp1 = MI.getOperand(4).getReg();
-  uint64_t Stride = MI.getOperand(8).getImm();
-
-  MCSymbol *Loop = OutContext.createTempSymbol("aarch64_memcpy_loop");
-  OutStreamer.emitLabel(Loop);
-
-  if (Stride == 16) {
-    EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::LDPXpost)
-                                    .addReg(Src)
-                                    .addReg(Tmp0)
-                                    .addReg(Tmp1)
-                                    .addReg(Src)
-                                    .addImm(2));
-    EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::STPXpost)
-                                    .addReg(Dst)
-                                    .addReg(Tmp0)
-                                    .addReg(Tmp1)
-                                    .addReg(Dst)
-                                    .addImm(2));
-  } else {
-    unsigned LoadOpcode;
-    unsigned StoreOpcode;
-    Register DataReg = Tmp0;
-    switch (Stride) {
-    case 8:
-      LoadOpcode = AArch64::LDRXpost;
-      StoreOpcode = AArch64::STRXpost;
-      break;
-    case 4:
-      LoadOpcode = AArch64::LDRWpost;
-      StoreOpcode = AArch64::STRWpost;
-      DataReg = getWRegFromXReg(DataReg);
-      break;
-    case 2:
-      LoadOpcode = AArch64::LDRHHpost;
-      StoreOpcode = AArch64::STRHHpost;
-      DataReg = getWRegFromXReg(DataReg);
-      break;
-    case 1:
-      LoadOpcode = AArch64::LDRBBpost;
-      StoreOpcode = AArch64::STRBBpost;
-      DataReg = getWRegFromXReg(DataReg);
-      break;
-    default:
-      llvm_unreachable("invalid inline memcpy loop stride");
-    }
-    EmitToStreamer(OutStreamer, MCInstBuilder(LoadOpcode)
-                                    .addReg(Src)
-                                    .addReg(DataReg)
-                                    .addReg(Src)
-                                    .addImm(Stride));
-    EmitToStreamer(OutStreamer, MCInstBuilder(StoreOpcode)
-                                    .addReg(Dst)
-                                    .addReg(DataReg)
-                                    .addReg(Dst)
-                                    .addImm(Stride));
-  }
-
-  EmitToStreamer(OutStreamer, MCInstBuilder(AArch64::SUBSXri)
-                                  .addReg(Size)
-                                  .addReg(Size)
-                                  .addImm(Stride)
-                                  .addImm(0));
-  EmitToStreamer(OutStreamer,
-                 MCInstBuilder(AArch64::Bcc)
-                     .addImm(AArch64CC::NE)
-                     .addExpr(MCSymbolRefExpr::create(Loop, OutContext)));
 }
 
 void AArch64AsmPrinter::LowerSTACKMAP(MCStreamer &OutStreamer, StackMaps &SM,
@@ -3792,10 +3715,6 @@ void AArch64AsmPrinter::emitInstruction(const MachineInstr *MI) {
   case AArch64::MOPSMemorySetPseudo:
   case AArch64::MOPSMemorySetTaggingPseudo:
     LowerMOPS(*OutStreamer, *MI);
-    return;
-
-  case AArch64::InlineMemcpyLoopPseudo:
-    LowerInlineMemcpyLoop(*OutStreamer, *MI);
     return;
 
   case TargetOpcode::STACKMAP:
