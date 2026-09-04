@@ -3806,6 +3806,20 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
     if (std::optional<std::pair<uint8_t, uint8_t>> Info =
             getGoObjFunctionInfo(F))
       OutContext.setGoObjFunctionInfo(CurrentFnSym, Info->first, Info->second);
+    if (std::optional<goabi::GoObjArgInfo> ArgInfo =
+            goabi::getGoObjArgInfo(F)) {
+      OutContext.setGoObjFunctionArgInfo(CurrentFnSym,
+                                         getSymbol(ArgInfo->Data));
+      // Go's traceback bytecode only encodes ordinary offsets below 0xf0.
+      // Until a late machine pass proves individual home stores, conservatively
+      // mark every printable register home unavailable rather than exposing
+      // stale stack contents as an argument value.
+      constexpr uint64_t TraceArgsSpecial = 0xf0;
+      if (ArgInfo->SpillAreaOffset < ArgInfo->ArgSize &&
+          ArgInfo->SpillAreaOffset < TraceArgsSpecial)
+        OutContext.setGoObjFunctionArgLiveStart(
+            CurrentFnSym, static_cast<uint8_t>(ArgInfo->SpillAreaOffset));
+    }
     const MachineFrameInfo &FrameInfo = MF.getFrameInfo();
     uint64_t StackSize =
         FrameInfo.getStackSize() + FrameInfo.getUnsafeStackSize();

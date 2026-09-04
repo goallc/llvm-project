@@ -2105,6 +2105,7 @@ uint64_t GoObjObjectWriter::writeObject() {
   StringMap<uint32_t> FileIndexes;
   StringMap<uint32_t> AuxCarrierIndexes;
   StringMap<uint32_t> GCBitmapCarrierIndexes;
+  DenseMap<const MCSymbol *, uint32_t> ArgLiveInfoSymbols;
   struct PendingFuncInfoPatch {
     uint32_t CarrierSymbol = 0;
     uint32_t FileCount = 0;
@@ -2752,6 +2753,27 @@ uint64_t GoObjObjectWriter::writeObject() {
               ? makeConstantPCTab(InitialUnsafePointValue, CodeSize, PCQuantum)
               : makePCTab(InitialUnsafePointValue, UnsafePointEntries, CodeSize,
                           PCQuantum));
+      std::optional<uint32_t> ArgLiveIndexSym;
+      std::optional<uint32_t> AbsentInlineTreeIndexSym;
+      if (std::optional<uint8_t> Start =
+              Asm->getContext().getGoObjFunctionArgLiveStart(
+                  Symbols[I].Symbol)) {
+        // FUNCDATA_ArgLiveInfo starts with the first tracked spill offset.
+        // Tracebacks print at most ten components, so two zero bitmap bytes
+        // conservatively mark every printable register home unavailable.
+        SmallString<3> ArgLiveInfo;
+        ArgLiveInfo.push_back(static_cast<char>(*Start));
+        ArgLiveInfo.push_back(0);
+        ArgLiveInfo.push_back(0);
+        ArgLiveInfoSymbols[Symbols[I].Symbol] = getOrAddHashedAuxCarrierSymbol(
+            Symbols, AuxCarrierIndexes, 'F', ArgLiveInfo);
+        ArgLiveIndexSym = getOrAddHashedAuxCarrierSymbol(
+            Symbols, AuxCarrierIndexes, 'P',
+            makeConstantPCTab(1, CodeSize, PCQuantum));
+        AbsentInlineTreeIndexSym = getOrAddHashedAuxCarrierSymbol(
+            Symbols, AuxCarrierIndexes, 'P',
+            makeConstantPCTab(-1, CodeSize, PCQuantum));
+      }
 
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncInfo, FuncInfoSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, ArgsMapSym});
@@ -2775,6 +2797,13 @@ uint64_t GoObjObjectWriter::writeObject() {
         Symbols[I].Auxiliaries.push_back({GoObj::AuxPcinline, PcinlineSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, UnsafePointSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, StackMapIndexSym});
+      if (ArgLiveIndexSym) {
+        // PCDATA_ArgLiveIndex is slot 3. Slot 2 is reserved for inline stack
+        // unwinding metadata that LLVM does not currently synthesize.
+        Symbols[I].Auxiliaries.push_back(
+            {GoObj::AuxPcdata, *AbsentInlineTreeIndexSym});
+        Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, *ArgLiveIndexSym});
+      }
     }
   }
 
@@ -2868,6 +2897,36 @@ uint64_t GoObjObjectWriter::writeObject() {
        I != E; ++I) {
     if (Symbols[I].Symbol)
       DefinedSymbolIndexes[Symbols[I].Symbol] = I;
+  }
+
+  // Funcdata entries are positional. The frontend supplies the native Go
+  // traceback argument layout, and this writer owns the preceding synthesized
+  // stack-map slots, so join the two only after every MC definition has a
+  // stable symbol index. FUNCDATA_ArgInfo is slot 5.
+  constexpr unsigned ArgInfoFuncdataIndex = 5;
+  for (GoObjSymbol &Symbol : Symbols) {
+    if (!Symbol.Symbol)
+      continue;
+    const MCSymbol *ArgInfo =
+        Asm->getContext().getGoObjFunctionArgInfo(Symbol.Symbol);
+    if (!ArgInfo)
+      continue;
+    auto Target = DefinedSymbolIndexes.find(ArgInfo);
+    if (Target == DefinedSymbolIndexes.end())
+      report_fatal_error("GoObj function arginfo is not a defined symbol");
+
+    unsigned FuncdataCount = llvm::count_if(
+        Symbol.Auxiliaries, [](const GoObjSymbol::Auxiliary &Aux) {
+          return Aux.Type == GoObj::AuxFuncdata;
+        });
+    if (FuncdataCount > ArgInfoFuncdataIndex)
+      report_fatal_error("GoObj function already has an arginfo funcdata slot");
+    while (FuncdataCount++ < ArgInfoFuncdataIndex)
+      Symbol.Auxiliaries.emplace_back(GoObj::AuxFuncdata, GoObjSymRef{});
+    Symbol.Auxiliaries.emplace_back(GoObj::AuxFuncdata, Target->second);
+    auto ArgLiveInfo = ArgLiveInfoSymbols.find(Symbol.Symbol);
+    if (ArgLiveInfo != ArgLiveInfoSymbols.end())
+      Symbol.Auxiliaries.emplace_back(GoObj::AuxFuncdata, ArgLiveInfo->second);
   }
 
   std::vector<uint32_t> SymdefSymbols;

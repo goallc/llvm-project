@@ -9162,6 +9162,7 @@ static AArch64GoFormalArgInfo prepareAArch64GoFormalArguments(
                                               StackResultsEnd,
                                               DAG.getDataLayout(), ABIConfig);
   const goabi::CallLayout &Layout = Info.Layout;
+  goabi::validateGoObjArgInfo(F, Layout);
   MFI.setGoABIArgSizes(Layout.StackArgsSize, Layout.ArgSize);
 
   goabi::EntryArgsInfo EntryArgs =
@@ -9172,7 +9173,7 @@ static AArch64GoFormalArgInfo prepareAArch64GoFormalArguments(
   uint64_t SpillOffset = Layout.SpillAreaOffset;
   for (unsigned I = 0, E = Layout.Args.size(); I != E; ++I) {
     const goabi::ValueLayout &ArgLayout = Layout.Args[I];
-    if (!ArgLayout.InRegs)
+    if (!ArgLayout.InRegs || ArgLayout.Size == 0)
       continue;
     SpillOffset = alignTo(SpillOffset, ArgLayout.Alignment.value());
     ArgSpillOffsets[I] = SpillOffset;
