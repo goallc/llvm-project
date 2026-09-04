@@ -112,6 +112,17 @@ public:
     int32_t Value;
   };
 
+  struct GoObjArgLiveEntry {
+    const MCSymbol *Label;
+    uint16_t Bitmap;
+  };
+
+  struct GoObjArgLiveInfo {
+    uint8_t StartOffset;
+    uint8_t NumSlots;
+    std::vector<GoObjArgLiveEntry> Entries;
+  };
+
   struct GoObjStackMapLocation {
     enum LocationType : uint8_t {
       Unprocessed,
@@ -290,8 +301,8 @@ private:
   /// Go object traceback argument data keyed by function MC symbol.
   DenseMap<const MCSymbol *, const MCSymbol *> GoObjFunctionArgInfos;
 
-  /// First ABIInternal register argument home that cannot yet be proven live.
-  DenseMap<const MCSymbol *, uint8_t> GoObjFunctionArgLiveStarts;
+  /// Final-layout liveness of ABIInternal register argument homes.
+  DenseMap<const MCSymbol *, GoObjArgLiveInfo> GoObjFunctionArgLiveInfos;
 
   /// Native Go content-addressable identity hashes keyed by MC symbol.
   DenseMap<const MCSymbol *, std::string> GoObjSymbolContentHashes;
@@ -838,16 +849,15 @@ public:
     return It == GoObjFunctionArgInfos.end() ? nullptr : It->second;
   }
 
-  void setGoObjFunctionArgLiveStart(const MCSymbol *Sym, uint8_t Offset) {
-    GoObjFunctionArgLiveStarts[Sym] = Offset;
+  void setGoObjFunctionArgLiveInfo(const MCSymbol *Sym,
+                                   GoObjArgLiveInfo Info) {
+    GoObjFunctionArgLiveInfos[Sym] = std::move(Info);
   }
 
-  std::optional<uint8_t>
-  getGoObjFunctionArgLiveStart(const MCSymbol *Sym) const {
-    auto It = GoObjFunctionArgLiveStarts.find(Sym);
-    if (It == GoObjFunctionArgLiveStarts.end())
-      return std::nullopt;
-    return It->second;
+  const GoObjArgLiveInfo *
+  getGoObjFunctionArgLiveInfo(const MCSymbol *Sym) const {
+    auto It = GoObjFunctionArgLiveInfos.find(Sym);
+    return It == GoObjFunctionArgLiveInfos.end() ? nullptr : &It->second;
   }
 
   void setGoObjSymbolContentHash(const MCSymbol *Sym, std::string Hash) {

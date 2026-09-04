@@ -2755,21 +2755,58 @@ uint64_t GoObjObjectWriter::writeObject() {
                           PCQuantum));
       std::optional<uint32_t> ArgLiveIndexSym;
       std::optional<uint32_t> AbsentInlineTreeIndexSym;
-      if (std::optional<uint8_t> Start =
-              Asm->getContext().getGoObjFunctionArgLiveStart(
+      if (const MCContext::GoObjArgLiveInfo *LiveInfo =
+              Asm->getContext().getGoObjFunctionArgLiveInfo(
                   Symbols[I].Symbol)) {
-        // FUNCDATA_ArgLiveInfo starts with the first tracked spill offset.
-        // Tracebacks print at most ten components, so two zero bitmap bytes
-        // conservatively mark every printable register home unavailable.
-        SmallString<3> ArgLiveInfo;
-        ArgLiveInfo.push_back(static_cast<char>(*Start));
-        ArgLiveInfo.push_back(0);
-        ArgLiveInfo.push_back(0);
+        if (LiveInfo->NumSlots == 0 || LiveInfo->NumSlots > 10)
+          report_fatal_error("invalid GoObj argument liveness slot count");
+        unsigned BitmapBytes = divideCeil(LiveInfo->NumSlots, 8u);
+        SmallString<8> ArgLiveInfo;
+        ArgLiveInfo.push_back(static_cast<char>(LiveInfo->StartOffset));
+        ArgLiveInfo.append(BitmapBytes, 0);
+        DenseMap<uint16_t, int32_t> BitmapOffsets;
+        BitmapOffsets[0] = 1;
+        SmallVector<GoObjPCTabEntry, 8> ArgLiveEntries;
+        for (const MCContext::GoObjArgLiveEntry &Entry : LiveInfo->Entries) {
+          if (!Entry.Label || !Entry.Label->isInSection() ||
+              &Entry.Label->getSection() != &Symbols[I].Symbol->getSection())
+            report_fatal_error(
+                "GoObj argument liveness label is outside its function");
+          uint64_t LabelOffset = Asm->getSymbolOffset(*Entry.Label);
+          if (LabelOffset < Symbols[I].SectionBegin ||
+              LabelOffset > Symbols[I].SectionEnd)
+            report_fatal_error(
+                "GoObj argument liveness label is outside its function");
+          uint16_t ValidMask =
+              uint16_t((uint32_t(1) << LiveInfo->NumSlots) - 1);
+          if ((Entry.Bitmap & ~ValidMask) != 0)
+            report_fatal_error("invalid GoObj argument liveness bitmap");
+          auto [It, Inserted] = BitmapOffsets.try_emplace(
+              Entry.Bitmap, static_cast<int32_t>(ArgLiveInfo.size()));
+          if (Inserted)
+            for (unsigned Byte = 0; Byte != BitmapBytes; ++Byte)
+              ArgLiveInfo.push_back(
+                  static_cast<char>(Entry.Bitmap >> (Byte * 8)));
+          ArgLiveEntries.push_back(
+              {LabelOffset - Symbols[I].SectionBegin, It->second});
+        }
+        llvm::stable_sort(ArgLiveEntries,
+                          [](const auto &LHS, const auto &RHS) {
+                            return LHS.PC < RHS.PC;
+                          });
+        SmallVector<GoObjPCTabEntry, 8> NormalizedArgLiveEntries;
+        for (const GoObjPCTabEntry &Entry : ArgLiveEntries) {
+          if (!NormalizedArgLiveEntries.empty() &&
+              NormalizedArgLiveEntries.back().PC == Entry.PC)
+            NormalizedArgLiveEntries.back().Value = Entry.Value;
+          else
+            NormalizedArgLiveEntries.push_back(Entry);
+        }
         ArgLiveInfoSymbols[Symbols[I].Symbol] = getOrAddHashedAuxCarrierSymbol(
             Symbols, AuxCarrierIndexes, 'F', ArgLiveInfo);
         ArgLiveIndexSym = getOrAddHashedAuxCarrierSymbol(
             Symbols, AuxCarrierIndexes, 'P',
-            makeConstantPCTab(1, CodeSize, PCQuantum));
+            makePCTab(1, NormalizedArgLiveEntries, CodeSize, PCQuantum));
         AbsentInlineTreeIndexSym = getOrAddHashedAuxCarrierSymbol(
             Symbols, AuxCarrierIndexes, 'P',
             makeConstantPCTab(-1, CodeSize, PCQuantum));

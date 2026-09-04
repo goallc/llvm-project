@@ -3811,14 +3811,28 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
       OutContext.setGoObjFunctionArgInfo(CurrentFnSym,
                                          getSymbol(ArgInfo->Data));
       // Go's traceback bytecode only encodes ordinary offsets below 0xf0.
-      // Until a late machine pass proves individual home stores, conservatively
-      // mark every printable register home unavailable rather than exposing
-      // stale stack contents as an argument value.
+      // Begin with every register home unavailable. Describe stores already
+      // present in the final machine CFG without requesting new spills.
       constexpr uint64_t TraceArgsSpecial = 0xf0;
       if (ArgInfo->SpillAreaOffset < ArgInfo->ArgSize &&
-          ArgInfo->SpillAreaOffset < TraceArgsSpecial)
-        OutContext.setGoObjFunctionArgLiveStart(
-            CurrentFnSym, static_cast<uint8_t>(ArgInfo->SpillAreaOffset));
+          ArgInfo->SpillAreaOffset < TraceArgsSpecial &&
+          !ArgInfo->TracebackSlots.empty()) {
+        MCContext::GoObjArgLiveInfo LiveInfo{
+            static_cast<uint8_t>(ArgInfo->SpillAreaOffset),
+            static_cast<uint8_t>(ArgInfo->TracebackSlots.size()), {}};
+        goabi::recordGoObjArgLiveStores(MF);
+        const MachineFrameInfo &MFI = MF.getFrameInfo();
+        for (const MachineFrameInfo::GoObjArgLiveEvent &Event :
+             MFI.getGoObjArgLiveEvents()) {
+          uint16_t ValidMask = uint16_t((uint32_t(1) << LiveInfo.NumSlots) - 1);
+          if ((Event.Mask & ~ValidMask) != 0)
+            report_fatal_error(
+                "Go traceback argument liveness has an invalid slot");
+          LiveInfo.Entries.push_back({Event.Label, Event.Mask});
+        }
+        OutContext.setGoObjFunctionArgLiveInfo(CurrentFnSym,
+                                               std::move(LiveInfo));
+      }
     }
     const MachineFrameInfo &FrameInfo = MF.getFrameInfo();
     uint64_t StackSize =

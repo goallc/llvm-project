@@ -7,15 +7,22 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/GoCallingConv.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/CodeGen/CommandFlags.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/MachineMemOperand.h"
+#include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/MC/MCContext.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <limits>
 #include <string>
@@ -23,6 +30,85 @@
 using namespace llvm;
 
 namespace llvm::goabi {
+
+namespace {
+
+constexpr uint8_t TraceArgsSpecial = 0xf0;
+constexpr uint8_t TraceArgsOffsetTooLarge = 0xfb;
+constexpr uint8_t TraceArgsDotdotdot = 0xfc;
+constexpr uint8_t TraceArgsEndAgg = 0xfd;
+constexpr uint8_t TraceArgsStartAgg = 0xfe;
+constexpr uint8_t TraceArgsEndSeq = 0xff;
+
+static void appendGoObjConstantBytes(const Constant *C,
+                                     SmallVectorImpl<uint8_t> &Bytes) {
+  if (const auto *CI = dyn_cast<ConstantInt>(C)) {
+    if (!CI->getType()->isIntegerTy(8))
+      report_fatal_error("GoObj arginfo contains a non-byte integer");
+    Bytes.push_back(static_cast<uint8_t>(CI->getZExtValue()));
+    return;
+  }
+  if (const auto *CDS = dyn_cast<ConstantDataSequential>(C)) {
+    if (!CDS->getElementType()->isIntegerTy(8))
+      report_fatal_error("GoObj arginfo contains non-byte sequential data");
+    for (unsigned I = 0, E = CDS->getNumElements(); I != E; ++I)
+      Bytes.push_back(
+          static_cast<uint8_t>(CDS->getElementAsInteger(I)));
+    return;
+  }
+  if (isa<ConstantAggregateZero>(C)) {
+    Type *Ty = C->getType();
+    if (const auto *AT = dyn_cast<ArrayType>(Ty)) {
+      if (!AT->getElementType()->isIntegerTy(8))
+        report_fatal_error("GoObj arginfo contains non-byte zero data");
+      Bytes.append(AT->getNumElements(), 0);
+      return;
+    }
+  }
+  if (const auto *CA = dyn_cast<ConstantAggregate>(C)) {
+    for (const Use &Op : CA->operands())
+      appendGoObjConstantBytes(cast<Constant>(Op.get()), Bytes);
+    return;
+  }
+  report_fatal_error("GoObj arginfo is not constant byte data");
+}
+
+static SmallVector<std::pair<uint8_t, uint8_t>, 10>
+decodeGoObjTracebackSlots(const GlobalValue &Data, uint64_t ArgSize,
+                          uint64_t SpillAreaOffset) {
+  const auto *GV = dyn_cast<GlobalVariable>(&Data);
+  if (!GV || !GV->hasInitializer())
+    report_fatal_error("GoObj arginfo does not have a constant definition");
+
+  SmallVector<uint8_t, 32> Bytes;
+  appendGoObjConstantBytes(GV->getInitializer(), Bytes);
+  SmallVector<std::pair<uint8_t, uint8_t>, 10> Slots;
+  bool SawEnd = false;
+  for (size_t I = 0; I < Bytes.size();) {
+    uint8_t Op = Bytes[I++];
+    if (Op == TraceArgsEndSeq) {
+      SawEnd = true;
+      break;
+    }
+    if (Op == TraceArgsStartAgg || Op == TraceArgsEndAgg ||
+        Op == TraceArgsDotdotdot || Op == TraceArgsOffsetTooLarge)
+      continue;
+    if (Op >= TraceArgsSpecial || I == Bytes.size())
+      report_fatal_error("malformed GoObj traceback argument bytecode");
+    uint8_t Size = Bytes[I++];
+    if (uint64_t(Op) > ArgSize || uint64_t(Size) > ArgSize - uint64_t(Op))
+      report_fatal_error("GoObj traceback argument is outside its frame");
+    if (uint64_t(Op) >= SpillAreaOffset)
+      Slots.emplace_back(Op, Size);
+  }
+  if (!SawEnd)
+    report_fatal_error("unterminated GoObj traceback argument bytecode");
+  if (Slots.size() > 10)
+    report_fatal_error("GoObj traceback argument bitmap exceeds ten slots");
+  return Slots;
+}
+
+} // namespace
 
 bool isSupportedMustTailCall(const Function &Caller, const CallBase &CB) {
   CallingConv::ID CallerCC = Caller.getCallingConv();
@@ -384,7 +470,127 @@ std::optional<GoObjArgInfo> getGoObjArgInfo(const Function &F) {
       report_fatal_error("!goobj.func.arginfo argument is outside its frame");
     Info.Args.emplace_back(Offset, Size);
   }
+  Info.TracebackSlots = decodeGoObjTracebackSlots(
+      *Info.Data, Info.ArgSize, Info.SpillAreaOffset);
   return Info;
+}
+
+static uint16_t
+getGoObjArgLiveStoreMask(const MachineInstr &MI,
+                         ArrayRef<MachineFrameInfo::GoObjArgLiveSlot> Slots) {
+  if (!MI.mayStore())
+    return 0;
+
+  uint16_t Mask = 0;
+  for (const MachineMemOperand *MMO : MI.memoperands()) {
+    if (!MMO->isStore())
+      continue;
+    const auto *Fixed =
+        dyn_cast_or_null<FixedStackPseudoSourceValue>(MMO->getPseudoValue());
+    if (!Fixed)
+      continue;
+    LocationSize StoreSize = MMO->getSize();
+    if (!StoreSize.hasValue() || !StoreSize.isPrecise() ||
+        StoreSize.isScalable() || MMO->getOffset() < 0)
+      continue;
+    uint64_t StoreBegin = static_cast<uint64_t>(MMO->getOffset());
+    uint64_t StoreBytes = StoreSize.getValue().getFixedValue();
+    if (StoreBegin > UINT64_MAX - StoreBytes)
+      continue;
+    uint64_t StoreEnd = StoreBegin + StoreBytes;
+    for (const MachineFrameInfo::GoObjArgLiveSlot &Slot : Slots) {
+      if (Slot.FrameIndex != Fixed->getFrameIndex())
+        continue;
+      uint64_t SlotBegin = Slot.Offset;
+      uint64_t SlotEnd = SlotBegin + Slot.Size;
+      if (StoreBegin <= SlotBegin && SlotEnd <= StoreEnd)
+        Mask |= Slot.Mask;
+    }
+  }
+  return Mask;
+}
+
+void recordGoObjArgLiveStores(MachineFunction &MF) {
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  ArrayRef<MachineFrameInfo::GoObjArgLiveSlot> Slots =
+      MFI.getGoObjArgLiveSlots();
+  if (Slots.empty())
+    return;
+
+  uint16_t AllMask = 0;
+  for (const MachineFrameInfo::GoObjArgLiveSlot &Slot : Slots)
+    AllMask |= Slot.Mask;
+
+  SmallPtrSet<const MachineBasicBlock *, 32> Reachable;
+  SmallVector<const MachineBasicBlock *, 32> Worklist(1, &MF.front());
+  while (!Worklist.empty()) {
+    const MachineBasicBlock *MBB = Worklist.pop_back_val();
+    if (!Reachable.insert(MBB).second)
+      continue;
+    Worklist.append(MBB->successors().begin(), MBB->successors().end());
+  }
+
+  struct BlockState {
+    uint16_t LiveIn;
+    uint16_t LiveOut;
+    uint16_t Stores;
+  };
+  DenseMap<const MachineBasicBlock *, BlockState> States;
+  for (const MachineBasicBlock &MBB : MF) {
+    uint16_t Stores = 0;
+    for (const MachineInstr &MI : MBB)
+      Stores |= getGoObjArgLiveStoreMask(MI, Slots);
+    uint16_t Initial = Reachable.contains(&MBB) ? AllMask : 0;
+    States[&MBB] = {Initial, Initial, Stores};
+  }
+
+  bool Changed;
+  do {
+    Changed = false;
+    for (const MachineBasicBlock &MBB : MF) {
+      BlockState &State = States[&MBB];
+      uint16_t LiveIn = 0;
+      if (Reachable.contains(&MBB) && &MBB != &MF.front()) {
+        LiveIn = AllMask;
+        if (MBB.pred_empty())
+          LiveIn = 0;
+        else
+          for (const MachineBasicBlock *Pred : MBB.predecessors())
+            LiveIn &= States[Pred].LiveOut;
+      }
+      uint16_t LiveOut = LiveIn | State.Stores;
+      if (State.LiveIn != LiveIn || State.LiveOut != LiveOut) {
+        State.LiveIn = LiveIn;
+        State.LiveOut = LiveOut;
+        Changed = true;
+      }
+    }
+  } while (Changed);
+
+  // At this point block layout and machine instructions are final. Record a
+  // block-entry reset when layout order does not carry the CFG live-in state,
+  // then record each existing home store at its actual post-instruction PC.
+  uint16_t LayoutMask = 0;
+  for (MachineBasicBlock &MBB : MF) {
+    uint16_t Live = States[&MBB].LiveIn;
+    if (&MBB != &MF.front() && Live != LayoutMask) {
+      MBB.setLabelMustBeEmitted();
+      MFI.addGoObjArgLiveEvent(MBB.getSymbol(), Live);
+    }
+    for (MachineInstr &MI : MBB) {
+      uint16_t NewLive = Live | getGoObjArgLiveStoreMask(MI, Slots);
+      if (NewLive == Live)
+        continue;
+      MCSymbol *Label = MI.getPostInstrSymbol();
+      if (!Label) {
+        Label = MF.getContext().createTempSymbol("goobj_arglive");
+        MI.setPostInstrSymbol(MF, Label);
+      }
+      Live = NewLive;
+      MFI.addGoObjArgLiveEvent(Label, Live);
+    }
+    LayoutMask = Live;
+  }
 }
 
 void validateGoObjArgInfo(const Function &F, const CallLayout &Layout) {

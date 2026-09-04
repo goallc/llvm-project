@@ -28,6 +28,7 @@ class MachineFunction;
 class MachineBasicBlock;
 class BitVector;
 class AllocaInst;
+class MCSymbol;
 
 /// The CalleeSavedInfo class tracks the information need to locate where a
 /// callee saved register is in the current frame.
@@ -122,6 +123,18 @@ public:
                       ///< to the stack protector.
     SSPLK_AddrOf      ///< The address of this allocation is exposed and
                       ///< triggered protection.  3rd closest to the protector.
+  };
+
+  struct GoObjArgLiveSlot {
+    int FrameIndex;
+    uint32_t Offset;
+    uint32_t Size;
+    uint16_t Mask;
+  };
+
+  struct GoObjArgLiveEvent {
+    const MCSymbol *Label;
+    uint16_t Mask;
   };
 
 private:
@@ -312,6 +325,13 @@ private:
   /// policy and omitted the stack-growth prologue. GoObj emission consumes
   /// this bit so linker stack accounting observes the same effective policy.
   bool GoObjNoSplit = false;
+
+  /// Final fixed-stack locations corresponding to frontend traceback slots,
+  /// and labels where stores already present in the final machine function
+  /// make those slots valid. These records describe code generation; they do
+  /// not request argument spills.
+  SmallVector<GoObjArgLiveSlot, 10> GoObjArgLiveSlots;
+  SmallVector<GoObjArgLiveEvent, 8> GoObjArgLiveEvents;
 
   /// The number of bytes of callee saved registers that the target wants to
   /// report for the current function in the CodeView S_FRAMEPROC record.
@@ -740,6 +760,28 @@ public:
 
   bool isGoObjNoSplit() const { return GoObjNoSplit; }
   void setGoObjNoSplit(bool Value = true) { GoObjNoSplit = Value; }
+
+  void clearGoObjArgLiveSlots() {
+    GoObjArgLiveSlots.clear();
+    GoObjArgLiveEvents.clear();
+  }
+  void addGoObjArgLiveSlot(int FrameIndex, uint32_t Offset, uint32_t Size,
+                           uint16_t Mask) {
+    assert(isFixedObjectIndex(FrameIndex) && Size != 0 && Mask != 0 &&
+           "invalid Go argument liveness slot");
+    GoObjArgLiveSlots.push_back({FrameIndex, Offset, Size, Mask});
+  }
+  ArrayRef<GoObjArgLiveSlot> getGoObjArgLiveSlots() const {
+    return GoObjArgLiveSlots;
+  }
+
+  void addGoObjArgLiveEvent(const MCSymbol *Label, uint16_t Mask) {
+    assert(Label && "invalid Go argument liveness event");
+    GoObjArgLiveEvents.push_back({Label, Mask});
+  }
+  ArrayRef<GoObjArgLiveEvent> getGoObjArgLiveEvents() const {
+    return GoObjArgLiveEvents;
+  }
 
   /// Returns how many bytes of callee-saved registers the target pushed in the
   /// prologue. Only used for debug info.
