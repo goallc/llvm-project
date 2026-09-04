@@ -336,7 +336,7 @@ CallLayout computeCallLayout(ArrayRef<ValueLayout> Args, uint64_t StackArgsSize,
   uint64_t SpillEnd = alignToValue(StackResultsEnd, Config.PtrAlign);
   Layout.SpillAreaOffset = SpillEnd;
   for (const ValueLayout &ArgLayout : Layout.Args)
-    if (ArgLayout.InRegs)
+    if (ArgLayout.InRegs && ArgLayout.Size != 0)
       SpillEnd = alignToValue(SpillEnd, ArgLayout.Alignment) + ArgLayout.Size;
   Layout.SpillAreaSize = SpillEnd - Layout.SpillAreaOffset;
   Layout.ArgSize = alignToValue(SpillEnd, Config.PtrAlign);
@@ -404,7 +404,7 @@ void validateGoObjArgInfo(const Function &F, const CallLayout &Layout) {
   uint64_t SpillOffset = Layout.SpillAreaOffset;
   for (auto [Index, Arg] : llvm::enumerate(Layout.Args)) {
     uint64_t Offset = Arg.StackOffset;
-    if (Arg.InRegs) {
+    if (Arg.InRegs && Arg.Size != 0) {
       SpillOffset = alignToValue(SpillOffset, Arg.Alignment);
       Offset = SpillOffset;
       SpillOffset += Arg.Size;
@@ -465,7 +465,8 @@ EntryArgsInfo computeEntryArgsInfo(const CallLayout &Layout,
   uint64_t SpillOffset = Layout.SpillAreaOffset;
   for (auto [Index, ArgLayout] : llvm::enumerate(Layout.Args)) {
     if (ArgLayout.InRegs) {
-      SpillOffset = alignToValue(SpillOffset, ArgLayout.Alignment);
+      if (ArgLayout.Size != 0)
+        SpillOffset = alignToValue(SpillOffset, ArgLayout.Alignment);
       HomeOffsets[Index] = SpillOffset;
       SpillOffset += ArgLayout.Size;
     } else {
