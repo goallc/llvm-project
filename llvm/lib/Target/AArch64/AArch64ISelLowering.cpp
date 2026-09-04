@@ -9162,6 +9162,7 @@ static AArch64GoFormalArgInfo prepareAArch64GoFormalArguments(
                                               StackResultsEnd,
                                               DAG.getDataLayout(), ABIConfig);
   const goabi::CallLayout &Layout = Info.Layout;
+  goabi::validateGoObjArgInfo(F, Layout);
   MFI.setGoABIArgSizes(Layout.StackArgsSize, Layout.ArgSize);
 
   goabi::EntryArgsInfo EntryArgs =

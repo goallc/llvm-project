@@ -888,22 +888,6 @@ getGoObjFunctionInfo(const Function &F) {
   return std::make_pair(ReadByte(0), ReadByte(1));
 }
 
-static const GlobalValue *getGoObjFunctionArgInfo(const Function &F) {
-  const MDNode *MD = F.getMetadata("goobj.func.arginfo");
-  if (!MD)
-    return nullptr;
-  if (MD->getNumOperands() != 1)
-    report_fatal_error("expected !goobj.func.arginfo to have one operand");
-
-  const auto *CAM =
-      dyn_cast_or_null<ConstantAsMetadata>(MD->getOperand(0).get());
-  const auto *GV = CAM ? dyn_cast<GlobalValue>(CAM->getValue()) : nullptr;
-  if (!GV)
-    report_fatal_error(
-        "expected !goobj.func.arginfo operand to be an LLVM global reference");
-  return GV;
-}
-
 static std::optional<std::string>
 getGoObjSymbolContentHash(const GlobalVariable *GV) {
   const MDNode *MD = GV->getMetadata("goobj.content_hash");
@@ -3802,8 +3786,20 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
     if (std::optional<std::pair<uint8_t, uint8_t>> Info =
             getGoObjFunctionInfo(F))
       OutContext.setGoObjFunctionInfo(CurrentFnSym, Info->first, Info->second);
-    if (const GlobalValue *ArgInfo = getGoObjFunctionArgInfo(F))
-      OutContext.setGoObjFunctionArgInfo(CurrentFnSym, getSymbol(ArgInfo));
+    if (std::optional<goabi::GoObjArgInfo> ArgInfo =
+            goabi::getGoObjArgInfo(F)) {
+      OutContext.setGoObjFunctionArgInfo(CurrentFnSym,
+                                         getSymbol(ArgInfo->Data));
+      // Go's traceback bytecode only encodes ordinary offsets below 0xf0.
+      // Until a late machine pass proves individual home stores, conservatively
+      // mark every printable register home unavailable rather than exposing
+      // stale stack contents as an argument value.
+      constexpr uint64_t TraceArgsSpecial = 0xf0;
+      if (ArgInfo->SpillAreaOffset < ArgInfo->ArgSize &&
+          ArgInfo->SpillAreaOffset < TraceArgsSpecial)
+        OutContext.setGoObjFunctionArgLiveStart(
+            CurrentFnSym, static_cast<uint8_t>(ArgInfo->SpillAreaOffset));
+    }
     const MachineFrameInfo &FrameInfo = MF.getFrameInfo();
     uint64_t StackSize =
         FrameInfo.getStackSize() + FrameInfo.getUnsafeStackSize();

@@ -177,6 +177,7 @@ void MCContext::reset() {
   GoObjSymbolFlags.clear();
   GoObjFunctionInfos.clear();
   GoObjFunctionArgInfos.clear();
+  GoObjFunctionArgLiveStarts.clear();
   GoObjSymbolContentHashes.clear();
   GoObjRelocOverrides.clear();
   GoObjWeakRelocs.clear();

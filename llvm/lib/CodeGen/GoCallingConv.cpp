@@ -13,6 +13,7 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <limits>
@@ -340,6 +341,84 @@ CallLayout computeCallLayout(ArrayRef<ValueLayout> Args, uint64_t StackArgsSize,
   Layout.ArgSize = alignToValue(SpillEnd, Config.PtrAlign);
   Layout.TotalStackSize = alignToValue(Layout.ArgSize, Config.StackAlign);
   return Layout;
+}
+
+std::optional<GoObjArgInfo> getGoObjArgInfo(const Function &F) {
+  const MDNode *MD = F.getMetadata(FunctionArgInfoMD);
+  if (!MD)
+    return std::nullopt;
+  if (MD->getNumOperands() < 3 || (MD->getNumOperands() - 3) % 2 != 0)
+    report_fatal_error(
+        "expected !goobj.func.arginfo to contain data, frame sizes, and "
+        "argument offset/size pairs");
+
+  auto ReadConstant = [&](unsigned Index) -> uint64_t {
+    const auto *CAM =
+        dyn_cast_or_null<ConstantAsMetadata>(MD->getOperand(Index).get());
+    const auto *CI = CAM ? dyn_cast<ConstantInt>(CAM->getValue()) : nullptr;
+    if (!CI || !CI->getType()->isIntegerTy(64))
+      report_fatal_error(
+          "expected !goobj.func.arginfo layout operand to be i64");
+    return CI->getZExtValue();
+  };
+
+  const auto *CAM =
+      dyn_cast_or_null<ConstantAsMetadata>(MD->getOperand(0).get());
+  const auto *Data = CAM ? dyn_cast<GlobalValue>(CAM->getValue()) : nullptr;
+  if (!Data)
+    report_fatal_error(
+        "expected !goobj.func.arginfo data operand to be an LLVM global "
+        "reference");
+
+  GoObjArgInfo Info;
+  Info.Data = Data;
+  Info.ArgSize = ReadConstant(1);
+  Info.SpillAreaOffset = ReadConstant(2);
+  if (Info.SpillAreaOffset > Info.ArgSize)
+    report_fatal_error("invalid !goobj.func.arginfo spill area offset");
+  for (unsigned I = 3, E = MD->getNumOperands(); I != E; I += 2) {
+    uint64_t Offset = ReadConstant(I);
+    uint64_t Size = ReadConstant(I + 1);
+    if (Offset > Info.ArgSize || Size > Info.ArgSize - Offset)
+      report_fatal_error("!goobj.func.arginfo argument is outside its frame");
+    Info.Args.emplace_back(Offset, Size);
+  }
+  return Info;
+}
+
+void validateGoObjArgInfo(const Function &F, const CallLayout &Layout) {
+  std::optional<GoObjArgInfo> Info = getGoObjArgInfo(F);
+  if (!Info)
+    return;
+  if (Info->ArgSize != Layout.ArgSize)
+    report_fatal_error("!goobj.func.arginfo argument size does not match "
+                       "lowered Go ABI layout");
+  if (Info->SpillAreaOffset != Layout.SpillAreaOffset)
+    report_fatal_error("!goobj.func.arginfo spill area does not match lowered "
+                       "Go ABI layout");
+  if (Info->Args.size() != Layout.Args.size())
+    report_fatal_error("!goobj.func.arginfo argument count does not match "
+                       "lowered Go ABI layout");
+
+  uint64_t SpillOffset = Layout.SpillAreaOffset;
+  for (auto [Index, Arg] : llvm::enumerate(Layout.Args)) {
+    uint64_t Offset = Arg.StackOffset;
+    if (Arg.InRegs) {
+      SpillOffset = alignToValue(SpillOffset, Arg.Alignment);
+      Offset = SpillOffset;
+      SpillOffset += Arg.Size;
+    }
+    auto [FrontendOffset, FrontendSize] = Info->Args[Index];
+    if (FrontendSize != Arg.Size)
+      report_fatal_error("!goobj.func.arginfo argument size does not match "
+                         "lowered Go ABI home");
+    // Zero-sized arguments have an alignment carrier but occupy no ABI home.
+    if (Arg.Size != 0 && FrontendOffset != Offset)
+      report_fatal_error("!goobj.func.arginfo argument offset does not match "
+                         "lowered Go ABI home");
+  }
+  if (SpillOffset - Layout.SpillAreaOffset != Layout.SpillAreaSize)
+    report_fatal_error("inconsistent lowered Go ABI spill area");
 }
 
 static void collectPointerOffsets(Type *Ty, uint64_t BaseOffset,

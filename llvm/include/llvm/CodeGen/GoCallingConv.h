@@ -20,11 +20,14 @@
 #include "llvm/IR/Function.h"
 #include "llvm/Support/Alignment.h"
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 
 namespace llvm {
 
 class CallBase;
+class GlobalValue;
 class MachineFunction;
 class MachineInstrBuilder;
 class Type;
@@ -33,6 +36,7 @@ namespace goabi {
 
 inline constexpr StringLiteral TupleResultsAttr = "go_results_tuple";
 inline constexpr StringLiteral PadTypeName = "go.abi.pad";
+inline constexpr StringLiteral FunctionArgInfoMD = "goobj.func.arginfo";
 // Target frame lowering must not synthesize a morestack edge for such a
 // function. GoObj Go functions otherwise use the native Go default: emit a
 // stack check and call the ABI0 runtime.morestack helper on the slow path.
@@ -92,6 +96,16 @@ struct EntryArgsInfo {
   SmallVector<uint32_t, 8> PointerWords;
 };
 
+/// Frontend-owned traceback data plus the ABI homes that it describes. The
+/// semantic byte stream remains opaque to LLVM; the mechanical layout is
+/// carried separately so target lowering can reject frontend/backend drift.
+struct GoObjArgInfo {
+  const GlobalValue *Data = nullptr;
+  uint64_t ArgSize = 0;
+  uint64_t SpillAreaOffset = 0;
+  SmallVector<std::pair<uint64_t, uint64_t>, 8> Args;
+};
+
 struct ResultCarrier {
   unsigned Index = 0;
   Type *Ty = nullptr;
@@ -133,6 +147,13 @@ CallLayout computeCallLayout(ArrayRef<ValueLayout> Args, uint64_t StackArgsSize,
 EntryArgsInfo computeEntryArgsInfo(const CallLayout &Layout,
                                    const DataLayout &DL,
                                    const ABIConfig &Config);
+
+std::optional<GoObjArgInfo> getGoObjArgInfo(const Function &F);
+
+/// Verify the frontend's Go ABI home offsets against the independently
+/// lowered target calling convention. This must run after physical formal
+/// argument assignment and before the metadata is serialized to GoObj.
+void validateGoObjArgInfo(const Function &F, const CallLayout &Layout);
 
 /// Add a late target-inserted call operand for the ABI0 form of \p SymbolName.
 /// ABI0 identity is encoded directly in the MC symbol name; the GoObj writer

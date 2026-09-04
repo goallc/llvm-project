@@ -93,6 +93,7 @@ prepareX86GoFormalArguments(MachineFunction &MF, ArrayRef<ISD::InputArg> Ins,
                                               StackResultsEnd,
                                               DAG.getDataLayout(), ABIConfig);
   const goabi::CallLayout &Layout = Info.Layout;
+  goabi::validateGoObjArgInfo(F, Layout);
   MFI.setGoABIArgSizes(Layout.StackArgsSize, Layout.ArgSize);
 
   goabi::EntryArgsInfo EntryArgs = goabi::computeEntryArgsInfo(
