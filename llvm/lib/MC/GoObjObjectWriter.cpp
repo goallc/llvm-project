@@ -3411,23 +3411,12 @@ uint64_t GoObjObjectWriter::writeObject() {
   // Match cmd/internal/obj.(*writer).contentHash for text symbols. Their
   // identity depends on final machine bytes and resolved GoObj SymRefs, so it
   // must be computed here rather than in the Go frontend.
-  std::vector<uint8_t> ContentHashState(Symbols.size());
-  std::function<void(uint32_t)> ComputeContentHash = [&](uint32_t SymbolIndex) {
-    if (SymbolIndex >= Symbols.size())
-      report_fatal_error("GoObj content hash references an invalid symbol");
-    GoObjSymbol &Symbol = Symbols[SymbolIndex];
-    if (Symbol.ContentHash) {
-      ContentHashState[SymbolIndex] = 2;
-      return;
-    }
-    if (!Symbol.ComputeContentHash)
-      report_fatal_error("GoObj hashed definition has no content hash source");
-    if (ContentHashState[SymbolIndex] == 1)
-      report_fatal_error("mutually recursive GoObj content hashes");
-    if (ContentHashState[SymbolIndex] == 2)
-      return;
-    ContentHashState[SymbolIndex] = 1;
-
+  using FullContentHash = std::array<uint8_t, 32>;
+  auto MakeContentHash =
+      [&](uint32_t SymbolIndex,
+          const std::function<void(SHA256 &, uint32_t)> &HashDeferredTarget)
+      -> FullContentHash {
+    const GoObjSymbol &Symbol = Symbols[SymbolIndex];
     SHA256 Hasher;
     const char Version = 1;
     Hasher.update(StringRef(&Version, 1));
@@ -3494,8 +3483,10 @@ uint64_t GoObjObjectWriter::writeObject() {
         if (Target.SymIdx >= HasheddefSymbols.size())
           report_fatal_error("invalid GoObj hashed reference");
         uint32_t TargetIndex = HasheddefSymbols[Target.SymIdx];
-        ComputeContentHash(TargetIndex);
-        Hasher.update(ArrayRef<uint8_t>(*Symbols[TargetIndex].ContentHash));
+        if (Symbols[TargetIndex].ContentHash)
+          Hasher.update(ArrayRef<uint8_t>(*Symbols[TargetIndex].ContentHash));
+        else
+          HashDeferredTarget(Hasher, TargetIndex);
         break;
       }
       case GoObj::PkgIdxNone: {
@@ -3532,7 +3523,172 @@ uint64_t GoObjObjectWriter::writeObject() {
       }
     }
 
-    std::array<uint8_t, 32> FullHash = Hasher.final();
+    return Hasher.final();
+  };
+
+  // LLVM may expose direct references between content-addressable closures
+  // that native lowering keeps indirect. Find strongly connected components
+  // before hashing so those real cycles have an order-independent identity.
+  std::vector<int32_t> DFSIndex(Symbols.size(), -1);
+  std::vector<int32_t> LowLink(Symbols.size(), -1);
+  std::vector<int32_t> ComponentOf(Symbols.size(), -1);
+  std::vector<uint8_t> OnStack(Symbols.size());
+  SmallVector<uint32_t, 16> DFSStack;
+  std::vector<SmallVector<uint32_t, 4>> Components;
+  int32_t NextDFSIndex = 0;
+  std::function<void(uint32_t)> FindComponent = [&](uint32_t SymbolIndex) {
+    DFSIndex[SymbolIndex] = NextDFSIndex;
+    LowLink[SymbolIndex] = NextDFSIndex++;
+    DFSStack.push_back(SymbolIndex);
+    OnStack[SymbolIndex] = 1;
+
+    for (const GoObjSymbol::Relocation &Reloc :
+         Symbols[SymbolIndex].Relocations) {
+      if (Reloc.PkgIdx != GoObj::PkgIdxHashed)
+        continue;
+      if (Reloc.SymIdx >= HasheddefSymbols.size())
+        report_fatal_error("invalid GoObj hashed reference");
+      uint32_t TargetIndex = HasheddefSymbols[Reloc.SymIdx];
+      if (TargetIndex == SymbolIndex ||
+          !Symbols[TargetIndex].ComputeContentHash)
+        continue;
+      if (DFSIndex[TargetIndex] == -1) {
+        FindComponent(TargetIndex);
+        LowLink[SymbolIndex] =
+            std::min(LowLink[SymbolIndex], LowLink[TargetIndex]);
+      } else if (OnStack[TargetIndex]) {
+        LowLink[SymbolIndex] =
+            std::min(LowLink[SymbolIndex], DFSIndex[TargetIndex]);
+      }
+    }
+
+    if (LowLink[SymbolIndex] != DFSIndex[SymbolIndex])
+      return;
+    uint32_t Component =
+        checkedUint32(Components.size(), "content hash component count");
+    Components.emplace_back();
+    for (;;) {
+      uint32_t Member = DFSStack.pop_back_val();
+      OnStack[Member] = 0;
+      ComponentOf[Member] = Component;
+      Components.back().push_back(Member);
+      if (Member == SymbolIndex)
+        break;
+    }
+  };
+  for (uint32_t SymbolIndex : HasheddefSymbols)
+    if (Symbols[SymbolIndex].ComputeContentHash && DFSIndex[SymbolIndex] == -1)
+      FindComponent(SymbolIndex);
+
+  std::vector<uint8_t> ContentHashState(Symbols.size());
+  std::vector<uint8_t> ComponentHashState(Components.size());
+  std::vector<std::optional<FullContentHash>> CyclicMemberHashes(
+      Symbols.size());
+  std::function<void(uint32_t)> ComputeContentHash;
+  std::function<void(uint32_t)> ComputeCyclicComponent;
+
+  ComputeCyclicComponent = [&](uint32_t Component) {
+    if (ComponentHashState[Component] == 2)
+      return;
+    if (ComponentHashState[Component] == 1)
+      report_fatal_error("recursive GoObj content hash component dependency");
+    ComponentHashState[Component] = 1;
+
+    const SmallVector<uint32_t, 4> &Members = Components[Component];
+    std::vector<FullContentHash> SortedMemberHashes;
+    SortedMemberHashes.reserve(Members.size());
+    for (uint32_t Member : Members) {
+      FullContentHash LocalHash =
+          MakeContentHash(Member, [&](SHA256 &Hasher, uint32_t TargetIndex) {
+            if (ComponentOf[TargetIndex] != static_cast<int32_t>(Component)) {
+              ComputeContentHash(TargetIndex);
+              Hasher.update(
+                  ArrayRef<uint8_t>(*Symbols[TargetIndex].ContentHash));
+              return;
+            }
+
+            // A local member hash substitutes the canonical target identity
+            // for an intra-component hash. The component digest below brings
+            // every member's final bytes and relocations back into scope.
+            Hasher.update("goobj cycle member v1");
+            const GoObjSymbol &Target = Symbols[TargetIndex];
+            StringRef TargetName = Target.Name;
+            char Identity[6];
+            support::endian::write32le(
+                Identity,
+                checkedUint32(TargetName.size(), "GoObj symbol name"));
+            support::endian::write16le(Identity + 4, Target.ABI);
+            Hasher.update(StringRef(Identity, sizeof(Identity)));
+            Hasher.update(TargetName);
+          });
+      CyclicMemberHashes[Member] = LocalHash;
+      SortedMemberHashes.push_back(LocalHash);
+    }
+
+    llvm::sort(SortedMemberHashes);
+    SHA256 ComponentHasher;
+    const char Version = 1;
+    ComponentHasher.update(StringRef(&Version, 1));
+    ComponentHasher.update("goobj content hash cycle v1");
+    char Count[4];
+    support::endian::write32le(
+        Count, checkedUint32(Members.size(), "content hash component size"));
+    ComponentHasher.update(StringRef(Count, sizeof(Count)));
+    for (const FullContentHash &MemberHash : SortedMemberHashes)
+      ComponentHasher.update(ArrayRef<uint8_t>(MemberHash));
+    FullContentHash ComponentHash = ComponentHasher.final();
+
+    for (uint32_t Member : Members) {
+      FullContentHash FullHash =
+          MakeContentHash(Member, [&](SHA256 &Hasher, uint32_t TargetIndex) {
+            if (ComponentOf[TargetIndex] != static_cast<int32_t>(Component)) {
+              ComputeContentHash(TargetIndex);
+              Hasher.update(
+                  ArrayRef<uint8_t>(*Symbols[TargetIndex].ContentHash));
+              return;
+            }
+            Hasher.update("goobj cycle target v1");
+            Hasher.update(ArrayRef<uint8_t>(ComponentHash));
+            if (!CyclicMemberHashes[TargetIndex])
+              report_fatal_error(
+                  "GoObj cyclic target has no local content hash");
+            Hasher.update(ArrayRef<uint8_t>(*CyclicMemberHashes[TargetIndex]));
+          });
+      std::array<uint8_t, GoObj::HashSize> Hash;
+      std::copy_n(FullHash.begin(), Hash.size(), Hash.begin());
+      Symbols[Member].ContentHash = Hash;
+      ContentHashState[Member] = 2;
+    }
+    ComponentHashState[Component] = 2;
+  };
+
+  ComputeContentHash = [&](uint32_t SymbolIndex) {
+    if (SymbolIndex >= Symbols.size())
+      report_fatal_error("GoObj content hash references an invalid symbol");
+    GoObjSymbol &Symbol = Symbols[SymbolIndex];
+    if (Symbol.ContentHash) {
+      ContentHashState[SymbolIndex] = 2;
+      return;
+    }
+    if (!Symbol.ComputeContentHash)
+      report_fatal_error("GoObj hashed definition has no content hash source");
+    if (ContentHashState[SymbolIndex] == 2)
+      return;
+    int32_t Component = ComponentOf[SymbolIndex];
+    if (Component < 0)
+      report_fatal_error("GoObj deferred content hash has no component");
+    if (Components[Component].size() > 1) {
+      ComputeCyclicComponent(static_cast<uint32_t>(Component));
+      return;
+    }
+    if (ContentHashState[SymbolIndex] == 1)
+      report_fatal_error("recursive acyclic GoObj content hash dependency");
+    ContentHashState[SymbolIndex] = 1;
+    FullContentHash FullHash =
+        MakeContentHash(SymbolIndex, [&](SHA256 &Hasher, uint32_t TargetIndex) {
+          ComputeContentHash(TargetIndex);
+          Hasher.update(ArrayRef<uint8_t>(*Symbols[TargetIndex].ContentHash));
+        });
     std::array<uint8_t, GoObj::HashSize> Hash;
     std::copy_n(FullHash.begin(), Hash.size(), Hash.begin());
     Symbol.ContentHash = Hash;
