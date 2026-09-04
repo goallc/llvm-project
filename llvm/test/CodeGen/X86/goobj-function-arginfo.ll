@@ -20,4 +20,4 @@ define goabiinternal void @trace.arg(ptr %p) !goobj.func.arginfo !0 {
 ; CHECK: aux 0.9: type=pcdata {{.*}}pc=[0-1:1]
 ; CHECK-COUNT-3: type=funcdata
 ; CHECK: type=funcdata target=trace.arg.arginfo data=0008ff
-; CHECK: type=funcdata {{.*}}data=000000
+; CHECK: type=funcdata {{.*}}data=0000

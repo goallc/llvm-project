@@ -104,6 +104,10 @@ struct GoObjArgInfo {
   uint64_t ArgSize = 0;
   uint64_t SpillAreaOffset = 0;
   SmallVector<std::pair<uint64_t, uint64_t>, 8> Args;
+  /// Ordinary traceback components that live in ABI register homes. The Go
+  /// frontend remains the authority for the bytecode; LLVM decodes only the
+  /// offset/size records needed to address its liveness bitmap slots.
+  SmallVector<std::pair<uint8_t, uint8_t>, 10> TracebackSlots;
 };
 
 struct ResultCarrier {
@@ -149,6 +153,11 @@ EntryArgsInfo computeEntryArgsInfo(const CallLayout &Layout,
                                    const ABIConfig &Config);
 
 std::optional<GoObjArgInfo> getGoObjArgInfo(const Function &F);
+
+/// Derive traceback argument-home liveness from stores already present in the
+/// final machine CFG. This records zero-byte labels and metadata only; it must
+/// not insert stores or otherwise change executable code.
+void recordGoObjArgLiveStores(MachineFunction &MF);
 
 /// Verify the frontend's Go ABI home offsets against the independently
 /// lowered target calling convention. This must run after physical formal

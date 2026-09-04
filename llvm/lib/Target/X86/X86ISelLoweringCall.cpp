@@ -116,6 +116,7 @@ prepareX86GoFormalArguments(MachineFunction &MF, ArrayRef<ISD::InputArg> Ins,
   FuncInfo->setRegSaveFrameIndex(0xAAAAAAA);
   FuncInfo->clearGoArgHomes();
   FuncInfo->clearGoArgPointerSlots();
+  MFI.clearGoObjArgLiveSlots();
   Info.HomeFIs.assign(F.arg_size(), INT_MAX);
 
   SmallVector<bool, 8> IsLiveAtEntry(F.arg_size(), false);
@@ -203,6 +204,7 @@ prepareX86GoFormalArguments(MachineFunction &MF, ArrayRef<ISD::InputArg> Ins,
     Info.HomeFIs[Arg.getArgNo()] = HomeFI;
     X86MachineFunctionInfo::GoArgHome &Home =
         FuncInfo->addGoArgHome(Arg.getArgNo(), HomeFI);
+    Home.LogicalOffset = LogicalHomeOffset;
     // LLVM may replace an unused incoming pointer with poison at every call
     // edge. Keep its ABI home so morestack can preserve the complete register
     // assignment, but do not expose that uninitialized word as a GC root.
@@ -229,6 +231,26 @@ prepareX86GoFormalArguments(MachineFunction &MF, ArrayRef<ISD::InputArg> Ins,
   }
   if (NextLayoutIndex != Layout.Args.size())
     report_fatal_error("X86 Go ABI layout has unmatched arguments");
+
+  if (std::optional<goabi::GoObjArgInfo> ArgInfo =
+          goabi::getGoObjArgInfo(F)) {
+    for (auto [SlotIndex, Slot] : llvm::enumerate(ArgInfo->TracebackSlots)) {
+      unsigned Matches = 0;
+      for (X86MachineFunctionInfo::GoArgHome &Home :
+           FuncInfo->getGoArgHomes())
+        for (const X86MachineFunctionInfo::GoArgHome::RegisterPiece &Piece :
+             Home.RegisterPieces)
+          if (Home.LogicalOffset + Piece.Offset == Slot.first &&
+              Piece.Size == Slot.second) {
+            MFI.addGoObjArgLiveSlot(Home.FrameIndex, Piece.Offset, Piece.Size,
+                                    uint16_t(1) << SlotIndex);
+            ++Matches;
+          }
+      if (Matches != 1)
+        report_fatal_error(
+            "Go traceback slot does not match one X86 register home");
+    }
+  }
 
   for (uint32_t Word : EntryArgs.PointerWords)
     if (!MatchedEntryArgWords.test(Word))

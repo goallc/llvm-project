@@ -127,6 +127,7 @@ public:
     unsigned ArgNo = 0;
     int FrameIndex = 0;
     SmallVector<RegisterPiece, 2> RegisterPieces;
+    uint64_t LogicalOffset = 0;
 
     bool valueAlreadyInFrame() const { return RegisterPieces.empty(); }
 
@@ -286,6 +287,7 @@ public:
     GoArgHomes.push_back({ArgNo, FrameIndex, {}});
     return GoArgHomes.back();
   }
+  MutableArrayRef<GoArgHome> getGoArgHomes() { return GoArgHomes; }
   ArrayRef<GoArgHome> getGoArgHomes() const { return GoArgHomes; }
 
   bool hasGoABI0FrameIndex() const { return HasGoABI0FrameIndex; }

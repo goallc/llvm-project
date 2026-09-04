@@ -9183,6 +9183,7 @@ static AArch64GoFormalArgInfo prepareAArch64GoFormalArguments(
   FuncInfo->setBytesInStackArgArea(Layout.TotalStackSize);
   FuncInfo->clearGoArgHomes();
   FuncInfo->clearGoArgPointerSlots();
+  MFI.clearGoObjArgLiveSlots();
   unsigned StackBias = getAArch64GoStackBias(F.getCallingConv());
   Info.HomeFIs.assign(F.arg_size(), INT_MAX);
 
@@ -9261,6 +9262,7 @@ static AArch64GoFormalArgInfo prepareAArch64GoFormalArguments(
     Info.HomeFIs[Arg.getArgNo()] = HomeFI;
     AArch64FunctionInfo::GoArgHome &Home =
         FuncInfo->addGoArgHome(Arg.getArgNo(), HomeFI);
+    Home.LogicalOffset = LogicalHomeOffset;
     // LLVM may replace an unused incoming pointer with poison at every call
     // edge. Keep its ABI home so morestack can preserve the complete register
     // assignment, but do not expose that uninitialized word as a GC root.
@@ -9287,6 +9289,25 @@ static AArch64GoFormalArgInfo prepareAArch64GoFormalArguments(
   }
   if (NextLayoutIndex != Layout.Args.size())
     report_fatal_error("AArch64 Go ABI layout has unmatched arguments");
+
+  if (std::optional<goabi::GoObjArgInfo> ArgInfo =
+          goabi::getGoObjArgInfo(F)) {
+    for (auto [SlotIndex, Slot] : llvm::enumerate(ArgInfo->TracebackSlots)) {
+      unsigned Matches = 0;
+      for (AArch64FunctionInfo::GoArgHome &Home : FuncInfo->getGoArgHomes())
+        for (const AArch64FunctionInfo::GoArgHome::RegisterPiece &Piece :
+             Home.RegisterPieces)
+          if (Home.LogicalOffset + Piece.Offset == Slot.first &&
+              Piece.Size == Slot.second) {
+            MFI.addGoObjArgLiveSlot(Home.FrameIndex, Piece.Offset, Piece.Size,
+                                    uint16_t(1) << SlotIndex);
+            ++Matches;
+          }
+      if (Matches != 1)
+        report_fatal_error(
+            "Go traceback slot does not match one AArch64 register home");
+    }
+  }
 
   for (uint32_t Word : EntryArgs.PointerWords)
     if (!MatchedEntryArgWords.test(Word))
