@@ -892,8 +892,10 @@ static Function *cloneCandidateFunction(Function *F, unsigned NSpecs) {
   // A GoObj package symbol index identifies one frontend definition. A
   // specialization is an internal implementation detail and must be appended
   // as a new helper symbol instead of occupying the original definition's
-  // package slot.
+  // package slot. Its signature may also change after cloning, invalidating
+  // the frontend's semantic argument description.
   Clone->setMetadata("goobj.symbol.index", nullptr);
+  Clone->setMetadata("goobj.func.arginfo", nullptr);
   removeSSACopy(*Clone);
   return Clone;
 }

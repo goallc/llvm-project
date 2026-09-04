@@ -392,8 +392,10 @@ void validateGoObjArgInfo(const Function &F, const CallLayout &Layout) {
   if (!Info)
     return;
   if (Info->ArgSize != Layout.ArgSize)
-    report_fatal_error("!goobj.func.arginfo argument size does not match "
-                       "lowered Go ABI layout");
+    report_fatal_error(Twine("!goobj.func.arginfo argument size does not "
+                             "match lowered Go ABI layout for ") +
+                       F.getName() + ": frontend=" + Twine(Info->ArgSize) +
+                       ", backend=" + Twine(Layout.ArgSize));
   if (Info->SpillAreaOffset != Layout.SpillAreaOffset)
     report_fatal_error("!goobj.func.arginfo spill area does not match lowered "
                        "Go ABI layout");
