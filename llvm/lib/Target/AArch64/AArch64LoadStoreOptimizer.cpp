@@ -1752,6 +1752,15 @@ static bool areCandidatesToMergeOrPair(MachineInstr &FirstMI, MachineInstr &MI,
 static bool canRenameMOP(const MachineOperand &MOP,
                          const TargetRegisterInfo *TRI) {
   if (MOP.isReg()) {
+    // A bundle header describes the register effects of all instructions in
+    // the bundle. The backward store-renaming walk stops at the first internal
+    // definition, before it reaches that header, so renaming such a definition
+    // can hide a physical-register dependency from later passes. Bundled uses
+    // remain rewritable because the walk visits both their header and internal
+    // operands.
+    if (MOP.isDef() && MOP.getParent()->isBundled())
+      return false;
+
     auto *RegClass = TRI->getMinimalPhysRegClass(MOP.getReg());
     // Renaming registers with multiple disjunct sub-registers (e.g. the
     // result of a LD3) means that all sub-registers are renamed, potentially
