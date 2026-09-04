@@ -1091,6 +1091,20 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
     AP.OutContext.setGoObjSymbolNonPackage(AP.getSymbol(&GO));
   }
 
+  for (const GlobalObject &GO : M.global_objects()) {
+    const MDNode *MD = GO.getMetadata("goobj.content_addressable");
+    if (!MD)
+      continue;
+    const auto *Marker =
+        MD->getNumOperands() == 1
+            ? mdconst::dyn_extract<ConstantInt>(MD->getOperand(0))
+            : nullptr;
+    if (!Marker || !Marker->getType()->isIntegerTy(1) || !Marker->isOne() ||
+        GO.isDeclaration() || !isa<Function>(GO))
+      report_fatal_error("invalid !goobj.content_addressable attachment");
+    AP.OutContext.setGoObjSymbolContentAddressable(AP.getSymbol(&GO));
+  }
+
   // Only the optimized relocation stream decides which declarations become
   // GoObj references. The attachment retains the package-local index that
   // LLVM symbol names and MC relocations cannot reconstruct. Builtin identity
@@ -3010,13 +3024,19 @@ void AsmPrinter::emitFunctionBody() {
   // SPIR-V supports label instructions only inside a block, not after the
   // function body.
   if (TT.getObjectFormat() != Triple::SPIRV &&
-      (EmitFunctionSize || needFuncLabels(*MF, *this) || CurrentFnEnd)) {
+      (EmitFunctionSize || needFuncLabels(*MF, *this) || CurrentFnEnd ||
+       (TT.isOSBinFormatGoObj() && CurrentFnSym &&
+        OutContext.isGoObjSymbolContentAddressable(CurrentFnSym)))) {
     // Create a symbol for the end of function, if not already pre-created
     // (e.g. for .prefalign directive).
     if (!CurrentFnEnd)
       CurrentFnEnd = createTempSymbol("func_end");
     OutStreamer->emitLabel(CurrentFnEnd);
   }
+
+  if (TT.isOSBinFormatGoObj() && CurrentFnSym &&
+      OutContext.isGoObjSymbolContentAddressable(CurrentFnSym))
+    OutContext.setGoObjContentAddressableEnd(CurrentFnSym, CurrentFnEnd);
 
   // If the target wants a .size directive for the size of the function, emit
   // it.

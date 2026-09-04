@@ -6,9 +6,18 @@
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.arm64.o | FileCheck %s
 
 @content = weak constant [3 x i8] c"abc", section ".rodata", align 1, !goobj.content_hash !0
-@llvm.compiler.used = appending global [1 x ptr] [ptr @content], section "llvm.metadata"
+@llvm.compiler.used = appending global [2 x ptr] [ptr @content, ptr @"example.com/generic.func1#QUJDREVGR0g=#"], section "llvm.metadata"
+
+define goabiinternal void @"example.com/generic.func1#QUJDREVGR0g=#"() !goobj.content_addressable !1 {
+entry:
+  ret void
+}
 
 !0 = !{!"0123456789abcdef"}
+!1 = !{i1 true}
 
-; CHECK: hasheddef 0: content abi=0 type=3 size=3 align=1 flag=1 flag2=0
-; CHECK: hash 0: 30313233343536373839616263646566
+; CHECK-DAG: hasheddef [[CONTENT:[0-9]+]]: content abi=0 type=3 size=3 align=1 flag=1 flag2=0
+; CHECK-DAG: hasheddef [[FUNCTION:[0-9]+]]: example.com/generic.func1 abi=1 type=1 size={{[1-9][0-9]*}} align=0 flag={{[0-9]+}} flag2=0
+; CHECK-DAG: hash [[CONTENT]]: 30313233343536373839616263646566
+; CHECK-DAG: hash [[FUNCTION]]: {{[0-9a-f]+}}
+; CHECK-NOT: example.com/generic.func1#QUJDREVGR0g=#
