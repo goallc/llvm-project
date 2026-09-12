@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "GoObjStackMapUtils.h"
+#include "GoObjSymbolRangeIndex.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -3062,17 +3063,15 @@ uint64_t GoObjObjectWriter::writeObject() {
     }
   }
 
-  auto FindContainingSymbol = [&](const MCSection *Section,
-                                  uint64_t Offset) -> std::optional<uint32_t> {
-    for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
-         I != E; ++I) {
-      const GoObjSymbol &Sym = Symbols[I];
-      if (Sym.Section != Section)
-        continue;
-      if (Sym.SectionBegin <= Offset && Offset < Sym.SectionEnd)
-        return I;
-    }
-    return std::nullopt;
+  GoObjSymbolRangeIndex SymbolRanges;
+  for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
+       I != E; ++I) {
+    const GoObjSymbol &Sym = Symbols[I];
+    SymbolRanges.add(Sym.Section, Sym.SectionBegin, Sym.SectionEnd, I);
+  }
+  SymbolRanges.build();
+  auto FindContainingSymbol = [&](const MCSection *Section, uint64_t Offset) {
+    return SymbolRanges.find(Section, Offset);
   };
 
   std::vector<GoObjSymbol> NonPkgRefs;

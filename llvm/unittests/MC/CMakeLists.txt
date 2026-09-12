@@ -20,6 +20,7 @@ add_llvm_unittest(MCTests
   DwarfLineTables.cpp
   DwarfLineTableHeaders.cpp
   GoObjStackMapUtilsTest.cpp
+  GoObjSymbolRangeIndexTest.cpp
   MCInstPrinter.cpp
   StringTableBuilderTest.cpp
   TargetRegistry.cpp
