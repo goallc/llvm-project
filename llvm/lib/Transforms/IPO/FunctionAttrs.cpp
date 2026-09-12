@@ -2429,6 +2429,14 @@ static bool deduceFunctionAttributeInRPO(Module &M, LazyCallGraph &CG) {
 
 PreservedAnalyses
 ReversePostOrderFunctionAttrsPass::run(Module &M, ModuleAnalysisManager &AM) {
+  // The RPO worklist contains only used internal definitions. Avoid building
+  // the reference graph when no function can enter that worklist: shared
+  // constant graphs may otherwise dominate an entirely ineffective pass.
+  if (llvm::none_of(M, [](const Function &F) {
+        return !F.isDeclaration() && F.hasInternalLinkage() && !F.use_empty();
+      }))
+    return PreservedAnalyses::all();
+
   auto &CG = AM.getResult<LazyCallGraphAnalysis>(M);
 
   if (!deduceFunctionAttributeInRPO(M, CG))
