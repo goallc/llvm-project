@@ -106,12 +106,10 @@ public:
   /// MCContext owns its lifetime along with the other module emission state.
   struct GoObjBuiltinNameIndex {
     const void *Owner = nullptr;
-    uint64_t Revision = 0;
     StringMap<std::vector<std::string>> Names[2];
 
     void clear() {
       Owner = nullptr;
-      Revision = 0;
       Names[0].clear();
       Names[1].clear();
     }

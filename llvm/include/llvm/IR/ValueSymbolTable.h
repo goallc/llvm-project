@@ -89,10 +89,6 @@ public:
   /// The number of name/type pairs is returned.
   inline unsigned size() const { return unsigned(vmap.size()); }
 
-  /// Revision of the name bindings. Clients caching a name-based index must
-  /// rebuild it when this changes; properties of the values are not tracked.
-  uint64_t getNameRevision() const { return NameRevision; }
-
   /// This function can be used from the debugger to display the
   /// content of the symbol table while debugging.
   /// Print out symbol table on stderr
@@ -140,8 +136,7 @@ private:
   /// @name Internal Data
   /// @{
 
-  uint64_t NameRevision = 0;
-  ValueMap vmap;   ///< The map that holds the symbol table.
+  ValueMap vmap;                    ///< The map that holds the symbol table.
   int MaxNameSize; ///< The maximum size for each name. If the limit is
                    ///< exceeded, the name is capped.
   mutable uint32_t LastUnique = 0;  ///< Counter for tracking unique names

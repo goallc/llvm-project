@@ -80,7 +80,6 @@ ValueName *ValueSymbolTable::makeUniqueName(Value *V,
 // Insert a value into the symbol table with the specified name...
 //
 void ValueSymbolTable::reinsertValue(Value *V) {
-  ++NameRevision;
   assert(V->hasName() && "Can't insert nameless Value into symbol table");
 
   // Try inserting the name, assuming it won't conflict.
@@ -102,7 +101,6 @@ void ValueSymbolTable::reinsertValue(Value *V) {
 }
 
 void ValueSymbolTable::removeValueName(ValueName *V) {
-  ++NameRevision;
   // LLVM_DEBUG(dbgs() << " Removing Value: " << V->getKeyData() << "\n");
   // Remove the value from the symbol table.
   vmap.remove(V);
@@ -112,7 +110,6 @@ void ValueSymbolTable::removeValueName(ValueName *V) {
 /// it into the symbol table with the specified name.  If it conflicts, it
 /// auto-renames the name and returns that instead.
 ValueName *ValueSymbolTable::createValueName(StringRef Name, Value *V) {
-  ++NameRevision;
   if (MaxNameSize > -1 && Name.size() > (unsigned)MaxNameSize)
     Name = Name.substr(0, std::max(1u, (unsigned)MaxNameSize));
 

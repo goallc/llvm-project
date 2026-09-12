@@ -51,34 +51,42 @@ protected:
   }
 };
 
-TEST_F(GoObjBuiltinNameTest, ABIAndLateMutations) {
-  // Missing names are not permanently cached, including when the total number
-  // of functions stays the same across a deletion and insertion.
-  EXPECT_EQ(lookup("runtime.helper"), "runtime.helper<ABI0>");
+TEST_F(GoObjBuiltinNameTest, ABIAndOrdinaryFunctionMutations) {
   auto *F = add("runtime.helper<builtin.10><ABI0>", CallingConv::GoABI0);
   add("runtime.helper<builtin.11>", CallingConv::GoABIInternal);
   EXPECT_EQ(lookup("runtime.helper"), F->getName());
   EXPECT_EQ(lookup("runtime.helper", CallingConv::GoABIInternal),
             "runtime.helper<builtin.11>");
-  F->setName("runtime.other<builtin.10><ABI0>");
-  EXPECT_EQ(lookup("runtime.helper"), "runtime.helper<ABI0>");
-  EXPECT_EQ(lookup("runtime.other"), F->getName());
-  F->eraseFromParent();
-  F = add("runtime.helper<builtin.12><ABI0>", CallingConv::GoABI0);
-  EXPECT_EQ(lookup("runtime.other"), "runtime.other<ABI0>");
-  EXPECT_EQ(lookup("runtime.helper"), F->getName());
-  MMI.getContext().getGoObjBuiltinNameIndex().clear();
+  // Ordinary function mutations during emission do not affect builtin bindings.
+  auto *Other = add("ordinary", CallingConv::C);
+  Other->setName("renamed");
+  Other->eraseFromParent();
   EXPECT_EQ(lookup("runtime.helper"), F->getName());
 }
 
-TEST_F(GoObjBuiltinNameTest, NameTransferredFromNonFunction) {
-  auto *G = new GlobalVariable(M, Type::getInt8Ty(Ctx), false,
-                               GlobalValue::ExternalLinkage, nullptr,
-                               "runtime.helper<builtin.7><ABI0>");
-  EXPECT_EQ(lookup("runtime.helper"), "runtime.helper<ABI0>");
-  auto *F = add("", CallingConv::GoABI0);
-  F->takeName(G);
+TEST_F(GoObjBuiltinNameTest, NewPMEmissionResetsIndexForSameModule) {
+  auto *F = add("runtime.helper<builtin.10><ABI0>", CallingConv::GoABI0);
   EXPECT_EQ(lookup("runtime.helper"), F->getName());
+  // IR preparation between emissions may replace builtin declarations.
+  F->eraseFromParent();
+  F = add("runtime.helper<builtin.12><ABI0>", CallingConv::GoABI0);
+  ModuleAnalysisManager MAM;
+  MachineModuleAnalysis Analysis(MMI);
+  (void)Analysis.run(M, MAM);
+  EXPECT_EQ(lookup("runtime.helper"), F->getName());
+}
+
+TEST_F(GoObjBuiltinNameTest, LegacyEmissionResetsIndexForSameModule) {
+  MachineModuleInfoWrapperPass Wrapper(&TM, &MMI.getContext());
+  Wrapper.doInitialization(M);
+  auto *F = add("runtime.helper<builtin.10><ABI0>", CallingConv::GoABI0);
+  EXPECT_EQ(lookup("runtime.helper"), F->getName());
+  Wrapper.doFinalization(M);
+  F->eraseFromParent();
+  F = add("runtime.helper<builtin.12><ABI0>", CallingConv::GoABI0);
+  Wrapper.doInitialization(M);
+  EXPECT_EQ(lookup("runtime.helper"), F->getName());
+  Wrapper.doFinalization(M);
 }
 
 TEST_F(GoObjBuiltinNameTest, IgnoresMalformedAndUnqueriedNames) {
@@ -90,9 +98,8 @@ TEST_F(GoObjBuiltinNameTest, IgnoresMalformedAndUnqueriedNames) {
   EXPECT_EQ(lookup("runtime.helper"), "runtime.helper<ABI0>");
 }
 
-TEST_F(GoObjBuiltinNameTest, DuplicateAfterCachedLookup) {
+TEST_F(GoObjBuiltinNameTest, DuplicateDeclarations) {
   add("runtime.helper<builtin.1><ABI0>", CallingConv::GoABI0);
-  EXPECT_EQ(lookup("runtime.helper"), "runtime.helper<builtin.1><ABI0>");
   add("runtime.helper<builtin.2><ABI0>", CallingConv::GoABI0);
   EXPECT_DEATH(lookup("runtime.helper"), "duplicate Go builtin declaration");
 }

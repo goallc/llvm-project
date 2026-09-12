@@ -173,6 +173,9 @@ void addGoObjABI0Callee(MachineInstrBuilder &MIB, MachineFunction &MF,
 /// Resolve a compiler-provided Go builtin declaration by its logical linker
 /// name and calling convention. The declaration name carries its GoObj builtin
 /// index, so target late passes never need a duplicate builtin table.
+/// All builtin declarations must be present before the first lookup, and their
+/// name bindings must remain unchanged until module emission ends. The index is
+/// built once on first use and cleared by machine-module initialization/reset.
 std::string getGoObjBuiltinCalleeName(const MachineFunction &MF,
                                       StringRef SymbolName,
                                       CallingConv::ID CC);

@@ -22,7 +22,6 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
-#include "llvm/IR/ValueSymbolTable.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <limits>
@@ -146,11 +145,12 @@ std::string getGoObjBuiltinCalleeName(const MachineFunction &MF,
 
   const Module &M = *MF.getFunction().getParent();
   auto &Index = MF.getContext().getGoObjBuiltinNameIndex();
-  uint64_t Revision = M.getValueSymbolTable().getNameRevision();
-  if (Index.Owner != &M || Index.Revision != Revision) {
+  // Build lazily after IR preparation, at the first late machine helper lookup.
+  // Builtin bindings are frozen for this emission; ordinary IR names may still
+  // change without invalidating the index. Module initialization resets it.
+  if (Index.Owner != &M) {
     Index.clear();
     Index.Owner = &M;
-    Index.Revision = Revision;
     for (const Function &F : M) {
       StringRef Name = F.getName();
       bool IsABI0 = Name.consume_back(GoObj::ABI0SymbolSuffix);
@@ -169,7 +169,8 @@ std::string getGoObjBuiltinCalleeName(const MachineFunction &MF,
   if (It != Index.Names[CC == CallingConv::GoABI0].end()) {
     for (const std::string &Name : It->second) {
       const Function *F = M.getFunction(Name);
-      assert(F && "builtin name index must track symbol table mutations");
+      if (!F)
+        report_fatal_error("Go builtin declaration changed during emission");
       // Validate on lookup: unused malformed declarations must not start
       // failing, and calling conventions can change without a name mutation.
       if (F->getCallingConv() != CC)
