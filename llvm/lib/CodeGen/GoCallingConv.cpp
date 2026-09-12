@@ -22,6 +22,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ValueSymbolTable.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <limits>
@@ -144,24 +145,40 @@ std::string getGoObjBuiltinCalleeName(const MachineFunction &MF,
     report_fatal_error("invalid logical Go builtin symbol");
 
   const Module &M = *MF.getFunction().getParent();
+  auto &Index = MF.getContext().getGoObjBuiltinNameIndex();
+  uint64_t Revision = M.getValueSymbolTable().getNameRevision();
+  if (Index.Owner != &M || Index.Revision != Revision) {
+    Index.clear();
+    Index.Owner = &M;
+    Index.Revision = Revision;
+    for (const Function &F : M) {
+      StringRef Name = F.getName();
+      bool IsABI0 = Name.consume_back(GoObj::ABI0SymbolSuffix);
+      auto [LogicalName, Number] =
+          Name.rsplit(GoObj::BuiltinSymbolSuffixPrefix);
+      uint32_t BuiltinIndex;
+      if (LogicalName.empty() || !Number.consume_back(">") || Number.empty() ||
+          Number.getAsInteger(10, BuiltinIndex))
+        continue;
+      Index.Names[IsABI0][LogicalName].push_back(F.getName().str());
+    }
+  }
+
   const Function *Match = nullptr;
-  for (const Function &F : M) {
-    StringRef Candidate = F.getName();
-    bool IsABI0 = Candidate.consume_back(GoObj::ABI0SymbolSuffix);
-    if (IsABI0 != (CC == CallingConv::GoABI0) ||
-        !Candidate.consume_front(SymbolName) ||
-        !Candidate.consume_front(GoObj::BuiltinSymbolSuffixPrefix) ||
-        !Candidate.consume_back(">") || Candidate.empty())
-      continue;
-    uint32_t Index;
-    if (Candidate.getAsInteger(10, Index))
-      continue;
-    if (F.getCallingConv() != CC)
-      report_fatal_error(
-          "Go builtin declaration has invalid calling convention");
-    if (Match)
-      report_fatal_error("duplicate Go builtin declaration");
-    Match = &F;
+  auto It = Index.Names[CC == CallingConv::GoABI0].find(SymbolName);
+  if (It != Index.Names[CC == CallingConv::GoABI0].end()) {
+    for (const std::string &Name : It->second) {
+      const Function *F = M.getFunction(Name);
+      assert(F && "builtin name index must track symbol table mutations");
+      // Validate on lookup: unused malformed declarations must not start
+      // failing, and calling conventions can change without a name mutation.
+      if (F->getCallingConv() != CC)
+        report_fatal_error(
+            "Go builtin declaration has invalid calling convention");
+      if (Match)
+        report_fatal_error("duplicate Go builtin declaration");
+      Match = F;
+    }
   }
   if (Match)
     return Match->getName().str();

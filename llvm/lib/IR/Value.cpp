@@ -438,6 +438,8 @@ void Value::takeName(Value *V) {
   // If these values are both in the same symtab, we can do this very fast.
   // This works even if both values have no symtab yet.
   if (ST == VST) {
+    if (ST)
+      ++ST->NameRevision;
     // Take the name!
     setValueName(V->getValueName());
     V->setValueName(nullptr);

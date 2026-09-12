@@ -102,6 +102,21 @@ public:
     IsGoObj
   };
 
+  /// Name-only late-helper index. IR code owns construction and validation;
+  /// MCContext owns its lifetime along with the other module emission state.
+  struct GoObjBuiltinNameIndex {
+    const void *Owner = nullptr;
+    uint64_t Revision = 0;
+    StringMap<std::vector<std::string>> Names[2];
+
+    void clear() {
+      Owner = nullptr;
+      Revision = 0;
+      Names[0].clear();
+      Names[1].clear();
+    }
+  };
+
   struct GoObjPCSPEntry {
     const MCSymbol *Label;
     int32_t Value;
@@ -267,6 +282,8 @@ private:
 
   /// Bindings of names to symbol table values.
   SymbolTable Symbols;
+
+  GoObjBuiltinNameIndex GoObjBuiltinNames;
 
   /// MC symbols known to denote Go functions, including declarations.
   DenseSet<const MCSymbol *> GoObjFunctionSymbols;
@@ -592,6 +609,10 @@ private:
   DenseSet<StringRef> ELFSeenGenericMergeableSections;
 
 public:
+  GoObjBuiltinNameIndex &getGoObjBuiltinNameIndex() {
+    return GoObjBuiltinNames;
+  }
+
   LLVM_ABI explicit MCContext(const Triple &TheTriple, const MCAsmInfo &MAI,
                               const MCRegisterInfo &MRI,
                               const MCSubtargetInfo &MSTI,

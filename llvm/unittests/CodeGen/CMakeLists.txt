@@ -29,6 +29,7 @@ add_llvm_unittest(CodeGenTests
   DroppedVariableStatsMIRTest.cpp
   DwarfStringPoolEntryRefTest.cpp
   GCMetadata.cpp
+  GoObjBuiltinNameTest.cpp
   InstrRefLDVTest.cpp
   LowLevelTypeTest.cpp
   LexicalScopesTest.cpp
