@@ -166,6 +166,7 @@ void MCContext::reset() {
 
   MCSubtargetAllocator.DestroyAll();
   InlineAsmUsedLabelNames.clear();
+  GoObjBuiltinNames.clear();
   GoObjFunctionSymbols.clear();
   GoObjPackageSymbolIndexes.clear();
   GoObjStaticRODataType.reset();

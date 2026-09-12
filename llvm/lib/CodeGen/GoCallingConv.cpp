@@ -144,24 +144,42 @@ std::string getGoObjBuiltinCalleeName(const MachineFunction &MF,
     report_fatal_error("invalid logical Go builtin symbol");
 
   const Module &M = *MF.getFunction().getParent();
+  auto &Index = MF.getContext().getGoObjBuiltinNameIndex();
+  // Build lazily after IR preparation, at the first late machine helper lookup.
+  // Builtin bindings are frozen for this emission; ordinary IR names may still
+  // change without invalidating the index. Module initialization resets it.
+  if (Index.Owner != &M) {
+    Index.clear();
+    Index.Owner = &M;
+    for (const Function &F : M) {
+      StringRef Name = F.getName();
+      bool IsABI0 = Name.consume_back(GoObj::ABI0SymbolSuffix);
+      auto [LogicalName, Number] =
+          Name.rsplit(GoObj::BuiltinSymbolSuffixPrefix);
+      uint32_t BuiltinIndex;
+      if (LogicalName.empty() || !Number.consume_back(">") || Number.empty() ||
+          Number.getAsInteger(10, BuiltinIndex))
+        continue;
+      Index.Names[IsABI0][LogicalName].push_back(F.getName().str());
+    }
+  }
+
   const Function *Match = nullptr;
-  for (const Function &F : M) {
-    StringRef Candidate = F.getName();
-    bool IsABI0 = Candidate.consume_back(GoObj::ABI0SymbolSuffix);
-    if (IsABI0 != (CC == CallingConv::GoABI0) ||
-        !Candidate.consume_front(SymbolName) ||
-        !Candidate.consume_front(GoObj::BuiltinSymbolSuffixPrefix) ||
-        !Candidate.consume_back(">") || Candidate.empty())
-      continue;
-    uint32_t Index;
-    if (Candidate.getAsInteger(10, Index))
-      continue;
-    if (F.getCallingConv() != CC)
-      report_fatal_error(
-          "Go builtin declaration has invalid calling convention");
-    if (Match)
-      report_fatal_error("duplicate Go builtin declaration");
-    Match = &F;
+  auto It = Index.Names[CC == CallingConv::GoABI0].find(SymbolName);
+  if (It != Index.Names[CC == CallingConv::GoABI0].end()) {
+    for (const std::string &Name : It->second) {
+      const Function *F = M.getFunction(Name);
+      if (!F)
+        report_fatal_error("Go builtin declaration changed during emission");
+      // Validate on lookup: unused malformed declarations must not start
+      // failing, and calling conventions can change without a name mutation.
+      if (F->getCallingConv() != CC)
+        report_fatal_error(
+            "Go builtin declaration has invalid calling convention");
+      if (Match)
+        report_fatal_error("duplicate Go builtin declaration");
+      Match = F;
+    }
   }
   if (Match)
     return Match->getName().str();

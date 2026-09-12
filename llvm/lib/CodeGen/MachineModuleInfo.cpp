@@ -191,6 +191,7 @@ static uint64_t getLocCookie(const SMDiagnostic &SMD, const SourceMgr &SrcMgr,
 bool MachineModuleInfoWrapperPass::doInitialization(Module &M) {
   MMI.initialize();
   MMI.TheModule = &M;
+  MMI.getContext().getGoObjBuiltinNameIndex().clear();
   LLVMContext &Ctx = M.getContext();
   MMI.getContext().setDiagnosticHandler(
       [&Ctx, &M](const SMDiagnostic &SMD, bool IsInlineAsm,
@@ -215,6 +216,7 @@ AnalysisKey MachineModuleAnalysis::Key;
 MachineModuleAnalysis::Result
 MachineModuleAnalysis::run(Module &M, ModuleAnalysisManager &) {
   MMI.TheModule = &M;
+  MMI.getContext().getGoObjBuiltinNameIndex().clear();
   LLVMContext &Ctx = M.getContext();
   MMI.getContext().setDiagnosticHandler(
       [&Ctx, &M](const SMDiagnostic &SMD, bool IsInlineAsm,
