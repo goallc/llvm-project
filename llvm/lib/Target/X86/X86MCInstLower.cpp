@@ -380,12 +380,14 @@ static unsigned convertTailJumpOpcode(unsigned Opcode, bool IsLarge = false) {
     Opcode = X86::JMP32m;
     break;
   case X86::TAILJMPr64:
+  case X86::TAILJMP_GO64r:
     Opcode = X86::JMP64r;
     break;
   case X86::TAILJMPm64:
     Opcode = X86::JMP64m;
     break;
   case X86::TAILJMPr64_REX:
+  case X86::TAILJMP_GO64r_REX:
     Opcode = X86::JMP64r_REX;
     break;
   case X86::TAILJMPm64_REX:
@@ -485,6 +487,8 @@ void X86MCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
   case X86::TAILJMPr:
   case X86::TAILJMPr64:
   case X86::TAILJMPr64_REX:
+  case X86::TAILJMP_GO64r:
+  case X86::TAILJMP_GO64r_REX:
   case X86::TAILJMPd:
     assert(OutMI.getNumOperands() == 1 && "Unexpected number of operands!");
     OutMI.setOpcode(convertTailJumpOpcode(OutMI.getOpcode()));
@@ -2382,6 +2386,8 @@ void X86AsmPrinter::emitInstruction(const MachineInstr *MI) {
   case X86::TAILJMPd:
   case X86::TAILJMPd_CC:
   case X86::TAILJMPr64:
+  case X86::TAILJMP_GO64r:
+  case X86::TAILJMP_GO64r_REX:
   case X86::TAILJMPm64:
   case X86::TAILJMPd64_CC:
     if (EnableImportCallOptimization)

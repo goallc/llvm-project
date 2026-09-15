@@ -630,6 +630,9 @@ def GR64_ABCD : RegisterClass<"X86", [i64], 64, (add RAX, RCX, RDX, RBX)>;
 def GR32_TC   : RegisterClass<"X86", [i32], 32, (add EAX, ECX, EDX, ESP)>;
 def GR64_TC   : RegisterClass<"X86", [i64], 64, (add RAX, RCX, RDX, RSI, RDI,
                                                      R8, R9, R11, RIP, RSP)>;
+// Go's R12 and R13 are permanent scratch registers, not callee-saved registers.
+// They can carry a tail target even when all arguments and nest are live.
+def GR64_TCGo : RegisterClass<"X86", [i64], 64, (add GR64_TC, R12, R13)>;
 def GR64_TCW64 : RegisterClass<"X86", [i64], 64, (add RAX, RCX, RDX,
                                                       R8, R9, R10, R11,
                                                       RIP, RSP)>;

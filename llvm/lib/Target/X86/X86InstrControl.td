@@ -368,6 +368,8 @@ let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
                                []>, Sched<[WriteJump]>;
   def TCRETURN_WIN64ri : PseudoI<(outs), (ins GR64_TCW64:$dst, i32imm:$offset),
                                 []>, Sched<[WriteJump]>;
+  def TCRETURN_GO64ri : PseudoI<(outs), (ins GR64_TCGo:$dst, i32imm:$offset),
+                               []>, Sched<[WriteJump]>;
 
   def TCRETURNri64_ImpCall   : PseudoI<(outs),
                                (ins GR64_A:$dst, i32imm:$offset),
@@ -387,6 +389,8 @@ let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
 
   def TAILJMPr64 : PseudoI<(outs), (ins ptr_rc_tailcall:$dst),
                            []>, Sched<[WriteJump]>;
+  def TAILJMP_GO64r : PseudoI<(outs), (ins GR64_TCGo:$dst),
+                            []>, Sched<[WriteJump]>;
 
   let mayLoad = 1 in
   def TAILJMPm64 : PseudoI<(outs), (ins i64mem_TC:$dst),
@@ -396,6 +400,8 @@ let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
   let hasREX_W = 1 in {
     def TAILJMPr64_REX : PseudoI<(outs), (ins ptr_rc_tailcall:$dst),
                                  []>, Sched<[WriteJump]>;
+    def TAILJMP_GO64r_REX : PseudoI<(outs), (ins GR64_TCGo:$dst),
+                                  []>, Sched<[WriteJump]>;
 
     let mayLoad = 1 in
     def TAILJMPm64_REX : PseudoI<(outs), (ins i64mem_TC:$dst),

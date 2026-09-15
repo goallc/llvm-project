@@ -243,6 +243,12 @@ let RecomputePerFunction = 1 in {
 
   def IsWin64CCFunc : Predicate<"Subtarget->isCallingConvWin64(MF->getFunction().getCallingConv())">;
   def IsNotWin64CCFunc : Predicate<"!Subtarget->isCallingConvWin64(MF->getFunction().getCallingConv())">;
+  def IsGoCCFunc : Predicate<
+    "MF->getFunction().getCallingConv() == CallingConv::GoABIInternal || "
+    "MF->getFunction().getCallingConv() == CallingConv::GoABI0">;
+  def IsNotGoCCFunc : Predicate<
+    "MF->getFunction().getCallingConv() != CallingConv::GoABIInternal && "
+    "MF->getFunction().getCallingConv() != CallingConv::GoABI0">;
   def IsHiPECCFunc : Predicate<"MF->getFunction().getCallingConv() == CallingConv::HiPE">;
 
   def IsNotHiPECCFunc : Predicate<

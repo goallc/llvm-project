@@ -327,6 +327,7 @@ bool X86ExpandPseudoImpl::expandMI(MachineBasicBlock &MBB,
   case X86::TCRETURNdi64:
   case X86::TCRETURNdi64cc:
   case X86::TCRETURNri64:
+  case X86::TCRETURN_GO64ri:
   case X86::TCRETURNri64_ImpCall:
   case X86::TCRETURNmi64:
   case X86::TCRETURN_WINmi64: {
@@ -404,12 +405,14 @@ bool X86ExpandPseudoImpl::expandMI(MachineBasicBlock &MBB,
       for (unsigned i = 0; i != X86::AddrNumOperands; ++i)
         MIB.add(MBBI->getOperand(i));
     } else if (Opcode == X86::TCRETURNri64 ||
+               Opcode == X86::TCRETURN_GO64ri ||
                Opcode == X86::TCRETURNri64_ImpCall ||
                Opcode == X86::TCRETURN_WIN64ri) {
       JumpTarget.setIsKill();
-      BuildMI(MBB, MBBI, DL,
-              TII->get(IsX64 ? X86::TAILJMPr64_REX : X86::TAILJMPr64))
-          .add(JumpTarget);
+      unsigned Op = Opcode == X86::TCRETURN_GO64ri
+                        ? (IsX64 ? X86::TAILJMP_GO64r_REX : X86::TAILJMP_GO64r)
+                        : (IsX64 ? X86::TAILJMPr64_REX : X86::TAILJMPr64);
+      BuildMI(MBB, MBBI, DL, TII->get(Op)).add(JumpTarget);
     } else {
       assert(!IsX64 && "Win64 and UEFI64 require REX for indirect jumps.");
       JumpTarget.setIsKill();
