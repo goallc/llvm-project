@@ -9,6 +9,9 @@
 ; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/builtin-index.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BUILTIN-INDEX
 ; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/builtin-linkname.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BUILTIN-LINKNAME
 
+; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/duplicate-builtin.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=DUPLICATE-BUILTIN
+; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/duplicate-linkname.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=DUPLICATE-LINKNAME
+
 ;--- fingerprint.ll
 define goabiinternal void @f() {
   ret void
@@ -87,3 +90,21 @@ define goabiinternal void @f() {
 }
 
 ; BUILTIN-LINKNAME: LLVM ERROR: conflicting Go builtin and linkname symbol identity
+
+;--- duplicate-builtin.ll
+declare goabiinternal void @"runtime.bad<builtin.1><builtin.2>"()
+define goabiinternal void @f() {
+  call goabiinternal void @"runtime.bad<builtin.1><builtin.2>"()
+  ret void
+}
+
+; DUPLICATE-BUILTIN: LLVM ERROR: invalid Go builtin symbol name
+
+;--- duplicate-linkname.ll
+declare goabiinternal void @"runtime.bad<linkname><linkname>"()
+define goabiinternal void @f() {
+  call goabiinternal void @"runtime.bad<linkname><linkname>"()
+  ret void
+}
+
+; DUPLICATE-LINKNAME: LLVM ERROR: invalid Go linkname symbol name

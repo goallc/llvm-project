@@ -201,6 +201,9 @@ getGoObjExplicitSectionSymbolType(const MCSection *Section) {
   if (!Section)
     return std::nullopt;
   StringRef Name = Section->getName();
+  if (Name == ".noptrbss.coverage_counter" ||
+      Name.starts_with(".noptrbss.coverage_counter."))
+    return GoObj::SCOVERAGE_COUNTER;
   if (Name == ".text.fips" || Name.starts_with(".text.fips."))
     return GoObj::STEXTFIPS;
   if (Name == ".rodata.fips" || Name.starts_with(".rodata.fips."))
@@ -907,23 +910,12 @@ makeStatepointStackMaps(const MCAssembler &Asm, const GoObjSymbol &Function,
       NormalizedRecord.Base = RecordBase;
       auto FunctionRecord = llvm::find_if(
           FunctionAllocaRecords, [&](const FunctionAllocaRecord &Existing) {
-            return sameAllocaPtrMapBase(Existing.Layout, NormalizedRecord);
+            return sameAllocaPtrMapLayout(Existing.Layout, NormalizedRecord);
           });
       if (FunctionRecord == FunctionAllocaRecords.end()) {
-        for (const FunctionAllocaRecord &Existing : FunctionAllocaRecords) {
-          int64_t ExistingStart = Existing.Layout.Base.Offset;
-          int64_t ExistingEnd =
-              ExistingStart + static_cast<int64_t>(Existing.Layout.ByteSize);
-          if (RangeStart < ExistingEnd && ExistingStart < RangeEnd)
-            report_fatal_error(
-                "GoObj alloca ptrmap records overlap between statepoints");
-        }
         FunctionAllocaRecords.push_back(
             {NormalizedRecord, *RecordKind, 1, !Record.ContentsLive});
       } else {
-        if (!sameAllocaPtrMapLayout(FunctionRecord->Layout, NormalizedRecord))
-          report_fatal_error(
-              "GoObj alloca ptrmap layout changes between statepoints");
         if (FunctionRecord->Kind != *RecordKind)
           report_fatal_error(
               "GoObj alloca ptrmap frame region changes between statepoints");
@@ -1066,6 +1058,30 @@ makeStatepointStackMaps(const MCAssembler &Asm, const GoObjSymbol &Function,
   for (const FunctionAllocaRecord &FunctionRecord : FunctionAllocaRecords) {
     if (!FunctionRecord.SawInactiveContents)
       continue;
+
+    // Only address-observable StackObjects have a function-wide layout.
+    // Live-only records contribute roots to an individual callsite, and stack
+    // coloring can reuse their storage for a different layout at another
+    // callsite. Once an inactive record requires a StackObject, its layout
+    // must remain stable and cannot overlap any other recorded layout.
+    const GoObjAllocaPtrMapRecord &Layout = FunctionRecord.Layout;
+    for (const FunctionAllocaRecord &Other : FunctionAllocaRecords) {
+      if (&Other == &FunctionRecord)
+        continue;
+      if (sameAllocaPtrMapBase(Layout, Other.Layout))
+        report_fatal_error(
+            Twine(
+                "GoObj alloca ptrmap layout changes between statepoints in ") +
+            Function.Symbol->getName());
+      int64_t Start = Layout.Base.Offset;
+      int64_t End = Start + static_cast<int64_t>(Layout.ByteSize);
+      int64_t OtherStart = Other.Layout.Base.Offset;
+      int64_t OtherEnd =
+          OtherStart + static_cast<int64_t>(Other.Layout.ByteSize);
+      if (Start < OtherEnd && OtherStart < End)
+        report_fatal_error(
+            "GoObj alloca ptrmap records overlap between statepoints");
+    }
     if (FunctionRecord.SeenOrdinaryEntries != OrdinaryEntryCount)
       report_fatal_error(
           "GoObj stack object layout is missing from a function statepoint");
@@ -1746,11 +1762,12 @@ uint64_t GoObjObjectWriter::writeObject() {
 
     bool IsFMVImplementation = false;
     size_t FMVBegin = Name.rfind(FMVPrefix);
-    if (FMVBegin != StringRef::npos) {
+    if (GoObj::getSymbolSuffix(Name).starts_with(FMVPrefix)) {
       StringRef Base = Name.take_front(FMVBegin);
       StringRef Tag = Name.drop_front(FMVBegin + FMVPrefix.size());
-      if (Base.empty() || Base.contains(FMVPrefix) || !Tag.consume_back(">") ||
-          Tag.empty() || !llvm::all_of(Tag, [](char C) {
+      if (Base.empty() || GoObj::getSymbolSuffix(Base).starts_with(FMVPrefix) ||
+          !Tag.consume_back(">") || Tag.empty() ||
+          !llvm::all_of(Tag, [](char C) {
             return isAlnum(C) || C == '.' || C == '_' || C == '-';
           }))
         report_fatal_error("invalid Go FMV implementation symbol name");
@@ -1759,15 +1776,16 @@ uint64_t GoObjObjectWriter::writeObject() {
     }
 
     bool IsLinknameRef = Name.consume_back(LinknameSuffix);
-    if (Name.contains(LinknameSuffix))
+    if (Name.ends_with(LinknameSuffix))
       report_fatal_error("invalid Go linkname symbol name");
 
     std::optional<uint32_t> BuiltinIndex;
     size_t BuiltinBegin = Name.rfind(BuiltinPrefix);
-    if (BuiltinBegin != StringRef::npos) {
+    if (GoObj::getSymbolSuffix(Name).starts_with(BuiltinPrefix)) {
       StringRef Base = Name.take_front(BuiltinBegin);
       StringRef Index = Name.drop_front(BuiltinBegin + BuiltinPrefix.size());
-      if (Base.empty() || Base.contains(BuiltinPrefix) ||
+      if (Base.empty() ||
+          GoObj::getSymbolSuffix(Base).starts_with(BuiltinPrefix) ||
           !Index.consume_back(">") || Index.empty())
         report_fatal_error("invalid Go builtin symbol name");
       uint32_t ParsedIndex = 0;
@@ -1781,10 +1799,9 @@ uint64_t GoObjObjectWriter::writeObject() {
     if (IsFMVImplementation && (BuiltinIndex || IsLinknameRef))
       report_fatal_error("conflicting Go FMV implementation symbol identity");
     if ((BuiltinIndex || IsLinknameRef) &&
-        (Name.empty() || Name.contains(BuiltinPrefix) ||
-         Name.contains(LinknameSuffix)))
+        (Name.empty() || GoObj::hasReferenceSuffix(Name)))
       report_fatal_error("invalid Go builtin symbol name");
-    if (Name.contains(FMVPrefix))
+    if (GoObj::getSymbolSuffix(Name).starts_with(FMVPrefix))
       report_fatal_error("invalid Go FMV implementation symbol name");
     return GoObjSymbolIdentity{Name, BuiltinIndex, IsLinknameRef,
                                IsFMVImplementation, IsABI0};

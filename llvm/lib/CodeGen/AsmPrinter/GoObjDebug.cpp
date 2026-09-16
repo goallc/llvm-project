@@ -8,6 +8,7 @@
 
 #include "GoObjDebug.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/AsmPrinter.h"
@@ -43,7 +44,7 @@ class GoObjDebugHandler final : public AsmPrinterHandler {
   Module *M = nullptr;
   const MCSymbol *CurrentFunction = nullptr;
   DebugLoc PreviousLocation;
-  DenseMap<const DISubprogram *, const MCSymbol *> SubprogramSymbols;
+  MapVector<const DISubprogram *, const MCSymbol *> SubprogramSymbols;
   DenseMap<std::pair<const DILocation *, const DISubprogram *>, uint64_t>
       InlineSiteIDs;
   uint64_t NextInlineSiteID = 1;
@@ -208,8 +209,25 @@ public:
     }
 
     if (DwarfVersion != 0) {
+      // Multiple inline instances can describe the same emitted function.
+      // Merge their variable manifests instead of overwriting one another in
+      // pointer-hash order, which loses variables and makes DWARF unstable.
+      MapVector<const MCSymbol *,
+                std::pair<const DISubprogram *,
+                          std::vector<MCContext::GoObjDebugVariable>>>
+          SymbolDebugInfo;
       for (const auto &[SP, Symbol] : SubprogramSymbols) {
-        auto &SPVariables = Variables[SP];
+        auto &Info = SymbolDebugInfo[Symbol];
+        if (!Info.first)
+          Info.first = SP;
+        auto &Vars = Variables[SP];
+        Info.second.insert(Info.second.end(),
+                           std::make_move_iterator(Vars.begin()),
+                           std::make_move_iterator(Vars.end()));
+      }
+      for (auto &[Symbol, Info] : SymbolDebugInfo) {
+        const DISubprogram *SP = Info.first;
+        auto &SPVariables = Info.second;
         llvm::sort(SPVariables, [](const auto &LHS, const auto &RHS) {
           if ((LHS.ArgNo == 0) != (RHS.ArgNo == 0))
             return LHS.ArgNo != 0;
