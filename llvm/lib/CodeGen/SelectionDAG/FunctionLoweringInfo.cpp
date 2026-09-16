@@ -430,7 +430,10 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
   }
 
   findGoByValCallCarriers(*this);
-  findGoRetValueProjections(*this);
+  // Result projection is an optional copy-elision optimization. Keep the
+  // explicit result home in unoptimized code, just as for byval carriers.
+  if (DAG->getOptLevel() != CodeGenOptLevel::None)
+    findGoRetValueProjections(*this);
 
   // Create an initial MachineBasicBlock for each LLVM BasicBlock in F.  This
   // also creates the initial PHI MachineInstrs, though none of the input
