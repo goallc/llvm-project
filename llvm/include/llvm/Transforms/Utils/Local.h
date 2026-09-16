@@ -272,20 +272,24 @@ LLVM_ABI CallInst *changeToCall(InvokeInst *II, DomTreeUpdater *DTU = nullptr);
 ///
 
 /// Creates and inserts a dbg_value record intrinsic before a store
-/// that has an associated llvm.dbg.value intrinsic.
-LLVM_ABI void InsertDebugValueAtStoreLoc(DbgVariableRecord *DVR, StoreInst *SI,
-                                         DIBuilder &Builder);
+/// that has an associated llvm.dbg.value intrinsic. Returns the new record.
+LLVM_ABI DbgVariableRecord *InsertDebugValueAtStoreLoc(DbgVariableRecord *DVR,
+                                                       StoreInst *SI,
+                                                       DIBuilder &Builder);
 
 /// Inserts a dbg.value record before a store to an alloca'd value
-/// that has an associated dbg.declare record.
-LLVM_ABI void ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR,
-                                              StoreInst *SI,
-                                              DIBuilder &Builder);
+/// that has an associated dbg.declare record. Returns the new record, or
+/// nullptr if no record was inserted.
+LLVM_ABI DbgVariableRecord *
+ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR, StoreInst *SI,
+                                DIBuilder &Builder);
 
-/// Inserts a dbg.value record before a load of an alloca'd value
-/// that has an associated dbg.declare record.
-LLVM_ABI void ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR,
-                                              LoadInst *LI, DIBuilder &Builder);
+/// Inserts a dbg.value record after a load of an alloca'd value
+/// that has an associated dbg.declare record. Returns the new record, or
+/// nullptr if no record was inserted.
+LLVM_ABI DbgVariableRecord *
+ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR, LoadInst *LI,
+                                DIBuilder &Builder);
 
 /// Inserts a dbg.value record after a phi that has an associated
 /// llvm.dbg.declare record.
@@ -294,6 +298,16 @@ LLVM_ABI void ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR,
 
 /// Lowers dbg.declare records into appropriate set of dbg.value records.
 LLVM_ABI bool LowerDbgDeclare(Function &F);
+
+/// Replace debug references to eliminated stack storage with descriptions of
+/// existing stored/loaded SSA values. All allocas must belong to one function.
+/// The caller must prove that each object has one initialization sequence and
+/// no unmodelled mutations: either direct stores followed by read-only uses, or
+/// initialization by a call followed by loads of the result. This helper does
+/// not establish that removing the storage is legal and does not modify
+/// executable IR. Constant-offset addresses and available aggregate elements
+/// are handled; unsupported descriptions are explicitly made unavailable.
+LLVM_ABI void salvageDebugInfoForAllocas(ArrayRef<AllocaInst *> Allocas);
 
 /// Propagate dbg.value intrinsics through the newly inserted PHIs.
 LLVM_ABI void

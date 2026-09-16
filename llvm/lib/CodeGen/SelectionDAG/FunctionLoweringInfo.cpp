@@ -16,7 +16,6 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Analysis/UniformityAnalysis.h"
 #include "llvm/Analysis/ValueTracking.h"
-#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -32,10 +31,7 @@
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
-#include "llvm/IR/DebugInfo.h"
-#include "llvm/IR/DebugProgramInstruction.h"
 #include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -45,9 +41,8 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include <algorithm>
-#include <climits>
-#include <functional>
 using namespace llvm;
 
 #define DEBUG_TYPE "function-lowering-info"
@@ -275,243 +270,21 @@ static void findGoRetValueProjections(FunctionLoweringInfo &FuncInfo) {
   }
 }
 
-// Replace address descriptions before SelectionDAG builds either SDDbgValues or
-// the MachineFunction variable table. Both consumers must stop referring to a
-// home that byval forwarding or goret projection can remove. Use the same SSA
-// values as the stores/loads, so normal debug-value lowering and register
-// allocation can track them without extending the lifetime of the memory home.
+// Carrier recognition belongs to lowering; debug address-to-value conversion
+// is shared with other transformations that eliminate stack storage.
 static void salvageGoCallCarrierDebugInfo(FunctionLoweringInfo &FLI) {
   Function &F = FLI.MF->getFunction();
-  const DataLayout &DL = F.getDataLayout();
   bool AllowGCLiveUses =
       FLI.MF->getTarget().getTargetTriple().isOSBinFormatGoObj() &&
       goabi::isGoCallingConv(F.getCallingConv());
-  std::optional<DominatorTree> DT;
-
-  for (Instruction &I : F.getEntryBlock()) {
-    auto *AI = dyn_cast<AllocaInst>(&I);
-    if (!AI || (!FLI.isGoRetValueProjectionCarrier(AI) &&
-                !isSingleByValCallCarrier(*AI, DL, AllowGCLiveUses)))
-      continue;
-
-    struct Access {
-      Instruction *Inst;
-      Value *Contents;
-      int64_t Offset;
-    };
-    SmallVector<Access, 8> Accesses;
-    SmallVector<DbgVariableRecord *, 4> Records;
-    SmallPtrSet<DbgVariableRecord *, 4> SeenRecords;
-    SmallVector<Value *, 8> Worklist = {AI};
-    SmallPtrSet<Value *, 8> Seen;
-    while (!Worklist.empty()) {
-      Value *Address = Worklist.pop_back_val();
-      if (!Seen.insert(Address).second)
-        continue;
-      SmallVector<DbgVariableRecord *, 4> Users;
-      findDbgUsers(Address, Users);
-      for (auto *DVR : Users)
-        if (SeenRecords.insert(DVR).second)
-          Records.push_back(DVR);
-      for (User *U : Address->users()) {
-        if (isa<GetElementPtrInst, BitCastInst, AddrSpaceCastInst>(U)) {
-          Worklist.push_back(cast<Value>(U));
-          continue;
-        }
-        int64_t Offset;
-        if (auto *SI = dyn_cast<StoreInst>(U)) {
-          if (GetPointerBaseWithConstantOffset(SI->getPointerOperand(), Offset,
-                                               DL) == AI)
-            Accesses.push_back({SI, SI->getValueOperand(), Offset});
-        } else if (auto *LI = dyn_cast<LoadInst>(U)) {
-          if (GetPointerBaseWithConstantOffset(LI->getPointerOperand(), Offset,
-                                               DL) == AI)
-            Accesses.push_back({LI, LI, Offset});
-        }
-      }
-    }
-    if (Records.empty())
-      continue;
-    if (!DT)
-      DT.emplace(F);
-    llvm::sort(Accesses, [](const Access &L, const Access &R) {
-      if (L.Inst->getParent() == R.Inst->getParent())
-        return L.Inst->comesBefore(R.Inst);
-      return L.Inst->getParent()->getNumber() <
-             R.Inst->getParent()->getNumber();
-    });
-
-    for (DbgVariableRecord *DVR : Records) {
-      const DIExpression *OldExpr = DVR->getExpression();
-      auto Fragment = OldExpr->getFragmentInfo();
-      SmallVector<uint64_t, 8> KillOps;
-      if (Fragment)
-        KillOps.append({dwarf::DW_OP_LLVM_fragment, Fragment->OffsetInBits,
-                        Fragment->SizeInBits});
-      auto *KillExpr = DIExpression::get(F.getContext(), KillOps);
-      DbgVariableRecord::createDbgVariableRecord(
-          PoisonValue::get(Type::getInt32Ty(F.getContext())),
-          DVR->getVariable(), KillExpr, DVR->getDebugLoc().get(), *DVR);
-
-      // Unknown expressions, address-valued variables, and assignment records
-      // cannot name a removed address. Leave an explicit unavailable value,
-      // rather than retaining the stack object or guessing a new address.
-      auto Salvage = [&] {
-        if (DVR->isDbgAssign() || DVR->getNumVariableLocationOps() != 1 ||
-            !DVR->getVariableLocationOp(0)->getType()->isPointerTy())
-          return;
-        int64_t Offset;
-        if (GetPointerBaseWithConstantOffset(DVR->getVariableLocationOp(0),
-                                             Offset, DL) != AI ||
-            Offset < 0)
-          return;
-        ArrayRef<uint64_t> Ops = OldExpr->getElements();
-        if (Fragment)
-          Ops = Ops.drop_back(3);
-        while (Ops.size() >= 2 && Ops.front() == dwarf::DW_OP_plus_uconst) {
-          if (Ops[1] > uint64_t(INT64_MAX - Offset))
-            return;
-          Offset += Ops[1];
-          Ops = Ops.drop_front(2);
-        }
-        bool IsDeclare = DVR->isAddressOfVariable();
-        if (!IsDeclare) {
-          if (Ops.empty() || Ops.front() != dwarf::DW_OP_deref)
-            return;
-          Ops = Ops.drop_front();
-        }
-        // After consuming the address, keep only a plain value or one
-        // further indirection (a heap-variable pointer home). More complex
-        // address computations need their own salvage rule.
-        bool Indirect = Ops.size() == 1 && Ops.front() == dwarf::DW_OP_deref;
-        if (!Ops.empty() && !Indirect)
-          return;
-        auto VarSize = DVR->getVariable()->getSizeInBits();
-        if (!VarSize)
-          return;
-        uint64_t Bits = Indirect   ? DL.getPointerSizeInBits()
-                        : Fragment ? Fragment->SizeInBits
-                                   : *VarSize;
-        if (!Bits || uint64_t(Offset) > UINT64_MAX / 8)
-          return;
-        uint64_t Begin = uint64_t(Offset) * 8;
-        if (Bits > UINT64_MAX - Begin)
-          return;
-        SmallVector<uint64_t, 8> ValueOps(Ops);
-        if (Fragment)
-          ValueOps.append({dwarf::DW_OP_LLVM_fragment, Fragment->OffsetInBits,
-                           Fragment->SizeInBits});
-        DIExpression *ValueExpr = DIExpression::get(F.getContext(), ValueOps);
-        Instruction *Position = DVR->getInstruction();
-        if (!Position)
-          return;
-
-        // A dbg.value address is a point-in-time description, unlike a
-        // declaration. Only salvage a snapshot when all writes precede it in
-        // the same block. Otherwise a later write could make it stale, or an
-        // inserted update could override a subsequent unrelated dbg.value.
-        if (!IsDeclare && any_of(Accesses, [&](const Access &A) {
-              return isa<StoreInst>(A.Inst) &&
-                     (A.Inst->getParent() != Position->getParent() ||
-                      !A.Inst->comesBefore(Position));
-            }))
-          return;
-
-        for (const Access &A : Accesses) {
-          bool AtRecord = A.Inst->getParent() == Position->getParent() &&
-                          A.Inst->comesBefore(Position);
-          if (!AtRecord && (!IsDeclare || (Position != A.Inst &&
-                                           !DT->dominates(Position, A.Inst))))
-            continue;
-          DbgVariableRecord *LastUpdate = nullptr;
-          auto Insert = [&](Value *V, DIExpression *Expr) {
-            auto *New = DbgVariableRecord::createDbgVariableRecord(
-                V, DVR->getVariable(), Expr, DVR->getDebugLoc().get());
-            if (AtRecord)
-              DVR->getMarker()->insertDbgRecord(New, DVR);
-            else if (LastUpdate)
-              LastUpdate->getMarker()->insertDbgRecordAfter(New, LastUpdate);
-            else
-              A.Inst->getParent()->insertDbgRecordAfter(New, A.Inst);
-            LastUpdate = New;
-          };
-          // Kill the overwritten part before describing its new value. This
-          // is necessary even if a store cannot be salvaged, or if later DAG
-          // checks decline forwarding (for example, overlapping stores).
-          if (isa<StoreInst>(A.Inst) && A.Offset >= 0) {
-            TypeSize StoreSize = DL.getTypeStoreSize(A.Contents->getType());
-            uint64_t Start = uint64_t(A.Offset) * 8;
-            if (!StoreSize.isScalable() && Start < Begin + Bits &&
-                StoreSize.getFixedValue() * 8 >
-                    (Start < Begin ? Begin - Start : 0)) {
-              uint64_t KillBegin = std::max(Start, Begin);
-              uint64_t KillEnd =
-                  std::min(Start + StoreSize.getFixedValue() * 8, Begin + Bits);
-              DIExpression *Expr = KillExpr;
-              if (!Indirect &&
-                  (KillBegin != Begin || KillEnd != Begin + Bits) &&
-                  KillBegin - Begin <= UINT_MAX &&
-                  KillEnd - KillBegin <= UINT_MAX)
-                if (auto Part = DIExpression::createFragmentExpression(
-                        KillExpr, KillBegin - Begin, KillEnd - KillBegin))
-                  Expr = *Part;
-              Insert(PoisonValue::get(Type::getInt32Ty(F.getContext())), Expr);
-            }
-          }
-          // No new executable IR is introduced for debugging. Recover existing
-          // aggregate elements without asking FindInsertedValue to create IR;
-          // unknown pieces remain unavailable.
-          std::function<void(Value *, uint64_t)> Emit =
-              [&](Value *V, uint64_t ByteOffset) {
-                Type *Ty = V->getType();
-                if (Ty->isAggregateType()) {
-                  auto *ST = dyn_cast<StructType>(Ty);
-                  uint64_t Count = ST ? ST->getNumElements()
-                                      : cast<ArrayType>(Ty)->getNumElements();
-                  for (uint64_t N = 0; N < Count; ++N) {
-                    if (N > UINT_MAX)
-                      break;
-                    Value *Element = FindInsertedValue(V, unsigned(N));
-                    if (!Element)
-                      continue;
-                    uint64_t ElementOffset =
-                        ST ? DL.getStructLayout(ST)->getElementOffset(N)
-                           : N * DL.getTypeAllocSize(Element->getType());
-                    Emit(Element, ByteOffset + ElementOffset);
-                  }
-                  return;
-                }
-                TypeSize Size = DL.getTypeStoreSize(Ty);
-                if (Size.isScalable() || ByteOffset > UINT64_MAX / 8)
-                  return;
-                uint64_t Start = ByteOffset * 8,
-                         SizeBits = Size.getFixedValue() * 8;
-                if (Start < Begin || Start >= Begin + Bits ||
-                    SizeBits > Begin + Bits - Start)
-                  return;
-                DIExpression *Expr = ValueExpr;
-                if (Start != Begin || SizeBits != Bits) {
-                  // Slicing a computed value is not equivalent to slicing the
-                  // memory holding its input (notably for heap indirection).
-                  if (!Ops.empty() || Start - Begin > UINT_MAX ||
-                      SizeBits > UINT_MAX)
-                    return;
-                  auto Piece = DIExpression::createFragmentExpression(
-                      Expr, Start - Begin, SizeBits);
-                  if (!Piece)
-                    return;
-                  Expr = *Piece;
-                }
-                Insert(V, Expr);
-              };
-          if (A.Offset >= 0)
-            Emit(A.Contents, A.Offset);
-        }
-      };
-      Salvage();
-      DVR->eraseFromParent();
-    }
-  }
+  SmallVector<AllocaInst *, 8> Carriers;
+  for (Instruction &I : F.getEntryBlock())
+    if (auto *AI = dyn_cast<AllocaInst>(&I);
+        AI &&
+        (FLI.isGoRetValueProjectionCarrier(AI) ||
+         isSingleByValCallCarrier(*AI, F.getDataLayout(), AllowGCLiveUses)))
+      Carriers.push_back(AI);
+  salvageDebugInfoForAllocas(Carriers);
 }
 
 void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,

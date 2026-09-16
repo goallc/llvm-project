@@ -79,7 +79,9 @@
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include <algorithm>
 #include <cassert>
+#include <climits>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <optional>
@@ -1655,15 +1657,14 @@ static bool valueCoversEntireFragment(Type *ValTy, DbgVariableRecord *DVR) {
   return false;
 }
 
-static void insertDbgValueOrDbgVariableRecord(DIBuilder &Builder, Value *DV,
-                                              DILocalVariable *DIVar,
-                                              DIExpression *DIExpr,
-                                              const DebugLoc &NewLoc,
-                                              BasicBlock::iterator Instr) {
+static DbgVariableRecord *insertDbgValueOrDbgVariableRecord(
+    DIBuilder &Builder, Value *DV, DILocalVariable *DIVar, DIExpression *DIExpr,
+    const DebugLoc &NewLoc, BasicBlock::iterator Instr) {
   ValueAsMetadata *DVAM = ValueAsMetadata::get(DV);
   DbgVariableRecord *DVRec =
       new DbgVariableRecord(DVAM, DIVar, DIExpr, NewLoc.get());
   Instr->getParent()->insertDbgRecordBefore(DVRec, Instr);
+  return DVRec;
 }
 
 static DIExpression *dropInitialDeref(const DIExpression *DIExpr) {
@@ -1672,8 +1673,9 @@ static DIExpression *dropInitialDeref(const DIExpression *DIExpr) {
                            DIExpr->getElements().drop_front(NumEltDropped));
 }
 
-void llvm::ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR,
-                                           StoreInst *SI, DIBuilder &Builder) {
+DbgVariableRecord *llvm::ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR,
+                                                         StoreInst *SI,
+                                                         DIBuilder &Builder) {
   assert(DVR->isAddressOfVariable() || DVR->isDbgAssign());
   auto *DIVar = DVR->getVariable();
   assert(DIVar && "Missing variable");
@@ -1681,7 +1683,7 @@ void llvm::ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR,
   Value *DV = SI->getValueOperand();
 
   if (isa<UndefValue>(DV) && !isa<PoisonValue>(DV))
-    return;
+    return nullptr;
 
   DebugLoc NewLoc = getDebugValueLoc(DVR);
 
@@ -1701,9 +1703,8 @@ void llvm::ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR,
       DIExpr->isDeref() || (!DIExpr->startsWithDeref() &&
                             valueCoversEntireFragment(DV->getType(), DVR));
   if (CanConvert) {
-    insertDbgValueOrDbgVariableRecord(Builder, DV, DIVar, DIExpr, NewLoc,
-                                      SI->getIterator());
-    return;
+    return insertDbgValueOrDbgVariableRecord(Builder, DV, DIVar, DIExpr, NewLoc,
+                                             SI->getIterator());
   }
 
   // FIXME: If storing to a part of the variable described by the dbg.declare,
@@ -1719,10 +1720,12 @@ void llvm::ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR,
   DbgVariableRecord *NewDVR =
       new DbgVariableRecord(DVAM, DIVar, DIExpr, NewLoc.get());
   SI->getParent()->insertDbgRecordBefore(NewDVR, SI->getIterator());
+  return NewDVR;
 }
 
-void llvm::InsertDebugValueAtStoreLoc(DbgVariableRecord *DVR, StoreInst *SI,
-                                      DIBuilder &Builder) {
+DbgVariableRecord *llvm::InsertDebugValueAtStoreLoc(DbgVariableRecord *DVR,
+                                                    StoreInst *SI,
+                                                    DIBuilder &Builder) {
   auto *DIVar = DVR->getVariable();
   assert(DIVar && "Missing variable");
   auto *DIExpr = DVR->getExpression();
@@ -1731,12 +1734,13 @@ void llvm::InsertDebugValueAtStoreLoc(DbgVariableRecord *DVR, StoreInst *SI,
 
   DebugLoc NewLoc = getDebugValueLoc(DVR);
 
-  insertDbgValueOrDbgVariableRecord(Builder, DV, DIVar, DIExpr, NewLoc,
-                                    SI->getIterator());
+  return insertDbgValueOrDbgVariableRecord(Builder, DV, DIVar, DIExpr, NewLoc,
+                                           SI->getIterator());
 }
 
-void llvm::ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR, LoadInst *LI,
-                                           DIBuilder &Builder) {
+DbgVariableRecord *llvm::ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR,
+                                                         LoadInst *LI,
+                                                         DIBuilder &Builder) {
   auto *DIVar = DVR->getVariable();
   auto *DIExpr = DVR->getExpression();
   assert(DIVar && "Missing variable");
@@ -1747,7 +1751,7 @@ void llvm::ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR, LoadInst *LI,
     // corresponding fragment.
     LLVM_DEBUG(dbgs() << "Failed to convert dbg.declare to DbgVariableRecord: "
                       << *DVR << '\n');
-    return;
+    return nullptr;
   }
 
   DebugLoc NewLoc = getDebugValueLoc(DVR);
@@ -1762,6 +1766,270 @@ void llvm::ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR, LoadInst *LI,
   DbgVariableRecord *DV =
       new DbgVariableRecord(LIVAM, DIVar, DIExpr, NewLoc.get());
   LI->getParent()->insertDbgRecordAfter(DV, LI);
+  return DV;
+}
+
+void llvm::salvageDebugInfoForAllocas(ArrayRef<AllocaInst *> Allocas) {
+  if (Allocas.empty())
+    return;
+  Function &F = *Allocas.front()->getFunction();
+  const DataLayout &DL = F.getDataLayout();
+  DIBuilder DIB(*F.getParent(), /*AllowUnresolved=*/false);
+  std::optional<DominatorTree> DT;
+  for (AllocaInst *AI : Allocas) {
+    assert(AI->getFunction() == &F && "allocas must belong to one function");
+    struct Access {
+      Instruction *Inst;
+      Value *Contents;
+      int64_t Offset;
+    };
+    SmallVector<Access, 8> Accesses;
+    SmallVector<DbgVariableRecord *, 4> Records;
+    SmallPtrSet<DbgVariableRecord *, 4> SeenRecords;
+    SmallVector<Value *, 8> Worklist = {AI};
+    SmallPtrSet<Value *, 8> Seen;
+    while (!Worklist.empty()) {
+      Value *Address = Worklist.pop_back_val();
+      if (!Seen.insert(Address).second)
+        continue;
+      SmallVector<DbgVariableRecord *, 4> Users;
+      findDbgUsers(Address, Users);
+      for (auto *DVR : Users)
+        if (SeenRecords.insert(DVR).second)
+          Records.push_back(DVR);
+      for (User *U : Address->users()) {
+        if (isa<GetElementPtrInst, BitCastInst, AddrSpaceCastInst>(U)) {
+          Worklist.push_back(cast<Value>(U));
+          continue;
+        }
+        int64_t Offset;
+        if (auto *SI = dyn_cast<StoreInst>(U)) {
+          if (GetPointerBaseWithConstantOffset(SI->getPointerOperand(), Offset,
+                                               DL) == AI)
+            Accesses.push_back({SI, SI->getValueOperand(), Offset});
+        } else if (auto *LI = dyn_cast<LoadInst>(U)) {
+          if (GetPointerBaseWithConstantOffset(LI->getPointerOperand(), Offset,
+                                               DL) == AI)
+            Accesses.push_back({LI, LI, Offset});
+        }
+      }
+    }
+    if (Records.empty())
+      continue;
+    if (!DT)
+      DT.emplace(F);
+    llvm::sort(Accesses, [](const Access &L, const Access &R) {
+      if (L.Inst->getParent() == R.Inst->getParent())
+        return L.Inst->comesBefore(R.Inst);
+      return L.Inst->getParent()->getNumber() <
+             R.Inst->getParent()->getNumber();
+    });
+
+    for (DbgVariableRecord *DVR : Records) {
+      const DIExpression *OldExpr = DVR->getExpression();
+      auto Fragment = OldExpr->getFragmentInfo();
+      SmallVector<uint64_t, 8> KillOps;
+      if (Fragment)
+        KillOps.append({dwarf::DW_OP_LLVM_fragment, Fragment->OffsetInBits,
+                        Fragment->SizeInBits});
+      auto *KillExpr = DIExpression::get(F.getContext(), KillOps);
+      DbgVariableRecord::createDbgVariableRecord(
+          PoisonValue::get(Type::getInt32Ty(F.getContext())),
+          DVR->getVariable(), KillExpr, DVR->getDebugLoc().get(), *DVR);
+
+      // Unknown expressions, address-valued variables, and assignment records
+      // cannot name a removed address. Leave an explicit unavailable value,
+      // rather than retaining the stack object or guessing a new address.
+      auto Salvage = [&] {
+        if (DVR->isDbgAssign() || DVR->getNumVariableLocationOps() != 1 ||
+            !DVR->getVariableLocationOp(0)->getType()->isPointerTy())
+          return;
+        int64_t Offset;
+        if (GetPointerBaseWithConstantOffset(DVR->getVariableLocationOp(0),
+                                             Offset, DL) != AI ||
+            Offset < 0)
+          return;
+        ArrayRef<uint64_t> Ops = OldExpr->getElements();
+        if (Fragment)
+          Ops = Ops.drop_back(3);
+        while (Ops.size() >= 2 && Ops.front() == dwarf::DW_OP_plus_uconst) {
+          if (Ops[1] > uint64_t(INT64_MAX - Offset))
+            return;
+          Offset += Ops[1];
+          Ops = Ops.drop_front(2);
+        }
+        bool IsDeclare = DVR->isAddressOfVariable();
+        if (!IsDeclare) {
+          if (Ops.empty() || Ops.front() != dwarf::DW_OP_deref)
+            return;
+          Ops = Ops.drop_front();
+        }
+        // After consuming the address, keep only a plain value or one
+        // further indirection (a heap-variable pointer home). More complex
+        // address computations need their own salvage rule.
+        bool Indirect = Ops.size() == 1 && Ops.front() == dwarf::DW_OP_deref;
+        if (!Ops.empty() && !Indirect)
+          return;
+        auto VarSize = DVR->getVariable()->getSizeInBits();
+        if (!VarSize)
+          return;
+        uint64_t Bits = Indirect   ? DL.getPointerSizeInBits()
+                        : Fragment ? Fragment->SizeInBits
+                                   : *VarSize;
+        if (!Bits || uint64_t(Offset) > UINT64_MAX / 8)
+          return;
+        uint64_t Begin = uint64_t(Offset) * 8;
+        if (Bits > UINT64_MAX - Begin)
+          return;
+        SmallVector<uint64_t, 8> ValueOps(Ops);
+        if (Fragment)
+          ValueOps.append({dwarf::DW_OP_LLVM_fragment, Fragment->OffsetInBits,
+                           Fragment->SizeInBits});
+        DIExpression *ValueExpr = DIExpression::get(F.getContext(), ValueOps);
+        Instruction *Position = DVR->getInstruction();
+        if (!Position)
+          return;
+
+        // A dbg.value address is a point-in-time description, unlike a
+        // declaration. Only salvage a snapshot when all writes precede it in
+        // the same block. Otherwise a later write could make it stale, or an
+        // inserted update could override a subsequent unrelated dbg.value.
+        if (!IsDeclare && any_of(Accesses, [&](const Access &A) {
+              return isa<StoreInst>(A.Inst) &&
+                     (A.Inst->getParent() != Position->getParent() ||
+                      !A.Inst->comesBefore(Position));
+            }))
+          return;
+
+        for (const Access &A : Accesses) {
+          bool AtRecord = A.Inst->getParent() == Position->getParent() &&
+                          A.Inst->comesBefore(Position);
+          if (!AtRecord && (!IsDeclare || (Position != A.Inst &&
+                                           !DT->dominates(Position, A.Inst))))
+            continue;
+          DbgVariableRecord *LastUpdate = nullptr;
+          auto Place = [&](DbgVariableRecord *New) {
+            if (AtRecord)
+              DVR->getMarker()->insertDbgRecord(New, DVR);
+            else if (LastUpdate)
+              LastUpdate->getMarker()->insertDbgRecordAfter(New, LastUpdate);
+            else
+              A.Inst->getParent()->insertDbgRecordAfter(New, A.Inst);
+            LastUpdate = New;
+          };
+          auto Insert = [&](Value *V, DIExpression *Expr) {
+            Place(DbgVariableRecord::createDbgVariableRecord(
+                V, DVR->getVariable(), Expr, DVR->getDebugLoc().get()));
+          };
+          // Reuse the standard conversions for a complete scalar value.
+          // They insert at the memory access; move the result to the original
+          // record for snapshots, or after the access for declarations.
+          TypeSize AccessSize = DL.getTypeStoreSize(A.Contents->getType());
+          if (!A.Contents->getType()->isAggregateType() &&
+              !AccessSize.isScalable() && A.Offset == Offset &&
+              ((Indirect && isa<StoreInst>(A.Inst)) ||
+               (!Indirect && AccessSize.getFixedValue() * 8 == Bits))) {
+            DbgVariableRecord *New = nullptr;
+            bool Converted = false;
+            if (IsDeclare && OldExpr == ValueExpr) {
+              if (auto *SI = dyn_cast<StoreInst>(A.Inst)) {
+                New = ConvertDebugDeclareToDebugValue(DVR, SI, DIB);
+                Converted = true;
+              } else if (auto *LI = dyn_cast<LoadInst>(A.Inst)) {
+                New = ConvertDebugDeclareToDebugValue(DVR, LI, DIB);
+                Converted = true;
+              }
+            } else if (!IsDeclare && OldExpr->startsWithDeref()) {
+              if (auto *SI = dyn_cast<StoreInst>(A.Inst)) {
+                New = InsertDebugValueAtStoreLoc(DVR, SI, DIB);
+                Converted = true;
+              }
+            }
+            if (New) {
+              New->removeFromParent();
+              Place(New);
+            }
+            if (Converted)
+              continue;
+          }
+          // Kill the overwritten part before describing its new value. This
+          // is necessary even if a store cannot be salvaged, or if later
+          // checks decline storage elimination (for example, overlapping
+          // stores).
+          if (isa<StoreInst>(A.Inst) && A.Offset >= 0) {
+            TypeSize StoreSize = DL.getTypeStoreSize(A.Contents->getType());
+            uint64_t Start = uint64_t(A.Offset) * 8;
+            if (!StoreSize.isScalable() && Start < Begin + Bits &&
+                StoreSize.getFixedValue() * 8 >
+                    (Start < Begin ? Begin - Start : 0)) {
+              uint64_t KillBegin = std::max(Start, Begin);
+              uint64_t KillEnd =
+                  std::min(Start + StoreSize.getFixedValue() * 8, Begin + Bits);
+              DIExpression *Expr = KillExpr;
+              if (!Indirect &&
+                  (KillBegin != Begin || KillEnd != Begin + Bits) &&
+                  KillBegin - Begin <= UINT_MAX &&
+                  KillEnd - KillBegin <= UINT_MAX)
+                if (auto Part = DIExpression::createFragmentExpression(
+                        KillExpr, KillBegin - Begin, KillEnd - KillBegin))
+                  Expr = *Part;
+              Insert(PoisonValue::get(Type::getInt32Ty(F.getContext())), Expr);
+            }
+          }
+          // No new executable IR is introduced for debugging. Recover existing
+          // aggregate elements without asking FindInsertedValue to create IR;
+          // unknown pieces remain unavailable.
+          std::function<void(Value *, uint64_t)> Emit =
+              [&](Value *V, uint64_t ByteOffset) {
+                Type *Ty = V->getType();
+                if (Ty->isAggregateType()) {
+                  auto *ST = dyn_cast<StructType>(Ty);
+                  uint64_t Count = ST ? ST->getNumElements()
+                                      : cast<ArrayType>(Ty)->getNumElements();
+                  for (uint64_t N = 0; N < Count; ++N) {
+                    if (N > UINT_MAX)
+                      break;
+                    Value *Element = FindInsertedValue(V, unsigned(N));
+                    if (!Element)
+                      continue;
+                    uint64_t ElementOffset =
+                        ST ? DL.getStructLayout(ST)->getElementOffset(N)
+                           : N * DL.getTypeAllocSize(Element->getType());
+                    Emit(Element, ByteOffset + ElementOffset);
+                  }
+                  return;
+                }
+                TypeSize Size = DL.getTypeStoreSize(Ty);
+                if (Size.isScalable() || ByteOffset > UINT64_MAX / 8)
+                  return;
+                uint64_t Start = ByteOffset * 8,
+                         SizeBits = Size.getFixedValue() * 8;
+                if (Start < Begin || Start >= Begin + Bits ||
+                    SizeBits > Begin + Bits - Start)
+                  return;
+                DIExpression *Expr = ValueExpr;
+                if (Start != Begin || SizeBits != Bits) {
+                  // Slicing a computed value is not equivalent to slicing the
+                  // memory holding its input (notably for heap indirection).
+                  if (!Ops.empty() || Start - Begin > UINT_MAX ||
+                      SizeBits > UINT_MAX)
+                    return;
+                  auto Piece = DIExpression::createFragmentExpression(
+                      Expr, Start - Begin, SizeBits);
+                  if (!Piece)
+                    return;
+                  Expr = *Piece;
+                }
+                Insert(V, Expr);
+              };
+          if (A.Offset >= 0)
+            Emit(A.Contents, A.Offset);
+        }
+      };
+      Salvage();
+      DVR->eraseFromParent();
+    }
+  }
 }
 
 /// Determine whether this debug variable is a not a basic type.
