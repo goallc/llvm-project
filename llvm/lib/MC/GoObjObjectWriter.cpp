@@ -3327,9 +3327,6 @@ uint64_t GoObjObjectWriter::writeObject() {
   }
 
   for (const GoObjRelocationEntry &Reloc : MergedRelocations) {
-    if (Reloc.Subtractor)
-      report_fatal_error("GoObj relocation subtractors are not implemented");
-
     std::optional<uint32_t> SourceSymIdx =
         FindContainingSymbol(Reloc.Section, Reloc.Offset);
     if (!SourceSymIdx)
@@ -3347,6 +3344,21 @@ uint64_t GoObjObjectWriter::writeObject() {
 
     int64_t Addend = getGoObjRelocAddend(Reloc);
     uint16_t RelocType = checkedUint16(Reloc.Type, "relocation type");
+    if (const MCSymbol *Base = Reloc.Subtractor) {
+      // Like ELF, express A-B as a PC-relative relocation when B moves
+      // with the relocation site. Go links symbols independently, so being
+      // in the same MC section is not sufficient: B must be in Source.
+      if (Reloc.IsPCRel || RelocType != GoObj::R_ADDR ||
+          !Base->isInSection() || &Base->getSection() != Reloc.Section ||
+          FindContainingSymbol(Reloc.Section, Asm->getSymbolOffset(*Base)) !=
+              SourceSymIdx)
+        report_fatal_error("GoObj relocation subtractor must belong to the "
+                           "source symbol of an absolute relocation");
+      // Go's R_PCREL uses the end of the relocated field as its PC.
+      Addend += static_cast<int64_t>(Reloc.Offset) + Reloc.Size -
+                static_cast<int64_t>(Asm->getSymbolOffset(*Base));
+      RelocType = GoObj::R_PCREL;
+    }
     if (Source.Symbol) {
       if (const auto *Overrides =
               Asm->getContext().getGoObjRelocOverrides(Source.Symbol)) {
