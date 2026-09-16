@@ -19,6 +19,8 @@
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Target/TargetOptions.h"
+#include <array>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -45,6 +47,7 @@ struct GoObjConfig {
   std::string BuildID;
   std::string PackagePath;
   std::vector<std::string> Experiments;
+  std::array<uint8_t, 8> Fingerprint = {};
   bool IsMain = false;
   bool IsShared = false;
   bool IsStd = false;
