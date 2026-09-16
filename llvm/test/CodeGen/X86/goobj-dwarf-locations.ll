@@ -21,7 +21,8 @@ define goabiinternal i64 @"main.stack"(i64 %x) !dbg !10 {
 }
 
 define goabiinternal i64 @"main.register"(i64 %x) !dbg !20 {
-  #dbg_value(i64 %x, !22, !DIExpression(), !23)
+  ; InstrRefBasedLDV uses this single-operand list for ordinary SSA values.
+  #dbg_value(!DIArgList(i64 %x), !22, !DIExpression(DW_OP_LLVM_arg, 0), !23)
   %sum = add i64 %x, 1, !dbg !23
   #dbg_value(i64 42, !22, !DIExpression(), !24)
   ret i64 %sum, !dbg !24

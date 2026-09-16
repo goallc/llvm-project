@@ -174,9 +174,13 @@ class GoObjDebugHandler final : public DebugHandlerBase {
   std::vector<uint8_t> debugValueExpression(const MachineInstr &MI,
                                             const MachineFunction &MF) {
     if (!MI.isDebugValue() || MI.getNumDebugOperands() != 1 ||
-        MI.isUndefDebugValue() || MI.isDebugValueList())
+        MI.isUndefDebugValue())
       return {};
-    const DIExpression *Expr = MI.getDebugExpression();
+    auto SingleExpr =
+        DIExpression::convertToNonVariadicExpression(MI.getDebugExpression());
+    if (!SingleExpr)
+      return {};
+    const DIExpression *Expr = *SingleExpr;
     ArrayRef<uint64_t> Ops = Expr->getElements();
     if (Expr->isFragment())
       Ops = Ops.drop_back(3);

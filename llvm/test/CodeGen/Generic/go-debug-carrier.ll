@@ -18,7 +18,9 @@
 ; RUN: cmp %t.aarch64.debug.text %t.aarch64.nodebug.text
 
 ; Optimized carriers are removed even when their addresses have debug users.
-; Describe the initializing/projected SSA values instead; keep homes at O0.
+; The frontend describes existing SSA values and split pieces directly. These
+; survive through native tracking without reconstructing the eliminated home.
+; Legacy address descriptions become unavailable; keep homes at O0.
 %pair = type { i64, i64 }
 declare goabi0 void @sink(ptr byval(%pair) align 8)
 declare goabi0 void @source(ptr goret(%pair) align 8 "goretindex"="0")
@@ -33,8 +35,11 @@ define goabiinternal i64 @byval_root() gc "statepoint-example" !dbg !10 {
 entry:
   %home = alloca %pair, align 8
   %field = getelementptr inbounds %pair, ptr %home, i32 0, i32 1
+  ; A legacy storage declaration must not outlive the home or suppress the
+  ; independent SSA description below.
   #dbg_declare(ptr %home, !11, !DIExpression(), !12)
   store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !12
+  #dbg_value(i64 13, !11, !DIExpression(), !12)
   call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !12
   ret i64 0, !dbg !12
 }
@@ -48,8 +53,8 @@ define goabiinternal i64 @byval_gep() gc "statepoint-example" !dbg !13 {
 entry:
   %home = alloca %pair, align 8
   %field = getelementptr inbounds %pair, ptr %home, i32 0, i32 1
-  #dbg_declare(ptr %field, !14, !DIExpression(), !15)
   store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !15
+  #dbg_value(i64 17, !14, !DIExpression(), !15)
   call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !15
   ret i64 0, !dbg !15
 }
@@ -63,11 +68,11 @@ define goabiinternal i64 @goret_root() gc "statepoint-example" !dbg !16 {
 entry:
   %home = alloca %pair, align 8
   %field = getelementptr inbounds %pair, ptr %home, i32 0, i32 1
-  #dbg_declare(ptr %home, !17, !DIExpression(), !18)
   %token = call goabi0 token (i64, i32, ptr, i32, i32, ...) @llvm.experimental.gc.statepoint.p0(
       i64 1, i32 0, ptr elementtype(void (ptr)) @source, i32 1, i32 0,
       ptr goret(%pair) align 8 "goretindex"="0" %home, i32 0, i32 0), !dbg !18
   %value = load i64, ptr %home, align 8, !dbg !18
+  #dbg_value(i64 %value, !17, !DIExpression(), !18)
   ret i64 %value, !dbg !18
 }
 
@@ -80,11 +85,11 @@ define goabiinternal i64 @goret_gep() gc "statepoint-example" !dbg !19 {
 entry:
   %home = alloca %pair, align 8
   %field = getelementptr inbounds %pair, ptr %home, i32 0, i32 1
-  #dbg_declare(ptr %field, !20, !DIExpression(), !21)
   %token = call goabi0 token (i64, i32, ptr, i32, i32, ...) @llvm.experimental.gc.statepoint.p0(
       i64 1, i32 0, ptr elementtype(void (ptr)) @source, i32 1, i32 0,
       ptr goret(%pair) align 8 "goretindex"="0" %home, i32 0, i32 0), !dbg !21
   %value = load i64, ptr %field, align 8, !dbg !21
+  #dbg_value(i64 %value, !20, !DIExpression(), !21)
   ret i64 %value, !dbg !21
 }
 
@@ -92,7 +97,7 @@ entry:
 ; O0: name: home
 ; CHECK-LABEL: name: byval_value
 ; CHECK: stack: {{ *}}[]
-; CHECK: DBG_VALUE 13, $noreg, !{{[0-9]+}}, !DIExpression()
+; CHECK: DBG_VALUE $noreg, $noreg, !{{[0-9]+}}, !DIExpression()
 define goabiinternal i64 @byval_value() gc "statepoint-example" !dbg !22 {
 entry:
   %home = alloca %pair, align 8
@@ -113,8 +118,9 @@ define goabiinternal i64 @byval_pieces() gc "statepoint-example" !dbg !25 {
 entry:
   %home = alloca %pair, align 8
   %field = getelementptr inbounds %pair, ptr %home, i32 0, i32 1
-  #dbg_declare(ptr %home, !26, !DIExpression(), !27)
   store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !27
+  #dbg_value(i64 13, !26, !DIExpression(DW_OP_LLVM_fragment, 0, 64), !27)
+  #dbg_value(i64 17, !26, !DIExpression(DW_OP_LLVM_fragment, 64, 64), !27)
   call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !27
   ret i64 0, !dbg !27
 }
@@ -144,10 +150,11 @@ entry:
 define goabiinternal i64 @byval_inserted(i64 %input) gc "statepoint-example" !dbg !33 {
 entry:
   %home = alloca %pair, align 8
-  #dbg_declare(ptr %home, !34, !DIExpression(), !35)
   %first = insertvalue %pair poison, i64 %input, 0
   %both = insertvalue %pair %first, i64 17, 1
   store %pair %both, ptr %home, align 8, !dbg !35
+  #dbg_value(i64 %input, !34, !DIExpression(DW_OP_LLVM_fragment, 0, 64), !35)
+  #dbg_value(i64 17, !34, !DIExpression(DW_OP_LLVM_fragment, 64, 64), !35)
   call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !35
   ret i64 0, !dbg !35
 }

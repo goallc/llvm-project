@@ -9697,12 +9697,7 @@ static SDValue tryForwardByValStores(SelectionDAG &DAG, const SDLoc &DL,
       Chain = Input;
     DAG.ReplaceAllUsesOfValueWith(Old, Input);
   };
-  SmallVector<SelectionDAG::FrameIndexDebugValue, 8> DebugValues;
-  for (auto [I, ST] : llvm::enumerate(Stores))
-    DebugValues.push_back({Forwarded[I].Value, Forwarded[I].Offset,
-                           Forwarded[I].MemVT.getStoreSize().getFixedValue(),
-                           ST->getIROrder()});
-  DAG.replaceFrameIndexDebugValues(FI, DebugValues);
+  DAG.invalidateFrameIndexDebugValues(FI);
   for (StoreSDNode *ST : Stores)
     RemoveChainNode(ST);
   if (!KeepFixedHome) {
@@ -12980,150 +12975,50 @@ SDDbgValue *SelectionDAG::getDbgValueList(DIVariable *Var, DIExpression *Expr,
                  DL, O, IsVariadic);
 }
 
-void SelectionDAG::replaceFrameIndexDebugValues(
-    int FI, ArrayRef<FrameIndexDebugValue> Values) {
+void SelectionDAG::invalidateFrameIndexDebugValues(int FI) {
   FunctionLoweringInfo *FLI = getFunctionLoweringInfo();
-  assert(FLI && "frame replacement requires function lowering information");
+  assert(FLI && "frame invalidation requires function lowering information");
   FLI->EliminatedDebugFrameIndices.insert(FI);
 
-  // Declarations were collected before DAG construction. Convert their table
-  // entries along with this DAG's value records, as argument-copy elision does
-  // when it remaps an old frame index to a surviving one.
+  // Declarations describe storage for the whole function. Once that storage
+  // is eliminated, only independent SSA value descriptions remain valid.
+  llvm::erase_if(getMachineFunction().getVariableDbgInfo(),
+                 [FI](const MachineFunction::VariableDbgInfo &VI) {
+                   return VI.inStackSlot() && VI.getStackSlot() == FI;
+                 });
   SmallVector<SDDbgValue *, 8> Records(DbgBegin(), DbgEnd());
   llvm::append_range(Records,
                      make_range(ByvalParmDbgBegin(), ByvalParmDbgEnd()));
-  auto &Variables = getMachineFunction().getVariableDbgInfo();
-  llvm::erase_if(Variables, [&](const MachineFunction::VariableDbgInfo &VI) {
-    if (!VI.inStackSlot() || VI.getStackSlot() != FI)
-      return false;
-    Records.push_back(getFrameIndexDbgValue(
-        const_cast<DILocalVariable *>(VI.Var),
-        const_cast<DIExpression *>(VI.Expr), FI, true, DebugLoc(VI.Loc), 0));
-    return true;
-  });
 
-  auto FrameOffset = [&](const SDDbgOperand &Op) -> std::optional<int64_t> {
+  auto UsesFrame = [this, FI](const SDDbgOperand &Op) {
     if (Op.getKind() == SDDbgOperand::FRAMEIX)
-      return int(Op.getFrameIx()) == FI ? std::optional<int64_t>(0)
-                                        : std::nullopt;
+      return int(Op.getFrameIx()) == FI;
     if (Op.getKind() != SDDbgOperand::SDNODE)
-      return std::nullopt;
+      return false;
     SDValue V(Op.getSDNode(), Op.getResNo());
-    int64_t Offset = 0;
-    while (true) {
-      if (V.getOpcode() == ISD::BITCAST ||
-          V.getOpcode() == ISD::ADDRSPACECAST) {
-        V = V.getOperand(0);
-        continue;
-      }
-      if (!isBaseWithConstantOffset(V))
-        break;
-      int64_t Next;
-      if (AddOverflow(Offset, int64_t(V.getConstantOperandVal(1)), Next))
-        return std::nullopt;
-      Offset = Next;
+    while (V.getOpcode() == ISD::BITCAST ||
+           V.getOpcode() == ISD::ADDRSPACECAST || isBaseWithConstantOffset(V))
       V = V.getOperand(0);
-    }
     auto *Base = dyn_cast<FrameIndexSDNode>(V);
-    return Base && Base->getIndex() == FI ? std::optional<int64_t>(Offset)
-                                          : std::nullopt;
+    return Base && Base->getIndex() == FI;
   };
 
   for (SDDbgValue *DV : Records) {
     if (DV->isInvalidated())
       continue;
     auto Locations = DV->getLocationOps();
-    if (none_of(Locations, [&](const SDDbgOperand &Op) {
-          return FrameOffset(Op).has_value();
-        }))
+    if (none_of(Locations, UsesFrame))
       continue;
     DV->setIsInvalidated();
     DV->setIsEmitted();
     auto *Var = cast<DILocalVariable>(DV->getVariable());
-    auto *Expr = DV->getExpression();
-    auto Fragment = Expr->getFragmentInfo();
-    DIExpression *KillExpr = DIExpression::get(*getContext(), {});
-    if (Fragment)
-      KillExpr = DIExpression::get(*getContext(), {dwarf::DW_OP_LLVM_fragment,
-                                                   Fragment->OffsetInBits,
-                                                   Fragment->SizeInBits});
+    const DIExpression *KillExpr =
+        DIExpression::convertToUndefExpression(DV->getExpression());
     AddDbgValue(
-        getConstantDbgValue(Var, KillExpr,
+        getConstantDbgValue(Var, const_cast<DIExpression *>(KillExpr),
                             PoisonValue::get(Type::getInt32Ty(*getContext())),
                             DV->getDebugLoc(), DV->getOrder()),
         false);
-
-    // Only an address description can be replaced by the object's contents.
-    // Variadic/address-valued/unsupported expressions remain unavailable.
-    if (DV->isVariadic() || Locations.size() != 1)
-      continue;
-    int64_t ExprOffset;
-    SmallVector<uint64_t, 4> RemainingOps;
-    if (!Expr->extractLeadingOffset(ExprOffset, RemainingOps))
-      continue;
-    int64_t Offset;
-    if (AddOverflow(*FrameOffset(Locations.front()), ExprOffset, Offset) ||
-        Offset < 0)
-      continue;
-    ArrayRef<uint64_t> Ops(RemainingOps);
-    if (!DV->isIndirect()) {
-      if (Ops.empty() || Ops.front() != dwarf::DW_OP_deref)
-        continue;
-      Ops = Ops.drop_front();
-    }
-    auto *ValueExpr = DIExpression::get(*getContext(), Ops);
-    ArrayRef<uint64_t> ValueOps = Fragment ? Ops.drop_back(3) : Ops;
-    bool Indirect =
-        ValueOps.size() == 1 && ValueOps.front() == dwarf::DW_OP_deref;
-    if (!ValueOps.empty() && !Indirect)
-      continue;
-    auto ActiveBits = ValueExpr->getActiveBits(Var);
-    if (!ActiveBits)
-      continue;
-    uint64_t Bits =
-        Indirect ? getDataLayout().getPointerSizeInBits() : *ActiveBits;
-    for (const FrameIndexDebugValue &Piece : Values) {
-      // A value record cannot acquire the contents of a later assignment.
-      // Declarations, in contrast, describe the storage across assignments.
-      if (!DV->isIndirect() && Piece.Order > DV->getOrder())
-        continue;
-      if (Piece.Offset < uint64_t(Offset) || Piece.Size > UINT_MAX / 8 ||
-          Piece.Offset - Offset > UINT_MAX / 8)
-        continue;
-      uint64_t Start = (Piece.Offset - Offset) * 8, Size = Piece.Size * 8;
-      if (Start >= Bits || Size > Bits - Start)
-        continue;
-      auto *PieceExpr = ValueExpr;
-      if (Start != 0 || Size != Bits) {
-        if (Indirect)
-          continue;
-        auto Part =
-            DIExpression::createFragmentExpression(ValueExpr, Start, Size);
-        if (!Part)
-          continue;
-        PieceExpr = *Part;
-      }
-      unsigned Order = std::max(DV->getOrder(), Piece.Order);
-      SDValue V = Piece.Value;
-      while (V.getOpcode() == ISD::MERGE_VALUES)
-        V = V.getOperand(V.getResNo());
-      if (V.getValueType().getSizeInBits().isScalable())
-        continue;
-      if (V.getValueSizeInBits() > Size)
-        PieceExpr = DIExpression::appendOpsToArg(
-            PieceExpr, {dwarf::DW_OP_LLVM_extract_bits_zext, 0, Size}, 0);
-      SDDbgValue *New;
-      if (auto *C = dyn_cast<ConstantSDNode>(V))
-        New = getConstantDbgValue(Var, PieceExpr, C->getConstantIntValue(),
-                                  DV->getDebugLoc(), Order);
-      else if (auto *C = dyn_cast<ConstantFPSDNode>(V))
-        New = getConstantDbgValue(Var, PieceExpr, C->getConstantFPValue(),
-                                  DV->getDebugLoc(), Order);
-      else
-        New = getDbgValue(Var, PieceExpr, V.getNode(), V.getResNo(), false,
-                          DV->getDebugLoc(), Order);
-      AddDbgValue(New, false);
-    }
   }
 }
 
