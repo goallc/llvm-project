@@ -1114,8 +1114,7 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
     if (!Imported)
       continue;
     if (!GO.isDeclaration() ||
-        GO.getName().contains(GoObj::BuiltinSymbolSuffixPrefix) ||
-        GO.getName().contains(GoObj::LinknameSymbolSuffix))
+        GoObj::hasReferenceSuffix(GO.getName()))
       report_fatal_error("invalid GoObj symbol reference attachment");
 
     if (Imported->getNumOperands() != 3)

@@ -14,6 +14,7 @@
 #ifndef LLVM_BINARYFORMAT_GOOBJ_H
 #define LLVM_BINARYFORMAT_GOOBJ_H
 
+#include "llvm/ADT/StringRef.h"
 #include <cstdint>
 
 namespace llvm {
@@ -43,6 +44,22 @@ inline constexpr char LinknameSymbolSuffix[] = "<linkname>";
 // same source name remain distinct by symbol index. For ABI0 functions this
 // suffix precedes ABI0SymbolSuffix.
 inline constexpr char FMVSymbolSuffixPrefix[] = "<goallc.fmv.";
+
+// Only the final angle-bracket component can encode a storage suffix. Quoted
+// string data and ordinary symbol names may contain the same marker text.
+inline StringRef getSymbolSuffix(StringRef Name) {
+  if (!Name.ends_with(">"))
+    return {};
+  size_t Begin = Name.rfind('<');
+  return Begin == StringRef::npos ? StringRef() : Name.drop_front(Begin);
+}
+
+inline bool hasReferenceSuffix(StringRef Name) {
+  Name.consume_back(ABI0SymbolSuffix);
+  StringRef Suffix = getSymbolSuffix(Name);
+  return Suffix.starts_with(BuiltinSymbolSuffixPrefix) ||
+         Suffix == LinknameSymbolSuffix;
+}
 
 // "GoNoSplt" encoded as the stable STACKMAP identifier for the function-level
 // entry argument pointer map. This record is metadata-only: it is present for
