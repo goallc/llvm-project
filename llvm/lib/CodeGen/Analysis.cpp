@@ -54,6 +54,13 @@ bool llvm::isSingleByValCallCarrier(const AllocaInst &Alloca,
     if (!Visited.insert(V).second)
       continue;
 
+    // Debug addresses are not ordinary uses. Forwarding stores into the
+    // outgoing argument area removes this home without relocating its debug
+    // users, and that area is not stable storage across subsequent calls.
+    // Check derived addresses as well as the alloca itself.
+    if (V->isUsedByMetadata())
+      return false;
+
     for (const Use &U : V->uses()) {
       const auto *I = dyn_cast<Instruction>(U.getUser());
       if (!I)

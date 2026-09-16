@@ -139,9 +139,6 @@ static void findGoRetValueProjections(FunctionLoweringInfo &FuncInfo) {
 
   for (const auto &[AI, FI] : FuncInfo.StaticAllocaMap) {
     (void)FI;
-    if (AI->isUsedByMetadata())
-      continue;
-
     const CallBase *DefiningCall = nullptr;
     Type *GoRetType = nullptr;
     unsigned NumGoRetUses = 0;
@@ -154,6 +151,13 @@ static void findGoRetValueProjections(FunctionLoweringInfo &FuncInfo) {
       const Value *Pointer = Worklist.pop_back_val();
       if (!Seen.insert(Pointer).second)
         continue;
+
+      // Projecting loads removes the result home. Metadata users of either
+      // the alloca or a derived address still need that storage for debugging.
+      if (Pointer->isUsedByMetadata()) {
+        Valid = false;
+        break;
+      }
 
       for (const Use &U : Pointer->uses()) {
         const User *Usr = U.getUser();
