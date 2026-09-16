@@ -157,10 +157,16 @@ public:
   /// allocas describe only a rematerializable carrier address.
   SmallPtrSet<const AllocaInst *, 8> GoByValCallCarriers;
 
-  /// Storage whose debug descriptions have been replaced by values. Later IR
-  /// debug records must not reintroduce its address, even if an ABI-required
-  /// fixed frame object remains for the stack-growth path.
-  SmallSet<int, 8> EliminatedDebugFrameIndices;
+  /// Called only when byval forwarding or goret projection commits to
+  /// eliminating a home's contents. Invalidate its current descriptions and
+  /// remember the frame index for debug records in other basic blocks.
+  LLVM_ABI void invalidateDebugFrameIndex(int FI, SelectionDAG &DAG);
+
+  /// Reject later IR descriptions of an eliminated home.
+  LLVM_ABI bool isEliminatedDebugFrameAddress(const Value *V) const;
+
+  /// Clear earlier MIR descriptions once all blocks have been selected.
+  LLVM_ABI void finalizeDebugFrameIndices();
 
   /// Loads become active only after target call lowering has emitted their
   /// defining copies. This keeps unsupported targets on the ordinary memory
@@ -374,6 +380,10 @@ public:
   unsigned getCurrentCallSite() { return CurCallSite; }
 
 private:
+  // A fixed ABI home can survive for stack growth after its contents were
+  // forwarded, so MachineFrameInfo's dead-object flag alone is insufficient.
+  SmallSet<int, 8> EliminatedDebugFrameIndices;
+
   /// LiveOutRegInfo - Information about live out vregs.
   IndexedMap<LiveOutInfo, VirtReg2IndexFunctor> LiveOutRegInfo;
 };

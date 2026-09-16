@@ -3181,7 +3181,7 @@ SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
             ProjectionChain =
                 DAG.getCopyToReg(ProjectionChain, dl, Projection.Reg, Load);
           }
-          DAG.invalidateFrameIndexDebugValues(ResultFI->getIndex());
+          FLI->invalidateDebugFrameIndex(ResultFI->getIndex(), DAG);
           MF.getFrameInfo().RemoveStackObject(ResultFI->getIndex());
           FLI->activateGoRetValueProjections(AI);
           Copies.push_back(ProjectionChain);

@@ -11429,7 +11429,7 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
             ProjectionChain =
                 DAG.getCopyToReg(ProjectionChain, DL, Projection.Reg, Load);
           }
-          DAG.invalidateFrameIndexDebugValues(ResultFI->getIndex());
+          FLI->invalidateDebugFrameIndex(ResultFI->getIndex(), DAG);
           MF.getFrameInfo().RemoveStackObject(ResultFI->getIndex());
           FLI->activateGoRetValueProjections(AI);
           Copies.push_back(ProjectionChain);

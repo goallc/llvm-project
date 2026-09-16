@@ -9697,7 +9697,7 @@ static SDValue tryForwardByValStores(SelectionDAG &DAG, const SDLoc &DL,
       Chain = Input;
     DAG.ReplaceAllUsesOfValueWith(Old, Input);
   };
-  DAG.invalidateFrameIndexDebugValues(FI);
+  DAG.getFunctionLoweringInfo()->invalidateDebugFrameIndex(FI, DAG);
   for (StoreSDNode *ST : Stores)
     RemoveChainNode(ST);
   if (!KeepFixedHome) {
@@ -12973,53 +12973,6 @@ SDDbgValue *SelectionDAG::getDbgValueList(DIVariable *Var, DIExpression *Expr,
   return new (DbgInfo->getAlloc())
       SDDbgValue(DbgInfo->getAlloc(), Var, Expr, Locs, Dependencies, IsIndirect,
                  DL, O, IsVariadic);
-}
-
-void SelectionDAG::invalidateFrameIndexDebugValues(int FI) {
-  FunctionLoweringInfo *FLI = getFunctionLoweringInfo();
-  assert(FLI && "frame invalidation requires function lowering information");
-  FLI->EliminatedDebugFrameIndices.insert(FI);
-
-  // Declarations describe storage for the whole function. Once that storage
-  // is eliminated, only independent SSA value descriptions remain valid.
-  llvm::erase_if(getMachineFunction().getVariableDbgInfo(),
-                 [FI](const MachineFunction::VariableDbgInfo &VI) {
-                   return VI.inStackSlot() && VI.getStackSlot() == FI;
-                 });
-  SmallVector<SDDbgValue *, 8> Records(DbgBegin(), DbgEnd());
-  llvm::append_range(Records,
-                     make_range(ByvalParmDbgBegin(), ByvalParmDbgEnd()));
-
-  auto UsesFrame = [this, FI](const SDDbgOperand &Op) {
-    if (Op.getKind() == SDDbgOperand::FRAMEIX)
-      return int(Op.getFrameIx()) == FI;
-    if (Op.getKind() != SDDbgOperand::SDNODE)
-      return false;
-    SDValue V(Op.getSDNode(), Op.getResNo());
-    while (V.getOpcode() == ISD::BITCAST ||
-           V.getOpcode() == ISD::ADDRSPACECAST || isBaseWithConstantOffset(V))
-      V = V.getOperand(0);
-    auto *Base = dyn_cast<FrameIndexSDNode>(V);
-    return Base && Base->getIndex() == FI;
-  };
-
-  for (SDDbgValue *DV : Records) {
-    if (DV->isInvalidated())
-      continue;
-    auto Locations = DV->getLocationOps();
-    if (none_of(Locations, UsesFrame))
-      continue;
-    DV->setIsInvalidated();
-    DV->setIsEmitted();
-    auto *Var = cast<DILocalVariable>(DV->getVariable());
-    const DIExpression *KillExpr =
-        DIExpression::convertToUndefExpression(DV->getExpression());
-    AddDbgValue(
-        getConstantDbgValue(Var, const_cast<DIExpression *>(KillExpr),
-                            PoisonValue::get(Type::getInt32Ty(*getContext())),
-                            DV->getDebugLoc(), DV->getOrder()),
-        false);
-  }
 }
 
 void SelectionDAG::transferDbgValues(SDValue From, SDValue To,

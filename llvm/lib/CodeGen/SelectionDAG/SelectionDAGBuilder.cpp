@@ -1641,18 +1641,11 @@ bool SelectionDAGBuilder::handleDebugValue(ArrayRef<const Value *> Values,
   if (visitEntryValueDbgValue(Values, Var, Expr, DbgLoc))
     return true;
 
-  for (const Value *V : Values) {
-    if (!V->getType()->isPointerTy())
-      continue;
-    int64_t Offset;
-    const auto *AI = dyn_cast<AllocaInst>(
-        GetPointerBaseWithConstantOffset(V, Offset, DAG.getDataLayout()));
-    auto It = FuncInfo.StaticAllocaMap.find(AI);
-    if (It != FuncInfo.StaticAllocaMap.end() &&
-        FuncInfo.EliminatedDebugFrameIndices.contains(It->second)) {
-      handleKillDebugValue(Var, Expr, DbgLoc, Order);
-      return true;
-    }
+  if (any_of(Values, [&](const Value *V) {
+        return FuncInfo.isEliminatedDebugFrameAddress(V);
+      })) {
+    handleKillDebugValue(Var, Expr, DbgLoc, Order);
+    return true;
   }
 
   SmallVector<SDDbgOperand> LocationOps;

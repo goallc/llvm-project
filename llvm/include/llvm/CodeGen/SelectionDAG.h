@@ -1970,11 +1970,6 @@ public:
   LLVM_ABI SDDbgLabel *getDbgLabel(DILabel *Label, const DebugLoc &DL,
                                    unsigned O);
 
-  /// Invalidate debug addresses of eliminated storage. SSA debug values are
-  /// independent of the frame object and continue through normal tracking.
-  /// Call only after committing to eliminate the object's contents.
-  LLVM_ABI void invalidateFrameIndexDebugValues(int FI);
-
   /// Transfer debug values from one node to another, while optionally
   /// generating fragment expressions for split-up values. If \p InvalidateDbg
   /// is set, debug values are invalidated after they are transferred.
