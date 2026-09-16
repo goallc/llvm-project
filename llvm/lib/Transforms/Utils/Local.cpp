@@ -23,6 +23,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AssumeBundleQueries.h"
+#include "llvm/Analysis/CaptureTracking.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/InstructionSimplify.h"
@@ -1887,6 +1888,18 @@ bool llvm::LowerDbgDeclare(Function &F) {
         } else if (LoadInst *LI = dyn_cast<LoadInst>(U)) {
           ConvertDebugDeclareToDebugValue(DDI, LI, DIB);
         } else if (CallInst *CI = dyn_cast<CallInst>(U)) {
+          // A byval copy cannot modify a non-escaping source. Keep its existing
+          // value description rather than tying it to temporary ABI storage.
+          // Restrict this to direct accesses, which this lowering tracks;
+          // derived addresses may have writes that it does not describe.
+          if (CI->isArgOperand(&AIUse) &&
+              CI->paramHasAttr(CI->getArgOperandNo(&AIUse), Attribute::ByVal) &&
+              all_of(AI->users(),
+                     [](User *U) {
+                       return isa<LoadInst, StoreInst, CallInst>(U);
+                     }) &&
+              !PointerMayBeCaptured(AI, /*ReturnCaptures=*/true))
+            continue;
           // This is a call by-value or some other instruction that takes a
           // pointer to the variable. Insert a *value* intrinsic that describes
           // the variable by dereferencing the alloca.

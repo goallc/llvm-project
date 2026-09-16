@@ -12985,15 +12985,6 @@ void SelectionDAG::replaceFrameIndexDebugValues(
   FunctionLoweringInfo *FLI = getFunctionLoweringInfo();
   assert(FLI && "frame replacement requires function lowering information");
   FLI->EliminatedDebugFrameIndices.insert(FI);
-  LLVM_DEBUG({
-    dbgs() << "Replacing debug frame " << FI << " in "
-           << getMachineFunction().getName() << '\n';
-    for (const auto &Piece : Values) {
-      dbgs() << "  offset=" << Piece.Offset << " size=" << Piece.Size
-             << " order=" << Piece.Order << " ";
-      Piece.Value.dump(this);
-    }
-  });
 
   // Declarations were collected before DAG construction. Convert their table
   // entries along with this DAG's value records, as argument-copy elision does
@@ -13066,38 +13057,31 @@ void SelectionDAG::replaceFrameIndexDebugValues(
     // Variadic/address-valued/unsupported expressions remain unavailable.
     if (DV->isVariadic() || Locations.size() != 1)
       continue;
-    int64_t Offset = *FrameOffset(Locations.front());
-    ArrayRef<uint64_t> Ops = Expr->getElements();
-    if (Fragment)
-      Ops = Ops.drop_back(3);
-    while (Ops.size() >= 2 && Ops.front() == dwarf::DW_OP_plus_uconst) {
-      if (Ops[1] > INT64_MAX || AddOverflow(Offset, int64_t(Ops[1]), Offset)) {
-        Offset = -1;
-        break;
-      }
-      Ops = Ops.drop_front(2);
-    }
-    if (Offset < 0)
+    int64_t ExprOffset;
+    SmallVector<uint64_t, 4> RemainingOps;
+    if (!Expr->extractLeadingOffset(ExprOffset, RemainingOps))
       continue;
+    int64_t Offset;
+    if (AddOverflow(*FrameOffset(Locations.front()), ExprOffset, Offset) ||
+        Offset < 0)
+      continue;
+    ArrayRef<uint64_t> Ops(RemainingOps);
     if (!DV->isIndirect()) {
       if (Ops.empty() || Ops.front() != dwarf::DW_OP_deref)
         continue;
       Ops = Ops.drop_front();
     }
-    bool Indirect = Ops.size() == 1 && Ops.front() == dwarf::DW_OP_deref;
-    if (!Ops.empty() && !Indirect)
+    auto *ValueExpr = DIExpression::get(*getContext(), Ops);
+    ArrayRef<uint64_t> ValueOps = Fragment ? Ops.drop_back(3) : Ops;
+    bool Indirect =
+        ValueOps.size() == 1 && ValueOps.front() == dwarf::DW_OP_deref;
+    if (!ValueOps.empty() && !Indirect)
       continue;
-    auto VarBits = Var->getSizeInBits();
-    if (!VarBits)
+    auto ActiveBits = ValueExpr->getActiveBits(Var);
+    if (!ActiveBits)
       continue;
-    uint64_t Bits = Indirect   ? getDataLayout().getPointerSizeInBits()
-                    : Fragment ? Fragment->SizeInBits
-                               : *VarBits;
-    SmallVector<uint64_t, 4> ValueOps(Ops);
-    if (Fragment)
-      ValueOps.append({dwarf::DW_OP_LLVM_fragment, Fragment->OffsetInBits,
-                       Fragment->SizeInBits});
-    auto *ValueExpr = DIExpression::get(*getContext(), ValueOps);
+    uint64_t Bits =
+        Indirect ? getDataLayout().getPointerSizeInBits() : *ActiveBits;
     for (const FrameIndexDebugValue &Piece : Values) {
       // A value record cannot acquire the contents of a later assignment.
       // Declarations, in contrast, describe the storage across assignments.
