@@ -724,6 +724,8 @@ bool ImplicitNullChecks::analyzeBlockForNullChecks(
   SmallVector<MachineInstr *, 8> InstsSeenSoFar;
 
   for (auto &MI : *NotNullSucc) {
+    if (MI.isDebugInstr())
+      continue;
     if (!canHandle(&MI) || InstsSeenSoFar.size() >= MaxInstsToConsider)
       return false;
 
@@ -831,7 +833,25 @@ void ImplicitNullChecks::rewriteNullChecks(
     ArrayRef<ImplicitNullChecks::NullCheck> NullCheckList) {
   DebugLoc DL;
 
+  // Hoisting a definition past a debug value can overwrite the register that
+  // described its old contents. Drop that location rather than report the
+  // newly loaded value as the old one.
+  auto InvalidateDebugUses = [&](MachineInstr &Hoisted) {
+    for (MachineInstr &MI :
+         make_range(Hoisted.getParent()->instr_begin(), Hoisted.getIterator()))
+      if (MI.isDebugValue())
+        for (const MachineOperand &MO : Hoisted.all_defs())
+          if (MO.getReg() && MI.readsRegister(MO.getReg(), TRI)) {
+            MI.setDebugValueUndef();
+            break;
+          }
+  };
+
   for (const auto &NC : NullCheckList) {
+    InvalidateDebugUses(*NC.getMemOperation());
+    if (auto *DepMI = NC.getOnlyDependency())
+      InvalidateDebugUses(*DepMI);
+
     // Remove the conditional branch dependent on the null check.
     unsigned BranchesRemoved = TII->removeBranch(*NC.getCheckBlock());
     (void)BranchesRemoved;

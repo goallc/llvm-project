@@ -332,7 +332,7 @@ def main(path):
                             f" startline={start_line} files={files}"
                             f" inline={inline_nodes}"
                         )
-            if aux_type == 2 and payload is not None:
+            if aux_type in (2, 4) and payload is not None:
                 extra = f" data={payload.hex()}"
             if aux_type in (7, 8, 9, 10, 11) and payload is not None:
                 extra = f" pc={decode_pctab(payload)}"

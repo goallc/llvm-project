@@ -2,6 +2,10 @@
 ; RUN: llc -mtriple=aarch64-unknown-linux-gnu -o - %s | FileCheck %s --check-prefix=AARCH64
 ; RUN: llc -mtriple=x86_64-unknown-linux-gnu -stop-after=finalize-isel -o - %s | FileCheck %s --check-prefix=MIR
 ; RUN: llc -mtriple=aarch64-unknown-linux-gnu -stop-after=finalize-isel -o - %s | FileCheck %s --check-prefix=MIR
+; RUN: llc -O0 -mtriple=x86_64-unknown-linux-gnu -stop-after=finalize-isel -o - %s | FileCheck %s --check-prefix=O0
+; RUN: llc -O0 -mtriple=aarch64-unknown-linux-gnu -stop-after=finalize-isel -o - %s | FileCheck %s --check-prefix=O0
+; RUN: llc -O0 -mtriple=x86_64-unknown-linux-gnu -verify-machineinstrs -o /dev/null %s
+; RUN: llc -O0 -mtriple=aarch64-unknown-linux-gnu -verify-machineinstrs -o /dev/null %s
 
 %large = type [4 x i64]
 %memory.result = type [2 x i64]
@@ -117,6 +121,10 @@ entry:
 
 ; A bounded set of scalar loads from a pure goret carrier is read directly
 ; from the outgoing ABI0 result area. No local result FrameIndex remains.
+; O0-LABEL: name: statepoint_slice_projection
+; O0: name: memory.result
+; O0: STATEPOINT {{.*}}@write_statepoint_slice
+; O0: RET
 ; MIR-LABEL: name: statepoint_slice_projection
 ; MIR-NOT: name: memory.result
 ; MIR: stack: []

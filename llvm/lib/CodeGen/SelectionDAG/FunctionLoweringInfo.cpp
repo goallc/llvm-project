@@ -139,9 +139,6 @@ static void findGoRetValueProjections(FunctionLoweringInfo &FuncInfo) {
 
   for (const auto &[AI, FI] : FuncInfo.StaticAllocaMap) {
     (void)FI;
-    if (AI->isUsedByMetadata())
-      continue;
-
     const CallBase *DefiningCall = nullptr;
     Type *GoRetType = nullptr;
     unsigned NumGoRetUses = 0;
@@ -430,7 +427,11 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
   }
 
   findGoByValCallCarriers(*this);
-  findGoRetValueProjections(*this);
+  // Result projection is an optional copy-elision optimization. Keep the
+  // explicit result home in unoptimized code, just as for byval carriers.
+  if (DAG->getOptLevel() != CodeGenOptLevel::None) {
+    findGoRetValueProjections(*this);
+  }
 
   // Create an initial MachineBasicBlock for each LLVM BasicBlock in F.  This
   // also creates the initial PHI MachineInstrs, though none of the input
@@ -526,6 +527,34 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
   }
 }
 
+void FunctionLoweringInfo::invalidateDebugFrameIndex(int FI) {
+  EliminatedDebugFrameIndices.insert(FI);
+
+  // Declarations describe storage for the whole function. Once that storage
+  // is eliminated, only independent SSA value descriptions remain valid.
+  llvm::erase_if(MF->getVariableDbgInfo(),
+                 [FI](const MachineFunction::VariableDbgInfo &VI) {
+                   return VI.inStackSlot() && VI.getStackSlot() == FI;
+                 });
+}
+
+void FunctionLoweringInfo::finalizeDebugFrameIndices() {
+  if (EliminatedDebugFrameIndices.empty())
+    return;
+  for (MachineBasicBlock &MBB : *MF)
+    for (MachineInstr &MI : MBB)
+      if (MI.isDebugValue())
+        for (MachineOperand &Op : MI.debug_operands())
+          if (Op.isFI() &&
+              EliminatedDebugFrameIndices.contains(Op.getIndex())) {
+            Op.ChangeToRegister(0, false);
+            if (MI.isNonListDebugValue())
+              MI.getDebugExpressionOp().setMetadata(
+                  DIExpression::convertToUndefExpression(
+                      MI.getDebugExpression()));
+          }
+}
+
 /// clear - Clear out all the function-specific state. This returns this
 /// FunctionLoweringInfo to an empty state, ready to be used for a
 /// different function.
@@ -535,6 +564,7 @@ void FunctionLoweringInfo::clear() {
   VirtReg2Value.clear();
   StaticAllocaMap.clear();
   GoByValCallCarriers.clear();
+  EliminatedDebugFrameIndices.clear();
   GoRetValueProjections.clear();
   ActiveGoRetValueProjections.clear();
   LiveOutRegInfo.clear();

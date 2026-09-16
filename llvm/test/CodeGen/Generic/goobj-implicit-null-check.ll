@@ -3,7 +3,7 @@
 ; RUN:   -stop-after=implicit-null-checks -o - %s | \
 ; RUN:   FileCheck %s --check-prefixes=MIR,X86-MIR
 ; RUN: llc -mtriple=aarch64-unknown-linux-goobj -verify-machineinstrs \
-; RUN:   -stop-after=implicit-null-checks -o - %s | FileCheck %s --check-prefix=MIR
+; RUN:   -stop-after=implicit-null-checks -o - %s | FileCheck %s --check-prefixes=MIR,AARCH64-MIR
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -verify-machineinstrs -o - %s | \
 ; RUN:   FileCheck %s --check-prefixes=ASM,X86-ASM
 ; RUN: llc -mtriple=aarch64-unknown-linux-goobj -verify-machineinstrs -o - %s | \
@@ -32,6 +32,8 @@ declare token @llvm.experimental.gc.statepoint.p0(
 ; MIR-LABEL: name: fold_nonnegative
 ; MIR-NOT: FAULTING_OP
 ; MIR: debug-location [[CHECK_LOC]] :: (load (s64) from %ir.addr)
+; The hoisted load overwrites the register that used to hold p on AArch64.
+; AARCH64-MIR: DBG_VALUE $noreg, $noreg,
 ; ASM-LABEL: fold_nonnegative:
 ; ASM-NOT: runtime.panicmem
 ; Removing the shrink-wrapped panic path before frame lowering must not leave
@@ -52,6 +54,8 @@ nil:
   unreachable
 
 notnil:
+  ; Debug users must neither block folding nor describe the loaded value as p.
+  #dbg_value(ptr %p, !9, !DIExpression(), !8)
   %addr = getelementptr i8, ptr %p, i64 8, !dbg !8
   %value = load i64, ptr %addr, align 8, !dbg !8
   ret i64 %value
@@ -230,3 +234,6 @@ attributes #0 = { "frame-pointer"="non-leaf" }
 !6 = !DISubroutineType(types: !1)
 !7 = !DILocation(line: 10, column: 2, scope: !4)
 !8 = !DILocation(line: 20, column: 9, scope: !4)
+
+!9 = !DILocalVariable(name: "p", scope: !4, file: !5, line: 1, type: !10)
+!10 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: null, size: 64)

@@ -18,6 +18,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/IndexedMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
@@ -155,6 +156,14 @@ public:
   /// into the physical byval argument area. Direct gc-live uses of these
   /// allocas describe only a rematerializable carrier address.
   SmallPtrSet<const AllocaInst *, 8> GoByValCallCarriers;
+
+  /// Called only when byval forwarding or goret projection commits to
+  /// eliminating a home's contents. Remove its storage declarations and
+  /// remember the frame index for cleanup after instruction selection.
+  LLVM_ABI void invalidateDebugFrameIndex(int FI);
+
+  /// Clear remaining MIR descriptions once all blocks have been selected.
+  LLVM_ABI void finalizeDebugFrameIndices();
 
   /// Loads become active only after target call lowering has emitted their
   /// defining copies. This keeps unsupported targets on the ordinary memory
@@ -368,6 +377,10 @@ public:
   unsigned getCurrentCallSite() { return CurCallSite; }
 
 private:
+  // A fixed ABI home can survive for stack growth after its contents were
+  // forwarded, so MachineFrameInfo's dead-object flag alone is insufficient.
+  SmallSet<int, 8> EliminatedDebugFrameIndices;
+
   /// LiveOutRegInfo - Information about live out vregs.
   IndexedMap<LiveOutInfo, VirtReg2IndexFunctor> LiveOutRegInfo;
 };

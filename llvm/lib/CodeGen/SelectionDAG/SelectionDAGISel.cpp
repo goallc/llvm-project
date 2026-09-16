@@ -788,6 +788,8 @@ bool SelectionDAGISel::runOnMachineFunction(MachineFunction &mf) {
     }
   }
 
+  FuncInfo->finalizeDebugFrameIndices();
+
   // For debug-info, in instruction referencing mode, we need to perform some
   // post-isel maintenence.
   if (MF->useDebugInstrRef())
