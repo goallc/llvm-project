@@ -85,6 +85,12 @@ classifyOrdinaryStackMapSlot(int64_t Offset, bool IsIndirect,
     return UOffset >= Start && UOffset - Start < Size;
   };
   if (!IsIndirect) {
+    // ABI0 exposes its argument frame address even when zero-sized arguments
+    // and results occupy no bytes. This is an address anchor, not storage to
+    // scan. Keep indirect accesses and neighboring out-of-range addresses
+    // subject to the normal bounds checks.
+    if (ArgsSize == 0 && UOffset == ArgsStart)
+      return {StackMapSlotKind::Direct, 0};
     if (ContainsAddress(LocalsStart, LocalsSize) ||
         ContainsAddress(ArgsStart, ArgsSize))
       return {StackMapSlotKind::Direct, 0};
