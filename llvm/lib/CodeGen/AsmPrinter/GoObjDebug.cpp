@@ -12,9 +12,12 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/AsmPrinter.h"
-#include "llvm/CodeGen/AsmPrinterHandler.h"
+#include "llvm/CodeGen/DebugHandlerBase.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Function.h"
@@ -26,6 +29,7 @@
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/LEB128.h"
 #include "llvm/Support/Path.h"
 #include <algorithm>
 #include <cstdint>
@@ -39,7 +43,7 @@ using namespace llvm;
 
 namespace {
 
-class GoObjDebugHandler final : public AsmPrinterHandler {
+class GoObjDebugHandler final : public DebugHandlerBase {
   AsmPrinter &Asm;
   Module *M = nullptr;
   const MCSymbol *CurrentFunction = nullptr;
@@ -48,6 +52,7 @@ class GoObjDebugHandler final : public AsmPrinterHandler {
   DenseMap<std::pair<const DILocation *, const DISubprogram *>, uint64_t>
       InlineSiteIDs;
   uint64_t NextInlineSiteID = 1;
+  DenseMap<const DILocalVariable *, MCContext::GoObjDebugVariable> VariableInfo;
 
   static std::string filePath(const DIFile *File) {
     if (!File)
@@ -100,10 +105,244 @@ class GoObjDebugHandler final : public AsmPrinterHandler {
                                                          Reversed.rend());
   }
 
+  static void uleb(std::vector<uint8_t> &Bytes, uint64_t Value) {
+    uint8_t Buffer[10];
+    unsigned Size = encodeULEB128(Value, Buffer);
+    Bytes.insert(Bytes.end(), Buffer, Buffer + Size);
+  }
+
+  static void sleb(std::vector<uint8_t> &Bytes, int64_t Value) {
+    uint8_t Buffer[10];
+    unsigned Size = encodeSLEB128(Value, Buffer);
+    Bytes.insert(Bytes.end(), Buffer, Buffer + Size);
+  }
+
+  std::optional<unsigned> variableIndex(const DILocalVariable *Var) const {
+    auto It = VariableInfo.find(Var);
+    if (It == VariableInfo.end())
+      return std::nullopt;
+    const auto *Info =
+        Asm.OutContext.getGoObjFunctionDebugInfo(CurrentFunction);
+    if (!Info)
+      return std::nullopt;
+    const auto &Key = It->second;
+    for (auto [Index, Candidate] : enumerate(Info->Variables))
+      if (Candidate.Name == Key.Name && Candidate.TypeName == Key.TypeName &&
+          Candidate.File == Key.File && Candidate.DeclLine == Key.DeclLine &&
+          Candidate.ArgNo == Key.ArgNo && Candidate.DictIndex == Key.DictIndex)
+        return Index;
+    return std::nullopt;
+  }
+
+  // Only serialize operations whose operands and location semantics we support.
+  // LLVM-only operations must never escape into Go's DWARF carriers.
+  static bool appendExpression(std::vector<uint8_t> &Bytes,
+                               ArrayRef<uint64_t> Ops) {
+    DIExpressionCursor Cursor(Ops);
+    while (auto Op = Cursor.take()) {
+      switch (Op->getOp()) {
+      case dwarf::DW_OP_plus_uconst:
+      case dwarf::DW_OP_constu:
+        Bytes.push_back(Op->getOp());
+        uleb(Bytes, Op->getArg(0));
+        break;
+      case dwarf::DW_OP_consts:
+        Bytes.push_back(Op->getOp());
+        sleb(Bytes, Op->getArg(0));
+        break;
+      case dwarf::DW_OP_deref:
+      case dwarf::DW_OP_plus:
+      case dwarf::DW_OP_minus:
+      case dwarf::DW_OP_stack_value:
+        Bytes.push_back(Op->getOp());
+        break;
+      default:
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static uint64_t lastOpcode(ArrayRef<uint64_t> Ops) {
+    uint64_t Last = 0;
+    DIExpressionCursor Cursor(Ops);
+    while (auto Op = Cursor.take())
+      Last = Op->getOp();
+    return Last;
+  }
+
+  std::vector<uint8_t> debugValueExpression(const MachineInstr &MI,
+                                            const MachineFunction &MF) {
+    if (!MI.isDebugValue() || MI.getNumDebugOperands() != 1 ||
+        MI.isUndefDebugValue() || MI.isDebugValueList())
+      return {};
+    const DIExpression *Expr = MI.getDebugExpression();
+    ArrayRef<uint64_t> Ops = Expr->getElements();
+    if (Expr->isFragment())
+      Ops = Ops.drop_back(3);
+    const MachineOperand &MO = MI.getDebugOperand(0);
+    std::vector<uint8_t> Bytes;
+    if (MO.isReg()) {
+      const auto *TRI = MF.getSubtarget().getRegisterInfo();
+      int Reg = TRI->getDwarfRegNum(MO.getReg(), false);
+      if (Reg < 0)
+        return {};
+      if (Ops.empty() && !MI.isIndirectDebugValue()) {
+        if (Reg < 32)
+          Bytes.push_back(dwarf::DW_OP_reg0 + Reg);
+        else {
+          Bytes.push_back(dwarf::DW_OP_regx);
+          uleb(Bytes, Reg);
+        }
+        return Bytes;
+      }
+      if (Reg < 32)
+        Bytes.push_back(dwarf::DW_OP_breg0 + Reg);
+      else {
+        Bytes.push_back(dwarf::DW_OP_bregx);
+        uleb(Bytes, Reg);
+      }
+      sleb(Bytes, MI.isIndirectDebugValue() ? MI.getDebugOffset().getImm() : 0);
+      // A final dereference describes the value at the computed address.
+      // DWARF memory locations already have that dereference implicitly.
+      bool IsMemory = MI.isIndirectDebugValue();
+      if (!IsMemory && !Ops.empty() && lastOpcode(Ops) == dwarf::DW_OP_deref) {
+        Ops = Ops.drop_back();
+        IsMemory = true;
+      }
+      if (!appendExpression(Bytes, Ops))
+        return {};
+      if (!IsMemory &&
+          (Ops.empty() || lastOpcode(Ops) != dwarf::DW_OP_stack_value))
+        Bytes.push_back(dwarf::DW_OP_stack_value);
+    } else if (MO.isImm() && !MI.isIndirectDebugValue()) {
+      Bytes.push_back(dwarf::DW_OP_consts);
+      sleb(Bytes, MO.getImm());
+      if (!appendExpression(Bytes, Ops))
+        return {};
+      if (Ops.empty() || lastOpcode(Ops) != dwarf::DW_OP_stack_value)
+        Bytes.push_back(dwarf::DW_OP_stack_value);
+    }
+    return Bytes;
+  }
+
+  struct Piece {
+    const DIExpression *Expr;
+    std::vector<uint8_t> Bytes;
+  };
+
+  static std::vector<uint8_t> joinPieces(SmallVector<Piece, 4> Pieces) {
+    if (Pieces.size() == 1 && !Pieces[0].Expr->isFragment())
+      return std::move(Pieces[0].Bytes);
+    if (any_of(Pieces, [](const Piece &P) { return !P.Expr->isFragment(); }))
+      return {};
+    llvm::sort(Pieces, [](const Piece &L, const Piece &R) {
+      return L.Expr->getFragmentInfo()->OffsetInBits <
+             R.Expr->getFragmentInfo()->OffsetInBits;
+    });
+    std::vector<uint8_t> Bytes;
+    uint64_t End = 0;
+    bool HasLocation = false;
+    for (const Piece &P : Pieces) {
+      auto Fragment = *P.Expr->getFragmentInfo();
+      if (Fragment.OffsetInBits < End || Fragment.OffsetInBits % 8 ||
+          Fragment.SizeInBits % 8)
+        return {};
+      if (Fragment.OffsetInBits != End) {
+        Bytes.push_back(dwarf::DW_OP_piece);
+        uleb(Bytes, (Fragment.OffsetInBits - End) / 8);
+      }
+      HasLocation |= !P.Bytes.empty();
+      Bytes.insert(Bytes.end(), P.Bytes.begin(), P.Bytes.end());
+      Bytes.push_back(dwarf::DW_OP_piece);
+      uleb(Bytes, Fragment.SizeInBits / 8);
+      End = Fragment.OffsetInBits + Fragment.SizeInBits;
+    }
+    return HasLocation ? Bytes : std::vector<uint8_t>();
+  }
+
+  void collectVariableLocations(const MachineFunction &MF) {
+    if (!CurrentFunction || Asm.OutContext.getGoObjDwarfVersion() == 0)
+      return;
+    auto Add = [&](unsigned Index, const MCSymbol *Begin, const MCSymbol *End,
+                   std::vector<uint8_t> Bytes) {
+      if (Begin && End && Begin != End && !Bytes.empty())
+        Asm.OutContext.addGoObjVariableLocation(CurrentFunction, Index,
+                                                {Begin, End, std::move(Bytes)});
+    };
+
+    // Stack slots in the MF side table use final frame offsets. For the two
+    // supported Go targets these are relative to the entry CFA, including the
+    // return-address bias on X86. CFA addressing also survives the prologue
+    // and epilogue, unlike an unqualified SP-relative expression.
+    DenseMap<unsigned, SmallVector<Piece, 4>> StackVariables;
+    DenseMap<unsigned, LexicalScope *> StackScopes;
+    const auto &MFI = MF.getFrameInfo();
+    const auto *TRI = MF.getSubtarget().getRegisterInfo();
+    auto Arch = Asm.OutContext.getTargetTriple().getArch();
+    if ((Arch == Triple::x86_64 || Arch == Triple::aarch64) &&
+        !MFI.hasVarSizedObjects() && !TRI->hasStackRealignment(MF)) {
+      for (const auto &VI : MF.getVariableDbgInfo()) {
+        if (!VI.Var || !VI.inStackSlot() || VI.Loc->getInlinedAt())
+          continue;
+        auto Index = variableIndex(VI.Var);
+        LexicalScope *Scope = LScopes.findLexicalScope(VI.Loc);
+        if (!Scope)
+          continue;
+        int FI = VI.getStackSlot();
+        if (!Index || MFI.isDeadObjectIndex(FI) || MFI.getStackID(FI) != 0)
+          continue;
+        std::vector<uint8_t> Bytes = {dwarf::DW_OP_fbreg};
+        sleb(Bytes, MFI.getObjectOffset(FI));
+        ArrayRef<uint64_t> Ops = VI.Expr->getElements();
+        if (VI.Expr->isFragment())
+          Ops = Ops.drop_back(3);
+        if (!appendExpression(Bytes, Ops))
+          Bytes.clear();
+        StackVariables[*Index].push_back({VI.Expr, std::move(Bytes)});
+        StackScopes[*Index] = Scope;
+      }
+    }
+    for (auto &[Index, Pieces] : StackVariables)
+      for (const auto &Range : StackScopes[Index]->getRanges())
+        Add(Index, getLabelBeforeInsn(Range.first),
+            getLabelAfterInsn(Range.second), joinPieces(Pieces));
+
+    // Reuse LLVM's final-machine history: it closes ranges on register
+    // clobbers, undef values, overlapping fragments, and CFG boundaries.
+    for (const auto &[Entity, Entries] : DbgValues) {
+      if (Entity.second)
+        continue;
+      auto Index = variableIndex(cast<DILocalVariable>(Entity.first));
+      if (!Index || StackVariables.contains(*Index))
+        continue;
+      SmallVector<const DbgValueHistoryMap::Entry *, 4> Active;
+      for (auto [N, Entry] : enumerate(Entries)) {
+        erase_if(Active, [&](const auto *E) { return E->getEndIndex() <= N; });
+        if (Entry.isDbgValue() && !Entry.getInstr()->isUndefDebugValue())
+          Active.push_back(&Entry);
+        auto Label = [&](const auto &E) {
+          return E.isClobber() ? getLabelAfterInsn(E.getInstr())
+                               : getLabelBeforeInsn(E.getInstr());
+        };
+        const MCSymbol *Begin = Label(Entry);
+        const MCSymbol *End = N + 1 == Entries.size() ? Asm.getFunctionEnd()
+                                                      : Label(Entries[N + 1]);
+        SmallVector<Piece, 4> Pieces;
+        for (const auto *E : Active)
+          Pieces.push_back({E->getInstr()->getDebugExpression(),
+                            debugValueExpression(*E->getInstr(), MF)});
+        Add(*Index, Begin, End, joinPieces(std::move(Pieces)));
+      }
+    }
+  }
+
 public:
-  explicit GoObjDebugHandler(AsmPrinter &Asm) : Asm(Asm) {}
+  explicit GoObjDebugHandler(AsmPrinter &Asm)
+      : DebugHandlerBase(&Asm), Asm(Asm) {}
 
   void beginModule(Module *Module) override {
+    DebugHandlerBase::beginModule(Module);
     M = Module;
 
     unsigned DwarfVersion = 0;
@@ -219,6 +458,7 @@ public:
           Result.DictIndex = static_cast<uint16_t>(Value);
         }
         Result.IsReturn = (Flags->getZExtValue() & 1) != 0;
+        VariableInfo.try_emplace(Var, Result);
         Variables[SP].push_back(std::move(Result));
       }
     }
@@ -309,7 +549,7 @@ public:
 
   void endModule() override {}
 
-  void beginFunction(const MachineFunction *MF) override {
+  void beginFunctionImpl(const MachineFunction *MF) override {
     PreviousLocation = DebugLoc();
     CurrentFunction = nullptr;
     const DISubprogram *SP = MF->getFunction().getSubprogram();
@@ -321,12 +561,14 @@ public:
         CurrentFunction, filePath(SP->getFile()), SP->getLine());
   }
 
-  void endFunction(const MachineFunction *) override {
+  void endFunctionImpl(const MachineFunction *MF) override {
+    collectVariableLocations(*MF);
     CurrentFunction = nullptr;
     PreviousLocation = DebugLoc();
   }
 
   void beginInstruction(const MachineInstr *MI) override {
+    DebugHandlerBase::beginInstruction(MI);
     if (!CurrentFunction || MI->isMetaInstruction() ||
         MI->getFlag(MachineInstr::FrameSetup))
       return;

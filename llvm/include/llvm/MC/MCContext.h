@@ -200,6 +200,12 @@ public:
     std::vector<GoObjDebugInlineFrame> AnchorChildFrames;
   };
 
+  struct GoObjVariableLocation {
+    const MCSymbol *Begin = nullptr;
+    const MCSymbol *End = nullptr;
+    std::vector<uint8_t> Expression;
+  };
+
   struct GoObjDebugVariable {
     std::string Name;
     std::string TypeName;
@@ -208,6 +214,7 @@ public:
     uint32_t ArgNo = 0;
     uint16_t DictIndex = 0;
     bool IsReturn = false;
+    std::vector<GoObjVariableLocation> Locations;
   };
 
   struct GoObjDebugGlobal {
@@ -1097,6 +1104,13 @@ public:
   getGoObjFunctionDebugInfo(const MCSymbol *Sym) const {
     auto It = GoObjFunctionDebugInfos.find(Sym);
     return It == GoObjFunctionDebugInfos.end() ? nullptr : &It->second;
+  }
+
+  void addGoObjVariableLocation(const MCSymbol *Sym, unsigned VariableIndex,
+                                GoObjVariableLocation Location) {
+    GoObjFunctionDebugInfos[Sym]
+        .Variables.at(VariableIndex)
+        .Locations.push_back(std::move(Location));
   }
 
   void addGoObjDebugGlobal(GoObjDebugGlobal Global) {

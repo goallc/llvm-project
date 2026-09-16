@@ -2573,6 +2573,79 @@ uint64_t GoObjObjectWriter::writeObject() {
           DwarfRangeSym = addDwarfCarrierSymbol(Symbols, "", GoObj::SDWARFRANGE,
                                                 0, std::move(RangeCarrier));
 
+        GoObjDwarfCarrierData LocationCarrier;
+        std::vector<std::optional<uint32_t>> LocationOffsets(
+            FunctionDebugInfo->Variables.size());
+        for (auto [VarIndex, Var] : enumerate(FunctionDebugInfo->Variables)) {
+          struct LocationRange {
+            uint64_t Begin, End;
+            std::vector<uint8_t> Expression;
+          };
+          SmallVector<LocationRange, 4> Ranges;
+          for (const auto &Loc : Var.Locations) {
+            auto Offset = [&](const MCSymbol *Label) {
+              if (!Label || !Label->isInSection() ||
+                  &Label->getSection() != Symbols[I].Section)
+                report_fatal_error(
+                    "GoObj variable location has invalid section");
+              uint64_t Value = Asm->getSymbolOffset(*Label);
+              if (Value < Symbols[I].SectionBegin ||
+                  Value > Symbols[I].SectionEnd)
+                report_fatal_error(
+                    "GoObj variable location is outside function");
+              return Value - Symbols[I].SectionBegin;
+            };
+            uint64_t Begin = Offset(Loc.Begin), End = Offset(Loc.End);
+            if (Begin >= End || Loc.Expression.empty())
+              continue;
+            if (!Ranges.empty() && Ranges.back().End == Begin &&
+                Ranges.back().Expression == Loc.Expression)
+              Ranges.back().End = End;
+            else
+              Ranges.push_back({Begin, End, Loc.Expression});
+          }
+          if (Ranges.empty())
+            continue;
+          LocationOffsets[VarIndex] = checkedUint32(LocationCarrier.Data.size(),
+                                                    "DWARF location offset");
+          if (DwarfVersion == 5) {
+            LocationCarrier.Data.push_back(dwarf::DW_LLE_base_addressx);
+            appendDwarfRelocation(LocationCarrier.Data,
+                                  LocationCarrier.Relocations, 4,
+                                  GoObj::R_DWTXTADDR_U4, 0, I);
+          }
+          for (const auto &Range : Ranges) {
+            if (DwarfVersion == 5) {
+              LocationCarrier.Data.push_back(dwarf::DW_LLE_offset_pair);
+              appendUvarint(LocationCarrier.Data, Range.Begin);
+              appendUvarint(LocationCarrier.Data, Range.End);
+              appendUvarint(LocationCarrier.Data, Range.Expression.size());
+            } else {
+              appendDwarfRelocation(LocationCarrier.Data,
+                                    LocationCarrier.Relocations, PointerSize,
+                                    GoObj::R_ADDRCUOFF, Range.Begin, I);
+              appendDwarfRelocation(LocationCarrier.Data,
+                                    LocationCarrier.Relocations, PointerSize,
+                                    GoObj::R_ADDRCUOFF, Range.End, I);
+              if (Range.Expression.size() > UINT16_MAX)
+                report_fatal_error("GoObj DWARF location expression too large");
+              LocationCarrier.Data.push_back(Range.Expression.size() & 0xff);
+              LocationCarrier.Data.push_back(Range.Expression.size() >> 8);
+            }
+            LocationCarrier.Data.append(Range.Expression.begin(),
+                                        Range.Expression.end());
+          }
+          if (DwarfVersion == 5)
+            LocationCarrier.Data.push_back(dwarf::DW_LLE_end_of_list);
+          else
+            LocationCarrier.Data.resize(
+                LocationCarrier.Data.size() + 2 * PointerSize, 0);
+        }
+        std::optional<uint32_t> DwarfLocationSym;
+        if (!LocationCarrier.Data.empty())
+          DwarfLocationSym = addDwarfCarrierSymbol(
+              Symbols, "", GoObj::SDWARFLOC, 0, std::move(LocationCarrier));
+
         GoObjDwarfCarrierData InfoCarrier;
         appendUvarint(InfoCarrier.Data, 3); // DW_ABRV_FUNCTION.
         appendCString(InfoCarrier.Data, Symbols[I].Name);
@@ -2598,22 +2671,25 @@ uint64_t GoObjObjectWriter::writeObject() {
             AppendDwarfParametricTypes(InfoCarrier,
                                        FunctionDebugInfo->Variables);
 
-        for (const MCContext::GoObjDebugVariable &Var :
-             FunctionDebugInfo->Variables) {
-          // These are the current Go DW_ABRV_PUTVAR_START+7/+13 forms: a
-          // source identity, type reference, and block1 location.
-          appendUvarint(InfoCarrier.Data, Var.ArgNo != 0 ? 46 : 40);
+        for (auto [VarIndex, Var] : enumerate(FunctionDebugInfo->Variables)) {
+          // DW_ABRV_PUTVAR_START+6/+12 use a location list; +7/+13 use
+          // block1 (empty for unavailable variables).
+          bool HasLocation = LocationOffsets[VarIndex].has_value();
+          appendUvarint(InfoCarrier.Data,
+                        (Var.ArgNo != 0 ? 46 : 40) - unsigned(HasLocation));
           appendCString(InfoCarrier.Data, Var.Name);
           if (Var.ArgNo != 0)
             InfoCarrier.Data.push_back(Var.IsReturn ? 1 : 0);
           appendUvarint(InfoCarrier.Data, Var.DeclLine);
           AppendDwarfVariableTypeReference(
               InfoCarrier, Var, ParametricTypeOffsets, DwarfInfoIndex);
-          // LLVM SSA, statepoint relocation, and register allocation can all
-          // move a value after frontend lowering. Until an exact final-machine
-          // expression is proven, encode optimized-out/unavailable, not a
-          // guessed stack or register location.
-          InfoCarrier.Data.push_back(0);
+          if (HasLocation)
+            appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations, 4,
+                                  GoObj::R_DWARFSECREF,
+                                  *LocationOffsets[VarIndex],
+                                  *DwarfLocationSym);
+          else
+            InfoCarrier.Data.push_back(0);
         }
 
         std::function<void(int32_t)> EmitInline = [&](int32_t Node) {
@@ -2669,6 +2745,9 @@ uint64_t GoObjObjectWriter::writeObject() {
             Symbols, "", GoObj::SDWARFLINES, 0,
             makeDwarfLines(LineInfo, CodeSize, PointerSize, I));
         Symbols[I].Auxiliaries.emplace_back(GoObj::AuxDwarfInfo, DwarfInfoSym);
+        if (DwarfLocationSym)
+          Symbols[I].Auxiliaries.emplace_back(GoObj::AuxDwarfLoc,
+                                              *DwarfLocationSym);
         if (DwarfRangeSym)
           Symbols[I].Auxiliaries.emplace_back(GoObj::AuxDwarfRanges,
                                               *DwarfRangeSym);
