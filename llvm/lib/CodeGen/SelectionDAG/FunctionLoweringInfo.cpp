@@ -12,7 +12,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
-#include "SDNodeDbgValue.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Analysis/UniformityAnalysis.h"
@@ -23,7 +22,6 @@
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
-#include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetLowering.h"
@@ -529,8 +527,7 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
   }
 }
 
-void FunctionLoweringInfo::invalidateDebugFrameIndex(int FI,
-                                                     SelectionDAG &DAG) {
+void FunctionLoweringInfo::invalidateDebugFrameIndex(int FI) {
   EliminatedDebugFrameIndices.insert(FI);
 
   // Declarations describe storage for the whole function. Once that storage
@@ -539,52 +536,6 @@ void FunctionLoweringInfo::invalidateDebugFrameIndex(int FI,
                  [FI](const MachineFunction::VariableDbgInfo &VI) {
                    return VI.inStackSlot() && VI.getStackSlot() == FI;
                  });
-  SmallVector<SDDbgValue *, 8> Records(DAG.DbgBegin(), DAG.DbgEnd());
-  llvm::append_range(
-      Records, make_range(DAG.ByvalParmDbgBegin(), DAG.ByvalParmDbgEnd()));
-
-  auto UsesFrame = [&DAG, FI](const SDDbgOperand &Op) {
-    if (Op.getKind() == SDDbgOperand::FRAMEIX)
-      return int(Op.getFrameIx()) == FI;
-    if (Op.getKind() != SDDbgOperand::SDNODE)
-      return false;
-    SDValue V(Op.getSDNode(), Op.getResNo());
-    while (V.getOpcode() == ISD::BITCAST ||
-           V.getOpcode() == ISD::ADDRSPACECAST ||
-           DAG.isBaseWithConstantOffset(V))
-      V = V.getOperand(0);
-    auto *Base = dyn_cast<FrameIndexSDNode>(V);
-    return Base && Base->getIndex() == FI;
-  };
-
-  for (SDDbgValue *DV : Records) {
-    if (DV->isInvalidated())
-      continue;
-    auto Locations = DV->getLocationOps();
-    if (none_of(Locations, UsesFrame))
-      continue;
-    DV->setIsInvalidated();
-    DV->setIsEmitted();
-    auto *Var = cast<DILocalVariable>(DV->getVariable());
-    const DIExpression *KillExpr =
-        DIExpression::convertToUndefExpression(DV->getExpression());
-    DAG.AddDbgValue(DAG.getConstantDbgValue(
-                        Var, const_cast<DIExpression *>(KillExpr),
-                        PoisonValue::get(Type::getInt32Ty(*DAG.getContext())),
-                        DV->getDebugLoc(), DV->getOrder()),
-                    false);
-  }
-}
-
-bool FunctionLoweringInfo::isEliminatedDebugFrameAddress(const Value *V) const {
-  if (EliminatedDebugFrameIndices.empty() || !V->getType()->isPointerTy())
-    return false;
-  int64_t Offset;
-  const auto *AI = dyn_cast<AllocaInst>(
-      GetPointerBaseWithConstantOffset(V, Offset, MF->getDataLayout()));
-  auto It = StaticAllocaMap.find(AI);
-  return It != StaticAllocaMap.end() &&
-         EliminatedDebugFrameIndices.contains(It->second);
 }
 
 void FunctionLoweringInfo::finalizeDebugFrameIndices() {
@@ -594,8 +545,14 @@ void FunctionLoweringInfo::finalizeDebugFrameIndices() {
     for (MachineInstr &MI : MBB)
       if (MI.isDebugValue())
         for (MachineOperand &Op : MI.debug_operands())
-          if (Op.isFI() && EliminatedDebugFrameIndices.contains(Op.getIndex()))
+          if (Op.isFI() &&
+              EliminatedDebugFrameIndices.contains(Op.getIndex())) {
             Op.ChangeToRegister(0, false);
+            if (MI.isNonListDebugValue())
+              MI.getDebugExpressionOp().setMetadata(
+                  DIExpression::convertToUndefExpression(
+                      MI.getDebugExpression()));
+          }
 }
 
 /// clear - Clear out all the function-specific state. This returns this

@@ -174,6 +174,38 @@ entry:
   ret i64 0, !dbg !38
 }
 
+; A later block can still lower an address record after the home was removed.
+; O0-LABEL: name: byval_late_block
+; O0: name: home
+; CHECK-LABEL: name: byval_late_block
+; CHECK: stack: {{ *}}[]
+; CHECK: DBG_VALUE $noreg, $noreg,
+define goabiinternal i64 @byval_late_block() gc "statepoint-example" !dbg !45 {
+entry:
+  %home = alloca %pair, align 8
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !47
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !47
+  br label %after
+after:
+  #dbg_value(ptr %home, !46, !DIExpression(DW_OP_deref), !47)
+  ret i64 0, !dbg !47
+}
+
+; Invalidating one operand of a list must not make its other operand the value.
+; O0-LABEL: name: byval_value_list
+; O0: name: home
+; CHECK-LABEL: name: byval_value_list
+; CHECK: stack: {{ *}}[]
+; CHECK: DBG_VALUE_LIST !{{[0-9]+}}, !DIExpression(DW_OP_LLVM_arg, 0, DW_OP_LLVM_arg, 1, DW_OP_deref, DW_OP_plus), 7, $noreg
+define goabiinternal i64 @byval_value_list() gc "statepoint-example" !dbg !48 {
+entry:
+  %home = alloca %pair, align 8
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !50
+  #dbg_value(!DIArgList(i64 7, ptr %home), !49, !DIExpression(DW_OP_LLVM_arg, 0, DW_OP_LLVM_arg, 1, DW_OP_deref, DW_OP_plus), !50)
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !50
+  ret i64 0, !dbg !50
+}
+
 ; A debug record in an already-selected block must not retain the old FI.
 ; O0-LABEL: name: byval_earlier_block
 ; O0: name: home
@@ -258,3 +290,10 @@ entry:
 !42 = distinct !DISubprogram(name: "byval_not_forwarded", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
 !43 = !DILocalVariable(name: "value", scope: !42, file: !1, line: 2, type: !31)
 !44 = !DILocation(line: 2, column: 1, scope: !42)
+
+!45 = distinct !DISubprogram(name: "byval_late_block", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!46 = !DILocalVariable(name: "late_block", scope: !45, file: !1, line: 1, type: !4)
+!47 = !DILocation(line: 1, column: 1, scope: !45)
+!48 = distinct !DISubprogram(name: "byval_value_list", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!49 = !DILocalVariable(name: "value_list", scope: !48, file: !1, line: 1, type: !4)
+!50 = !DILocation(line: 1, column: 1, scope: !48)

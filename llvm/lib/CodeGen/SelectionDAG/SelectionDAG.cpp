@@ -9697,7 +9697,7 @@ static SDValue tryForwardByValStores(SelectionDAG &DAG, const SDLoc &DL,
       Chain = Input;
     DAG.ReplaceAllUsesOfValueWith(Old, Input);
   };
-  DAG.getFunctionLoweringInfo()->invalidateDebugFrameIndex(FI, DAG);
+  DAG.getFunctionLoweringInfo()->invalidateDebugFrameIndex(FI);
   for (StoreSDNode *ST : Stores)
     RemoveChainNode(ST);
   if (!KeepFixedHome) {

@@ -158,14 +158,11 @@ public:
   SmallPtrSet<const AllocaInst *, 8> GoByValCallCarriers;
 
   /// Called only when byval forwarding or goret projection commits to
-  /// eliminating a home's contents. Invalidate its current descriptions and
-  /// remember the frame index for debug records in other basic blocks.
-  LLVM_ABI void invalidateDebugFrameIndex(int FI, SelectionDAG &DAG);
+  /// eliminating a home's contents. Remove its storage declarations and
+  /// remember the frame index for cleanup after instruction selection.
+  LLVM_ABI void invalidateDebugFrameIndex(int FI);
 
-  /// Reject later IR descriptions of an eliminated home.
-  LLVM_ABI bool isEliminatedDebugFrameAddress(const Value *V) const;
-
-  /// Clear earlier MIR descriptions once all blocks have been selected.
+  /// Clear remaining MIR descriptions once all blocks have been selected.
   LLVM_ABI void finalizeDebugFrameIndices();
 
   /// Loads become active only after target call lowering has emitted their

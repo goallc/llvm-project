@@ -1641,13 +1641,6 @@ bool SelectionDAGBuilder::handleDebugValue(ArrayRef<const Value *> Values,
   if (visitEntryValueDbgValue(Values, Var, Expr, DbgLoc))
     return true;
 
-  if (any_of(Values, [&](const Value *V) {
-        return FuncInfo.isEliminatedDebugFrameAddress(V);
-      })) {
-    handleKillDebugValue(Var, Expr, DbgLoc, Order);
-    return true;
-  }
-
   SmallVector<SDDbgOperand> LocationOps;
   SmallVector<SDNode *> Dependencies;
   for (const Value *V : Values) {
