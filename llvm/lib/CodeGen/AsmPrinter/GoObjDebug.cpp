@@ -157,6 +157,21 @@ public:
       }
     }
 
+    // The frontend list also describes abstract inline functions, but it is
+    // not an inventory of the functions remaining after optimization. Cloning
+    // and specialization can add definitions with their own DISubprograms.
+    // Bind those to the actual function symbol: a clone's linkage name can
+    // still name its source function.
+    for (const Function &F : *M) {
+      if (F.isDeclarationForLinker())
+        continue;
+      const DISubprogram *SP = F.getSubprogram();
+      if (!SP || !SP->getUnit() ||
+          SP->getUnit()->getEmissionKind() == DICompileUnit::NoDebug)
+        continue;
+      SubprogramSymbols.try_emplace(SP, Asm.getSymbol(&F));
+    }
+
     DenseMap<const DISubprogram *, std::vector<MCContext::GoObjDebugVariable>>
         Variables;
     if (const NamedMDNode *Vars = M->getNamedMetadata("goobj.debug.vars")) {
