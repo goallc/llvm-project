@@ -11413,6 +11413,7 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
         auto *ResultFI = dyn_cast<FrameIndexSDNode>(OutVals[I]);
         if (!Projections.empty() && ResultFI) {
           SDValue ProjectionChain = Chain;
+          SmallVector<SelectionDAG::FrameIndexDebugValue, 4> DebugValues;
           for (const auto &Projection : Projections) {
             EVT VT =
                 getValueType(DAG.getDataLayout(), Projection.Load->getType());
@@ -11428,7 +11429,11 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
             ProjectionChain = Load.getValue(1);
             ProjectionChain =
                 DAG.getCopyToReg(ProjectionChain, DL, Projection.Reg, Load);
+            DebugValues.push_back({Load, Projection.Offset,
+                                   VT.getStoreSize().getFixedValue(),
+                                   DL.getIROrder()});
           }
+          DAG.replaceFrameIndexDebugValues(ResultFI->getIndex(), DebugValues);
           MF.getFrameInfo().RemoveStackObject(ResultFI->getIndex());
           FLI->activateGoRetValueProjections(AI);
           Copies.push_back(ProjectionChain);

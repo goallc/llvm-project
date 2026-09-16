@@ -18,6 +18,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/IndexedMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
@@ -155,6 +156,11 @@ public:
   /// into the physical byval argument area. Direct gc-live uses of these
   /// allocas describe only a rematerializable carrier address.
   SmallPtrSet<const AllocaInst *, 8> GoByValCallCarriers;
+
+  /// Storage whose debug descriptions have been replaced by values. Later IR
+  /// debug records must not reintroduce its address, even if an ABI-required
+  /// fixed frame object remains for the stack-growth path.
+  SmallSet<int, 8> EliminatedDebugFrameIndices;
 
   /// Loads become active only after target call lowering has emitted their
   /// defining copies. This keeps unsupported targets on the ordinary memory

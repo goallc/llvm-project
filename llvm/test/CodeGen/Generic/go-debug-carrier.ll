@@ -152,6 +152,55 @@ entry:
   ret i64 0, !dbg !35
 }
 
+; A later address record must not reintroduce a removed frame object.
+; O0-LABEL: name: byval_late
+; O0: name: home
+; CHECK-LABEL: name: byval_late
+; CHECK: stack: {{ *}}[]
+; CHECK: DBG_VALUE $noreg, $noreg,
+define goabiinternal i64 @byval_late() gc "statepoint-example" !dbg !36 {
+entry:
+  %home = alloca %pair, align 8
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !38
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !38
+  #dbg_value(ptr %home, !37, !DIExpression(DW_OP_deref), !38)
+  ret i64 0, !dbg !38
+}
+
+; A debug record in an already-selected block must not retain the old FI.
+; O0-LABEL: name: byval_earlier_block
+; O0: name: home
+; CHECK-LABEL: name: byval_earlier_block
+; CHECK: stack: {{ *}}[]
+; CHECK: DBG_VALUE $noreg, $noreg,
+define goabiinternal i64 @byval_earlier_block() gc "statepoint-example" !dbg !39 {
+entry:
+  %home = alloca %pair, align 8
+  #dbg_value(ptr %home, !40, !DIExpression(DW_OP_deref), !41)
+  br label %use
+use:
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !41
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !41
+  ret i64 0, !dbg !41
+}
+
+; The IR candidate proof succeeds, but overlapping DAG stores reject forwarding.
+; Debug descriptions must remain attached to the surviving home in that case.
+; O0-LABEL: name: byval_not_forwarded
+; O0: name: home
+; CHECK-LABEL: name: byval_not_forwarded
+; CHECK: name: home
+; CHECK: debug-info-variable: '!{{[0-9]+}}'
+define goabiinternal i64 @byval_not_forwarded() gc "statepoint-example" !dbg !42 {
+entry:
+  %home = alloca %pair, align 8
+  #dbg_declare(ptr %home, !43, !DIExpression(), !44)
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !44
+  store i64 19, ptr %home, align 8, !dbg !44
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !44
+  ret i64 0, !dbg !44
+}
+
 !llvm.dbg.cu = !{!0}
 !llvm.module.flags = !{!8, !9}
 !0 = distinct !DICompileUnit(language: DW_LANG_Go, file: !1, producer: "Go", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug)
@@ -190,3 +239,15 @@ entry:
 !33 = distinct !DISubprogram(name: "byval_inserted", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
 !34 = !DILocalVariable(name: "pair", scope: !33, file: !1, line: 2, type: !31)
 !35 = !DILocation(line: 2, column: 1, scope: !33)
+
+!36 = distinct !DISubprogram(name: "byval_late", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!37 = !DILocalVariable(name: "value", scope: !36, file: !1, line: 2, type: !4)
+!38 = !DILocation(line: 2, column: 1, scope: !36)
+
+!39 = distinct !DISubprogram(name: "byval_earlier_block", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!40 = !DILocalVariable(name: "value", scope: !39, file: !1, line: 2, type: !4)
+!41 = !DILocation(line: 2, column: 1, scope: !39)
+
+!42 = distinct !DISubprogram(name: "byval_not_forwarded", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!43 = !DILocalVariable(name: "value", scope: !42, file: !1, line: 2, type: !31)
+!44 = !DILocation(line: 2, column: 1, scope: !42)

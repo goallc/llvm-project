@@ -788,6 +788,19 @@ bool SelectionDAGISel::runOnMachineFunction(MachineFunction &mf) {
     }
   }
 
+  // A frame object's debug use in an earlier block may have become MIR before
+  // a later call eliminated its contents. Clear those stale addresses once,
+  // after all blocks have been selected; replacement value records have
+  // already been emitted at the actual transformation points.
+  if (!FuncInfo->EliminatedDebugFrameIndices.empty())
+    for (MachineBasicBlock &MBB : *MF)
+      for (MachineInstr &MI : MBB)
+        if (MI.isDebugValue())
+          for (MachineOperand &Op : MI.debug_operands())
+            if (Op.isFI() &&
+                FuncInfo->EliminatedDebugFrameIndices.contains(Op.getIndex()))
+              Op.ChangeToRegister(0, false);
+
   // For debug-info, in instruction referencing mode, we need to perform some
   // post-isel maintenence.
   if (MF->useDebugInstrRef())

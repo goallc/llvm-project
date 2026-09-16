@@ -41,7 +41,6 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
-#include "llvm/Transforms/Utils/Local.h"
 #include <algorithm>
 using namespace llvm;
 
@@ -270,23 +269,6 @@ static void findGoRetValueProjections(FunctionLoweringInfo &FuncInfo) {
   }
 }
 
-// Carrier recognition belongs to lowering; debug address-to-value conversion
-// is shared with other transformations that eliminate stack storage.
-static void salvageGoCallCarrierDebugInfo(FunctionLoweringInfo &FLI) {
-  Function &F = FLI.MF->getFunction();
-  bool AllowGCLiveUses =
-      FLI.MF->getTarget().getTargetTriple().isOSBinFormatGoObj() &&
-      goabi::isGoCallingConv(F.getCallingConv());
-  SmallVector<AllocaInst *, 8> Carriers;
-  for (Instruction &I : F.getEntryBlock())
-    if (auto *AI = dyn_cast<AllocaInst>(&I);
-        AI &&
-        (FLI.isGoRetValueProjectionCarrier(AI) ||
-         isSingleByValCallCarrier(*AI, F.getDataLayout(), AllowGCLiveUses)))
-      Carriers.push_back(AI);
-  salvageDebugInfoForAllocas(Carriers);
-}
-
 void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
                                SelectionDAG *DAG) {
   Fn = &fn;
@@ -449,7 +431,6 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
   // explicit result home in unoptimized code, just as for byval carriers.
   if (DAG->getOptLevel() != CodeGenOptLevel::None) {
     findGoRetValueProjections(*this);
-    salvageGoCallCarrierDebugInfo(*this);
   }
 
   // Create an initial MachineBasicBlock for each LLVM BasicBlock in F.  This
@@ -555,6 +536,7 @@ void FunctionLoweringInfo::clear() {
   VirtReg2Value.clear();
   StaticAllocaMap.clear();
   GoByValCallCarriers.clear();
+  EliminatedDebugFrameIndices.clear();
   GoRetValueProjections.clear();
   ActiveGoRetValueProjections.clear();
   LiveOutRegInfo.clear();

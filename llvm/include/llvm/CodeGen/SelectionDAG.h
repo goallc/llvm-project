@@ -1970,6 +1970,21 @@ public:
   LLVM_ABI SDDbgLabel *getDbgLabel(DILabel *Label, const DebugLoc &DL,
                                    unsigned O);
 
+  /// A value already produced by storage elimination, describing bytes of
+  /// the old frame object. Order is the point where these contents are known.
+  struct FrameIndexDebugValue {
+    SDValue Value;
+    uint64_t Offset;
+    uint64_t Size;
+    unsigned Order;
+  };
+
+  /// Replace debug addresses of FI with values supplied by the transformation
+  /// eliminating its storage. No executable nodes are created. Must be called
+  /// only after the transformation has committed to eliminating the contents.
+  LLVM_ABI void
+  replaceFrameIndexDebugValues(int FI, ArrayRef<FrameIndexDebugValue> Values);
+
   /// Transfer debug values from one node to another, while optionally
   /// generating fragment expressions for split-up values. If \p InvalidateDbg
   /// is set, debug values are invalidated after they are transferred.
