@@ -248,6 +248,7 @@ CodeGenTargetMachineImpl::createMCStreamer(raw_pwrite_stream &Out,
         Config.BuildID = std::move(IRConfig->BuildID);
         Config.PackagePath = std::move(IRConfig->PackagePath);
         Config.Experiments = std::move(IRConfig->Experiments);
+        Config.Fingerprint = IRConfig->Fingerprint;
         Config.IsMain = IRConfig->IsMain;
         Config.IsShared = IRConfig->IsShared;
         Config.IsStd = IRConfig->IsStd;

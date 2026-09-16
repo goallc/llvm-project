@@ -16,6 +16,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Analysis/RuntimeLibcallInfo.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/CodeGen/CommandFlags.h"
@@ -91,9 +92,10 @@ static Error configureGoObjFromModule(const Module &M) {
                              "!goobj.config must contain one operand");
 
   const MDNode &Node = *Named->getOperand(0);
-  if (Node.getNumOperands() != 12)
-    return createStringError(inconvertibleErrorCode(),
-                             "!goobj.config must contain twelve fields");
+  if (Node.getNumOperands() != 12 && Node.getNumOperands() != 13)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "!goobj.config must contain twelve or thirteen fields");
 
   SmallVector<std::string, 11> Fields;
   for (unsigned I = 0; I != 11; ++I) {
@@ -141,6 +143,23 @@ static Error configureGoObjFromModule(const Module &M) {
                              "!goobj.config requires a GoObj target triple");
 
   codegen::GoObjConfig Config;
+  // Older producers omit the optional package export fingerprint.
+  if (Node.getNumOperands() == 13) {
+    const auto *Fingerprint = dyn_cast<MDString>(Node.getOperand(12));
+    if (!Fingerprint || Fingerprint->getString().size() != 16)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "!goobj.config fingerprint must be 16 hexadecimal digits");
+    StringRef Hex = Fingerprint->getString();
+    for (unsigned I = 0; I != Config.Fingerprint.size(); ++I) {
+      uint8_t Byte;
+      if (!tryGetHexFromNibbles(Hex[2 * I], Hex[2 * I + 1], Byte))
+        return createStringError(
+            inconvertibleErrorCode(),
+            "!goobj.config fingerprint must be 16 hexadecimal digits");
+      Config.Fingerprint[I] = Byte;
+    }
+  }
   Config.GOOS = std::move(Fields[1]);
   Config.GOARCH = std::move(Fields[2]);
   Config.Version = std::move(Fields[3]);

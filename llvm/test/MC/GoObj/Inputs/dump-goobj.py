@@ -166,6 +166,7 @@ def main(path):
     print("header:", raw[:base].decode().replace("\n", "\\n"))
     print("magic-offset:", base)
     print("flags:", struct.unpack_from("<I", data, 16)[0])
+    print("fingerprint:", data[8:16].hex())
 
     for index, name in enumerate(BLOCKS):
         block_end = (
