@@ -975,8 +975,14 @@ makeStatepointStackMaps(const MCAssembler &Asm, const GoObjSymbol &Function,
         switch (Slot.Kind) {
         case goobj::StackMapSlotKind::Invalid:
           report_fatal_error(
-              "GoObj ordinary statepoint contains an invalid pointer stack "
-              "slot");
+              Twine("GoObj ordinary statepoint in ") + Function.Name +
+              " contains an invalid pointer stack slot: offset=" +
+              Twine(WordOffset) + ", indirect=" +
+              Twine(Loc.Type == MCContext::GoObjStackMapLocation::Indirect) +
+              ", locals-start=" + Twine(FrameLayout.GCLocalsStart) +
+              ", locals-size=" + Twine(FrameLayout.GCLocalsSize) +
+              ", args-start=" + Twine(OrdinaryArgsStart) +
+              ", args-size=" + Twine(ArgSize));
         case goobj::StackMapSlotKind::Direct:
           // Direct describes the pointer value SP+Offset, not a pointer stored
           // at SP+Offset. Statepoint lowering rematerializes that address after

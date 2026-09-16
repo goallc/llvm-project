@@ -161,6 +161,22 @@ TEST(GoObjStackMapUtilsTest, AcceptsUnalignedDirectFrameAddresses) {
   EXPECT_EQ(Classify(96).Kind, goobj::StackMapSlotKind::Invalid);
 }
 
+TEST(GoObjStackMapUtilsTest, AcceptsEmptyArgumentFrameAddress) {
+  auto Classify = [](int64_t Offset, bool IsIndirect) {
+    return goobj::classifyOrdinaryStackMapSlot(
+        Offset, IsIndirect, /*PointerSize=*/8, /*LocalsStart=*/0,
+        /*LocalsSize=*/24, /*LocalsBitOffset=*/1, /*ArgsStart=*/40,
+        /*ArgsSize=*/0);
+  };
+
+  // llvm.go.abi0.frame is meaningful even when there are no argument words.
+  // Only the address is valid: there is no pointer-sized memory slot to scan.
+  EXPECT_EQ(Classify(40, false).Kind, goobj::StackMapSlotKind::Direct);
+  EXPECT_EQ(Classify(40, true).Kind, goobj::StackMapSlotKind::Invalid);
+  EXPECT_EQ(Classify(39, false).Kind, goobj::StackMapSlotKind::Invalid);
+  EXPECT_EQ(Classify(41, false).Kind, goobj::StackMapSlotKind::Invalid);
+}
+
 TEST(GoObjStackMapUtilsTest, RejectsReservedUnalignedAndOutOfRangeSlots) {
   auto Classify = [](int64_t Offset) {
     return goobj::classifyOrdinaryStackMapSlot(
