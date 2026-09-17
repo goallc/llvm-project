@@ -1564,6 +1564,10 @@ bool AArch64ExpandPseudoImpl::expandMI(MachineBasicBlock &MBB,
       if (MI.peekDebugInstrNum() != 0)
         MIB2->setDebugInstrNum(MI.peekDebugInstrNum());
       transferImpOps(MI, MIB1, MIB2);
+      // Go's GOT relocation covers both instructions, so keep them adjacent.
+      if (MF.getTarget().getTargetTriple().isOSBinFormatGoObj() &&
+          useAArch64GoObjCompositeRelocations())
+        finalizeBundle(MBB, MIB1->getIterator(), MBBI->getIterator());
     }
     MI.eraseFromParent();
     return true;

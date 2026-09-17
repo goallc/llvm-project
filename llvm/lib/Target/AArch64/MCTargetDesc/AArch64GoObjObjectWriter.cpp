@@ -123,6 +123,7 @@ bool AArch64GoObjObjectWriter::mergeRelocations(
       Previous.Offset + 4 != Current.Offset ||
       Previous.Symbol != Current.Symbol ||
       Previous.Subtractor != Current.Subtractor ||
+      Previous.Type != Current.Type ||
       Previous.Addend + Previous.Size != Current.Addend ||
       Previous.FixupKind != AArch64::fixup_aarch64_pcrel_adrp_imm21)
     return false;
@@ -142,7 +143,9 @@ bool AArch64GoObjObjectWriter::mergeRelocations(
     Type = GoObj::R_ARM64_PCREL_LDST32;
     break;
   case AArch64::fixup_aarch64_ldst_imm12_scale8:
-    Type = GoObj::R_ARM64_PCREL_LDST64;
+    Type = Previous.Type == GoObj::R_ARM64_GOTPCREL
+               ? GoObj::R_ARM64_GOTPCREL
+               : GoObj::R_ARM64_PCREL_LDST64;
     break;
   default:
     return false;
