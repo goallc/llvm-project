@@ -30,6 +30,7 @@
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/Pass.h"
+#include "llvm/Target/TargetMachine.h"
 
 #include <iterator>
 
@@ -106,6 +107,23 @@ static void emitABIInternalState(MachineBasicBlock &MBB,
   BuildMI(MBB, Pos, DL, TII.get(X86::XORPSrr), X86::XMM15)
       .addReg(X86::XMM15, RegState::Undef)
       .addReg(X86::XMM15, RegState::Undef);
+  if (MBB.getParent()->getTarget().isPositionIndependent()) {
+    // Shared objects cannot use local-exec TLS. Match Go's initial-exec
+    // sequence, using the reserved g register to hold the TLS offset.
+    BuildMI(MBB, Pos, DL, TII.get(X86::MOV64rm), X86::R14)
+        .addReg(X86::RIP)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addExternalSymbol("runtime.tlsg", X86II::MO_GOTTPOFF)
+        .addReg(X86::NoRegister);
+    BuildMI(MBB, Pos, DL, TII.get(X86::MOV64rm), X86::R14)
+        .addReg(X86::R14, RegState::Kill)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(0)
+        .addReg(X86::FS);
+    return;
+  }
   BuildMI(MBB, Pos, DL, TII.get(X86::MOV64rm), X86::R14)
       .addReg(X86::NoRegister)
       .addImm(1)

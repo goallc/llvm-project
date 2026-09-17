@@ -118,6 +118,7 @@ jobs:
             "$build/test/CodeGen/Generic/goobj-stack-check-policy.ll"
             "$build/test/CodeGen/X86/branchfolding-inlineasmbr-successor.mir"
             "$build/test/CodeGen/X86/go-callconv.ll"
+            "$build/test/CodeGen/X86/go-abi-transition-pic.ll"
             "$build/test/CodeGen/X86/go-stack-byval.ll"
             "$build/test/CodeGen/X86/go-gc-write-barrier.ll"
             "$build/test/CodeGen/X86/go-memset-inline.ll"

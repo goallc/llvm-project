@@ -1567,7 +1567,10 @@ uint32_t addStackObjectCarrierSymbol(
 
 int64_t getGoObjRelocAddend(const GoObjRelocationEntry &Reloc) {
   int64_t Addend = Reloc.Addend;
-  if (Reloc.IsPCRel)
+  // Most Go PC-relative relocations use the end of the field as their PC.
+  // R_TLS_IE is passed directly to the external ELF linker, so it retains
+  // the field-relative addend (for example, -4 for x86-64 GOTTPOFF).
+  if (Reloc.IsPCRel && Reloc.Type != GoObj::R_TLS_IE)
     Addend += Reloc.Size;
   return Addend;
 }
@@ -3383,16 +3386,18 @@ uint64_t GoObjObjectWriter::writeObject() {
         RelocType |= GoObj::R_WEAK;
     }
 
-    // Native x86 Go objects intentionally leave the internal-linking TLS
-    // relocation target empty. The linker resolves R_TLS_LE against its
+    // Native x86 Go objects intentionally leave the TLS relocation target
+    // empty. The linker resolves R_TLS_LE and R_TLS_IE against its
     // synthetic runtime.tlsg symbol and supplies that symbol itself when it
     // translates the relocation for external ELF linking.
     const Triple::ArchType Arch = Asm->getContext().getTargetTriple().getArch();
-    const bool IsX86TLSLE = (Arch == Triple::x86 || Arch == Triple::x86_64) &&
-                            (RelocType & ~GoObj::R_WEAK) == GoObj::R_TLS_LE;
+    const unsigned TLSRelocType = RelocType & ~GoObj::R_WEAK;
+    const bool IsX86TLS = (Arch == Triple::x86 || Arch == Triple::x86_64) &&
+                         (TLSRelocType == GoObj::R_TLS_LE ||
+                          TLSRelocType == GoObj::R_TLS_IE);
     GoObjSymRef TargetSymRef =
-        IsX86TLSLE ? GoObjSymRef{}
-                   : GetTargetSymRef(Reloc.Symbol, Reloc.Type, Addend);
+        IsX86TLS ? GoObjSymRef{}
+                 : GetTargetSymRef(Reloc.Symbol, Reloc.Type, Addend);
 
     Source.Relocations.push_back(
         {static_cast<uint32_t>(LocalOffset), Reloc.Size, RelocType, Addend,
