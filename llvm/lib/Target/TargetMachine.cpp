@@ -224,7 +224,14 @@ bool TargetMachine::shouldAssumeDSOLocal(const GlobalValue *GV) const {
     return true;
   }
 
-  if (TT.isOSBinFormatGOFF() || TT.isOSBinFormatGoObj())
+  // PIC Go code (including PIE and c-shared) still binds symbols locally
+  // unless it is built for dynamic Go linking, as in plugin/shared mode.
+  // Query the module so this also covers globals introduced by later passes.
+  if (TT.isOSBinFormatGoObj())
+    return RM == Reloc::Static ||
+           !GV->getParent()->getNamedMetadata("goobj.dynlink");
+
+  if (TT.isOSBinFormatGOFF())
     return true;
 
   if (TT.isOSBinFormatMachO()) {
