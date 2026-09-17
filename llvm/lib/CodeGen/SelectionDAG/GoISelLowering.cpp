@@ -50,7 +50,10 @@ goabi::CallLayout
 goabi::computeFormalArgLayout(const Function &F, ArrayRef<ISD::InputArg> Ins,
                               ArrayRef<CCValAssign> ArgLocs,
                               uint64_t StackArgsSize, uint64_t StackResultsEnd,
-                              const DataLayout &DL, const ABIConfig &Config) {
+                              const DataLayout &DL, ABIConfig Config) {
+  // The Go ABI mode is explicit even on targets without soft-float lowering.
+  if (Attribute A = F.getFnAttribute("use-soft-float"); A.isValid())
+    Config.SoftFloat = A.getValueAsBool();
   SmallVector<ResultCarrier, 4> MemoryResults;
   for (const Argument &Arg : F.args()) {
     if (!Arg.hasGoRetAttr())
@@ -88,7 +91,12 @@ goabi::computeFormalArgLayout(const Function &F, ArrayRef<ISD::InputArg> Ins,
 goabi::CallLayout
 goabi::computeCallLayout(TargetLowering::CallLoweringInfo &CLI,
                          ArrayRef<CCValAssign> ArgLocs, uint64_t StackArgsSize,
-                         uint64_t StackResultsEnd, const ABIConfig &Config) {
+                         uint64_t StackResultsEnd, ABIConfig Config) {
+  // Query the call's ABI, including indirect calls, rather than inferring it
+  // from the caller's instruction-selection features.
+  if (CLI.CB)
+    if (Attribute A = CLI.CB->getFnAttr("use-soft-float"); A.isValid())
+      Config.SoftFloat = A.getValueAsBool();
   const TargetLowering::ArgListTy &Args = CLI.getArgs();
   SmallVector<ResultCarrier, 4> MemoryResults;
   for (const TargetLowering::ArgListEntry &Arg : Args)

@@ -107,6 +107,7 @@ jobs:
             "$build/test/CodeGen/Generic/go-abi0-frame.ll"
             "$build/test/CodeGen/Generic/go-argument-homes.ll"
             "$build/test/CodeGen/Generic/go-goret.ll"
+            "$build/test/CodeGen/Generic/go-softfloat-abi.ll"
             "$build/test/CodeGen/Generic/goobj-data-kinds.ll"
             "$build/test/CodeGen/Generic/goobj-entry-stackmap-cfg.ll"
             "$build/test/CodeGen/Generic/goobj-entry-stackmap-sentinel.ll"
@@ -122,6 +123,7 @@ jobs:
             "$build/test/CodeGen/X86/goobj-content-addressable-cycle.ll"
             "$build/test/CodeGen/X86/goobj-filetype.ll"
             "$build/test/CodeGen/X86/goobj-import-references.ll"
+            "$build/test/CodeGen/X86/soft-float-memops.ll"
             "$build/test/MC/GoObj"
             "$build/test/Transforms/PreISelIntrinsicLowering/X86/goobj-memory.ll"
           )

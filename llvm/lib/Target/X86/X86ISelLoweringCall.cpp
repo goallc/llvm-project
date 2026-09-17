@@ -596,7 +596,8 @@ Align X86TargetLowering::getByValTypeAlignment(Type *Ty,
 EVT X86TargetLowering::getOptimalMemOpType(
     LLVMContext &Context, const MemOp &Op,
     const AttributeList &FuncAttributes) const {
-  if (!FuncAttributes.hasFnAttr(Attribute::NoImplicitFloat)) {
+  if (!Subtarget.useSoftFloat() &&
+      !FuncAttributes.hasFnAttr(Attribute::NoImplicitFloat)) {
     if (Op.size() >= 16 &&
         (!Subtarget.isUnalignedMem16Slow() || Op.isAligned(Align(16)))) {
       // FIXME: Check if unaligned 64-byte accesses are slow.
