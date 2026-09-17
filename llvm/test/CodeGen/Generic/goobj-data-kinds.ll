@@ -15,6 +15,8 @@
 @data = global ptr @noptrdata, section ".data", align 8
 @bss = global ptr null, section ".bss", align 8
 @noptrbss = global i64 0, section ".noptrbss", align 8
+@fuzz_edges = global [7 x i8] zeroinitializer, section ".noptrbss.libfuzzer_8bit_counter", align 1
+@fuzz_edge = global i8 0, section ".noptrbss.libfuzzer_8bit_counter.module", align 1
 
 @fips_rodata = constant i64 3, section ".rodata.fips", align 8
 @fips_noptrdata = global i64 4, section ".noptrdata.fips", align 8
@@ -41,6 +43,8 @@ entry:
 ; CHECK-DAG: symdef {{[0-9]+}}: data abi=0 type=7 size=8 align=8
 ; CHECK-DAG: symdef {{[0-9]+}}: bss abi=0 type=9 size=8 align=8
 ; CHECK-DAG: symdef {{[0-9]+}}: noptrbss abi=0 type=10 size=8 align=8
+; CHECK-DAG: symdef {{[0-9]+}}: fuzz_edges abi=0 type=22 size=7 align=1
+; CHECK-DAG: symdef {{[0-9]+}}: fuzz_edge abi=0 type=22 size=1 align=1
 ; CHECK-DAG: symdef {{[0-9]+}}: fips_text abi=1 type=2
 ; CHECK-DAG: symdef {{[0-9]+}}: fips_rodata abi=0 type=4 size=8 align=8
 ; CHECK-DAG: symdef {{[0-9]+}}: fips_noptrdata abi=0 type=6 size=8 align=8

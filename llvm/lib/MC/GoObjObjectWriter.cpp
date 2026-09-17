@@ -205,6 +205,9 @@ getGoObjExplicitSectionSymbolType(const MCSection *Section) {
   if (!Section)
     return std::nullopt;
   StringRef Name = Section->getName();
+  if (Name == ".noptrbss.libfuzzer_8bit_counter" ||
+      Name.starts_with(".noptrbss.libfuzzer_8bit_counter."))
+    return GoObj::SLIBFUZZER_8BIT_COUNTER;
   if (Name == ".noptrbss.coverage_counter" ||
       Name.starts_with(".noptrbss.coverage_counter."))
     return GoObj::SCOVERAGE_COUNTER;
