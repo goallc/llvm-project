@@ -381,14 +381,28 @@ bool PreISelIntrinsicLowering::expandMemIntrinsicUses(
       auto *Memset = cast<MemSetInst>(Inst);
       Function *ParentFunc = Memset->getFunction();
       const TargetTransformInfo &TTI = LookupTTI(*ParentFunc);
+      // SelectionDAG can use a two-argument bzero implementation for zero
+      // fills even when the target has no general memset implementation.
+      auto *Byte = dyn_cast<ConstantInt>(Memset->getValue());
+      bool CanEmit =
+          canEmitLibcall(ModuleLibcalls, TM, ParentFunc, RTLIB::MEMSET) ||
+          (Byte && Byte->isZero() &&
+           canEmitLibcall(ModuleLibcalls, TM, ParentFunc, RTLIB::BZERO));
       if (shouldExpandMemIntrinsicWithSize(Memset->getLength(), TTI)) {
-        if (UseMemIntrinsicLibFunc &&
-            canEmitLibcall(ModuleLibcalls, TM, ParentFunc, RTLIB::MEMSET))
+        if (UseMemIntrinsicLibFunc && CanEmit)
           break;
 
         expandMemSetAsLoop(Memset, TTI);
         Changed = true;
         Memset->eraseFromParent();
+      } else if (!CanEmit) {
+        // A small size is only a heuristic: instruction selection may still
+        // choose a libcall, especially at O0. Preserve its inline expansion
+        // choices while enforcing the absence of a runtime implementation.
+        Memset->setCalledFunction(Intrinsic::getOrInsertDeclaration(
+            F.getParent(), Intrinsic::memset_inline,
+            {Memset->getRawDest()->getType(), Memset->getLength()->getType()}));
+        Changed = true;
       }
 
       break;

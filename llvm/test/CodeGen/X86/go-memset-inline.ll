@@ -17,9 +17,8 @@ define goabi0 void @"dynamic_memset<ABI0>"(
     ptr byval(ptr) align 8 %dst.home,
     ptr byval(i64) align 8 %size.home) {
 ; CHECK-LABEL: "dynamic_memset<ABI0>":
-; CHECK: movb $0,
-; CHECK: incq
-; CHECK: cmpq
+; CHECK: rep
+; CHECK-SAME: stos
 ; CHECK-NOT: callq memset
 ; CHECK: retq
   %dst = load ptr, ptr %dst.home, align 8

@@ -64,12 +64,20 @@ TEST(RuntimeLibcallsTest, GoObjHasNoHostedRuntimeLibcalls) {
   for (StringRef TripleName : {"x86_64-unknown-linux-goobj",
                                "aarch64-unknown-linux-goobj"}) {
     RTLIB::RuntimeLibcallsInfo Info{Triple(TripleName)};
-    EXPECT_EQ(Info.getNumAvailableLibcallImpls(), 0u) << TripleName;
+    EXPECT_EQ(Info.getNumAvailableLibcallImpls(), 3u) << TripleName;
+    for (RTLIB::LibcallImpl Impl :
+         {RTLIB::impl_go_memcpy, RTLIB::impl_go_memmove, RTLIB::impl_go_memclr}) {
+      EXPECT_TRUE(Info.isAvailable(Impl)) << TripleName;
+      EXPECT_EQ(Info.getLibcallImplCallingConv(Impl), CallingConv::GoABIInternal);
+    }
+    EXPECT_FALSE(Info.isAvailable(RTLIB::impl_memcpy));
+    EXPECT_FALSE(Info.isAvailable(RTLIB::impl_memmove));
+    EXPECT_FALSE(Info.isAvailable(RTLIB::impl_memset));
 
     RTLIB::RuntimeLibcallsInfo VectorInfo{
         Triple(TripleName), ExceptionHandling::None, FloatABI::Default,
         EABI::Default, "", VectorLibrary::SLEEFGNUABI};
-    EXPECT_EQ(VectorInfo.getNumAvailableLibcallImpls(), 0u) << TripleName;
+    EXPECT_EQ(VectorInfo.getNumAvailableLibcallImpls(), 3u) << TripleName;
   }
 
   EXPECT_GT(RTLIB::RuntimeLibcallsInfo(Triple("x86_64-unknown-linux-gnu"))
