@@ -1274,6 +1274,12 @@ def free : RuntimeLibcallImpl<FREE>;
 
 } // End let IsDefault = true
 
+// Go's raw memory helpers are GC leaves and use ABIInternal. memmove also
+// implements non-overlapping copies; Go has no general nonzero memset helper.
+def go_memcpy : RuntimeLibcallImpl<MEMCPY, "runtime.memmove">;
+def go_memmove : RuntimeLibcallImpl<MEMMOVE, "runtime.memmove">;
+def go_memclr : RuntimeLibcallImpl<BZERO, "runtime.memclrNoHeapPointers">;
+
 // Stack Protector Fail
 def __stack_chk_fail : RuntimeLibcallImpl<STACKPROTECTOR_CHECK_FAIL>;
 

@@ -1444,6 +1444,11 @@ bool FastISel::selectIntrinsicCall(const IntrinsicInst *II) {
     return selectXRayTypedEvent(II);
   }
 
+  // Target FastISel memory paths use hardcoded libc names and C calling
+  // conventions. Let SelectionDAG choose the Go ABI runtime implementation.
+  if (isa<MemIntrinsic>(II) &&
+      FuncInfo.MF->getTarget().getTargetTriple().isOSBinFormatGoObj())
+    return false;
   return fastLowerIntrinsicCall(II);
 }
 
