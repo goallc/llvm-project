@@ -28,6 +28,7 @@
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/FastISel.h"
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
@@ -3356,10 +3357,10 @@ bool AArch64FastISel::foldXALUIntrinsic(AArch64CC::CondCode &CC,
     return false;
 
   const auto *EV = cast<ExtractValueInst>(Cond);
-  if (!isa<IntrinsicInst>(EV->getAggregateOperand()))
+  const auto *II = dyn_cast<WithOverflowInst>(EV->getAggregateOperand());
+  if (!II)
     return false;
 
-  const auto *II = cast<IntrinsicInst>(EV->getAggregateOperand());
   MVT RetVT;
   const Function *Callee = II->getCalledFunction();
   Type *RetTy =
@@ -3847,6 +3848,10 @@ bool AArch64FastISel::fastLowerIntrinsicCall(const IntrinsicInst *II) {
 bool AArch64FastISel::selectRet(const Instruction *I) {
   const ReturnInst *Ret = cast<ReturnInst>(I);
   const Function &F = *I->getParent()->getParent();
+
+  // Match the Go call fallback: AAPCS does not describe Go result locations.
+  if (goabi::isGoCallingConv(F.getCallingConv()))
+    return false;
 
   if (!FuncInfo.CanLowerReturn)
     return false;
