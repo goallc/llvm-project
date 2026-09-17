@@ -127,6 +127,7 @@ jobs:
             "$build/test/CodeGen/X86/goobj-content-addressable-cycle.ll"
             "$build/test/CodeGen/X86/goobj-filetype.ll"
             "$build/test/CodeGen/X86/goobj-import-references.ll"
+            "$build/test/CodeGen/X86/goobj-marker-relocations.ll"
             "$build/test/CodeGen/X86/soft-float-memops.ll"
             "$build/test/MC/GoObj"
             "$build/test/Transforms/PreISelIntrinsicLowering/X86/goobj-memory.ll"

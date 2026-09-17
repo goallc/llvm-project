@@ -1187,6 +1187,7 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
           !Type || Type->getValue().ugt(UINT16_MAX) || !Addend)
         report_fatal_error("invalid !goobj.marker_relocs entry");
       switch (Type->getZExtValue()) {
+      case GoObj::R_USEFIELD:
       case GoObj::R_USEIFACE:
       case GoObj::R_USEIFACEMETHOD:
       case GoObj::R_USENAMEDMETHOD:
