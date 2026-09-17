@@ -188,7 +188,11 @@ uint8_t getGoObjSymbolType(const MCSection *Section) {
     return GoObj::SNOPTRBSS;
   if (Section->isBssSection())
     return GoObj::SBSS;
-  if (Name.starts_with(".rodata") || Name.starts_with("__TEXT,__const"))
+  // ELF uses .data.rel.ro for constants that need dynamic relocations.
+  // Go's linker owns the relocation and RELRO layout; these are still
+  // read-only Go symbols, not mutable globals requiring a GC type.
+  if (Name.starts_with(".rodata") || Name == ".data.rel.ro" ||
+      Name.starts_with(".data.rel.ro.") || Name.starts_with("__TEXT,__const"))
     return GoObj::SRODATA;
   if (Name.starts_with(".debug_") || Name.starts_with("__DWARF,"))
     return GoObj::SDWARFCONST;
