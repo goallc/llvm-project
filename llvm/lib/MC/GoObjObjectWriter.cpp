@@ -2029,15 +2029,12 @@ uint64_t GoObjObjectWriter::writeObject() {
           }
         }
         if (const MCSymbol *ExactEnd =
-                Asm->getContext().getGoObjContentAddressableEnd(
-                    SectionSymbols[I].Symbol)) {
+                Asm->getContext().getGoObjFunctionEnd(SectionSymbols[I].Symbol)) {
           if (!ExactEnd->isInSection() || &ExactEnd->getSection() != &Section)
-            report_fatal_error(
-                "GoObj content-addressable function end is invalid");
+            report_fatal_error("GoObj function end is invalid");
           uint64_t ExactEndOffset = Asm->getSymbolOffset(*ExactEnd);
           if (ExactEndOffset < Begin || ExactEndOffset > End)
-            report_fatal_error("GoObj content-addressable function size "
-                               "overlaps another symbol");
+            report_fatal_error("GoObj function size overlaps another symbol");
           End = ExactEndOffset;
         } else if (std::optional<uint64_t> ExactSize =
                        Asm->getContext().getGoObjSymbolSize(

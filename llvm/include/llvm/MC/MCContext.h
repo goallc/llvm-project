@@ -332,8 +332,8 @@ private:
   /// Go text symbols whose content hash must be computed after code emission.
   DenseSet<const MCSymbol *> GoObjContentAddressableSymbols;
 
-  /// End labels for content-addressable Go text symbols.
-  DenseMap<const MCSymbol *, const MCSymbol *> GoObjContentAddressableEnds;
+  /// End labels for Go text symbols, excluding inter-function padding.
+  DenseMap<const MCSymbol *, const MCSymbol *> GoObjFunctionEnds;
 
   /// Go object data-relocation type overrides keyed by MC symbol. LLVM IR
   /// constants describe an address but not Go's weak-address variants.
@@ -908,13 +908,13 @@ public:
     return GoObjContentAddressableSymbols.contains(Sym);
   }
 
-  void setGoObjContentAddressableEnd(const MCSymbol *Sym, const MCSymbol *End) {
-    GoObjContentAddressableEnds[Sym] = End;
+  void setGoObjFunctionEnd(const MCSymbol *Sym, const MCSymbol *End) {
+    GoObjFunctionEnds[Sym] = End;
   }
 
-  const MCSymbol *getGoObjContentAddressableEnd(const MCSymbol *Sym) const {
-    auto It = GoObjContentAddressableEnds.find(Sym);
-    if (It == GoObjContentAddressableEnds.end())
+  const MCSymbol *getGoObjFunctionEnd(const MCSymbol *Sym) const {
+    auto It = GoObjFunctionEnds.find(Sym);
+    if (It == GoObjFunctionEnds.end())
       return nullptr;
     return It->second;
   }

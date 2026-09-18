@@ -112,6 +112,7 @@ jobs:
             "$build/test/CodeGen/Generic/go-maymorestack.ll"
             "$build/test/CodeGen/Generic/go-softfloat-abi.ll"
             "$build/test/CodeGen/Generic/goobj-data-kinds.ll"
+            "$build/test/CodeGen/Generic/goobj-function-boundaries.ll"
             "$build/test/CodeGen/Generic/goobj-pic-globals.ll"
             "$build/test/CodeGen/Generic/goobj-entry-stackmap-cfg.ll"
             "$build/test/CodeGen/Generic/goobj-entry-stackmap-sentinel.ll"
