@@ -437,8 +437,8 @@ static void emitGoStackCheck(MachineFunction &MF,
   MachineBasicBlock &EntryMBB = getGoStackCheckEntryMBB(MF, PrologueMBB);
 
   // LLVM's machine block frequency analysis requires the function entry not
-  // to be a loop header. Keep a zero-instruction preheader so morestack can
-  // retry the single stack-check block without adding a hot-path instruction.
+  // to be a loop header. Keep a preheader for the optional maymorestack hook
+  // so morestack retries only the stack check. Without a hook it stays empty.
   MachineBasicBlock *StartMBB = MF.CreateMachineBasicBlock();
   MachineBasicBlock *CheckMBB = MF.CreateMachineBasicBlock();
   MachineBasicBlock *CompareMBB = CheckMBB;
@@ -479,6 +479,28 @@ static void emitGoStackCheck(MachineFunction &MF,
     MF.push_front(CompareMBB);
   MF.push_front(CheckMBB);
   MF.push_front(StartMBB);
+
+  if (Attribute HookAttr =
+          MF.getFunction().getFnAttribute(goabi::MayMoreStackAttr);
+      HookAttr.isValid()) {
+    StringRef Hook = HookAttr.getValueAsString();
+    if (Hook.empty())
+      report_fatal_error("Go maymorestack hook has an empty symbol name");
+    // Like native Go, preserve incoming register arguments and the closure
+    // context before calling the hook with the caller's ABI. Keep this in the
+    // preheader so a morestack retry does not call the hook again.
+    emitGoRegSpills(MF, *StartMBB, Homes, /*Reload=*/false);
+    bool HasClosureContext = hasGoClosureContext(MF.getFunction());
+    if (HasClosureContext) {
+      StartMBB->addLiveIn(X86::RDX);
+      BuildMI(StartMBB, DL, TII.get(X86::PUSH64r)).addReg(X86::RDX);
+    }
+    BuildMI(StartMBB, DL, TII.get(X86::CALL64pcrel32))
+        .addExternalSymbol(MF.createExternalSymbolName(Hook));
+    if (HasClosureContext)
+      BuildMI(StartMBB, DL, TII.get(X86::POP64r), X86::RDX);
+    emitGoRegSpills(MF, *StartMBB, Homes, /*Reload=*/true);
+  }
 
   bool IsSystemStack = MF.getFunction().hasFnAttribute(goabi::SystemStackAttr);
 

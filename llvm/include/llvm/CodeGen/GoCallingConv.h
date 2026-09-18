@@ -44,6 +44,9 @@ inline constexpr StringLiteral NoSplitAttr = "go-nosplit";
 // A //go:systemstack function checks g.stackguard1 and traps through
 // runtime.morestackc if it is entered on an ordinary goroutine stack.
 inline constexpr StringLiteral SystemStackAttr = "go-systemstack";
+// GoObj storage name of the same-ABI testing hook called before the first
+// stack check, outside the morestack retry loop.
+inline constexpr StringLiteral MayMoreStackAttr = "go-maymorestack";
 // Every GoObj Go function carries its entry argument pointer map in a
 // zero-byte STACKMAP. It is function metadata, not a stack-growth callsite.
 inline constexpr uint64_t EntryArgsStackMapID = GoObj::EntryArgsStackMapID;

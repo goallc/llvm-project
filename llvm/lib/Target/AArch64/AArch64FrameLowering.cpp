@@ -1415,8 +1415,8 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
   MachineBasicBlock &EntryMBB = getAArch64GoStackCheckEntryMBB(MF, PrologueMBB);
 
   // LLVM's machine block frequency analysis requires the function entry not
-  // to be a loop header. Keep a zero-instruction preheader so morestack can
-  // retry the single stack-check block without adding a hot-path instruction.
+  // to be a loop header. Keep a preheader for the optional maymorestack hook
+  // so morestack retries only the stack check. Without a hook it stays empty.
   MachineBasicBlock *StartMBB = MF.CreateMachineBasicBlock();
   MachineBasicBlock *CheckMBB = MF.CreateMachineBasicBlock();
   MachineBasicBlock *CompareMBB = CheckMBB;
@@ -1461,6 +1461,54 @@ static void emitAArch64GoStackCheck(MachineFunction &MF,
     MF.push_front(CompareMBB);
   MF.push_front(CheckMBB);
   MF.push_front(StartMBB);
+
+  if (Attribute HookAttr =
+          MF.getFunction().getFnAttribute(goabi::MayMoreStackAttr);
+      HookAttr.isValid()) {
+    StringRef Hook = HookAttr.getValueAsString();
+    if (Hook.empty())
+      report_fatal_error("Go maymorestack hook has an empty symbol name");
+    // Match the native pre-stack-check hook frame. Incoming arguments use
+    // their existing homes; LR, FP and the closure context need temporary
+    // storage because the hook runs before the ordinary prologue.
+    emitAArch64GoRegSpills(MF, *StartMBB, AFI->getGoArgHomes(),
+                           /*Reload=*/false);
+    StartMBB->addLiveIn(AArch64::FP);
+    StartMBB->addLiveIn(AArch64::X26);
+    BuildMI(StartMBB, DL, TII.get(AArch64::STRXpre), AArch64::SP)
+        .addReg(AArch64::LR)
+        .addReg(AArch64::SP)
+        .addImm(-32)
+        .setMIFlag(MachineInstr::FrameSetup);
+    BuildMI(StartMBB, DL, TII.get(AArch64::STURXi))
+        .addReg(AArch64::FP)
+        .addReg(AArch64::SP)
+        .addImm(-8);
+    BuildMI(StartMBB, DL, TII.get(AArch64::SUBXri), AArch64::FP)
+        .addReg(AArch64::SP)
+        .addImm(8)
+        .addImm(0);
+    BuildMI(StartMBB, DL, TII.get(AArch64::STRXui))
+        .addReg(AArch64::X26)
+        .addReg(AArch64::SP)
+        .addImm(1);
+    BuildMI(StartMBB, DL, TII.get(AArch64::BL))
+        .addExternalSymbol(MF.createExternalSymbolName(Hook));
+    BuildMI(StartMBB, DL, TII.get(AArch64::LDRXui), AArch64::X26)
+        .addReg(AArch64::SP)
+        .addImm(1);
+    BuildMI(StartMBB, DL, TII.get(AArch64::LDURXi), AArch64::FP)
+        .addReg(AArch64::SP)
+        .addImm(-8);
+    BuildMI(StartMBB, DL, TII.get(AArch64::LDRXpost))
+        .addDef(AArch64::SP)
+        .addDef(AArch64::LR)
+        .addReg(AArch64::SP)
+        .addImm(32)
+        .setMIFlag(MachineInstr::FrameDestroy);
+    emitAArch64GoRegSpills(MF, *StartMBB, AFI->getGoArgHomes(),
+                           /*Reload=*/true);
+  }
 
   bool IsSystemStack = MF.getFunction().hasFnAttribute(goabi::SystemStackAttr);
 
