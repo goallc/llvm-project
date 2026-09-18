@@ -101,22 +101,19 @@ static bool isGoABI0Call(const MachineInstr &MI, const MachineFunction &MF) {
   });
 }
 
-static void emitABIInternalState(MachineBasicBlock &MBB,
-                                 MachineBasicBlock::iterator Pos,
-                                 const DebugLoc &DL, const X86InstrInfo &TII) {
-  BuildMI(MBB, Pos, DL, TII.get(X86::XORPSrr), X86::XMM15)
-      .addReg(X86::XMM15, RegState::Undef)
-      .addReg(X86::XMM15, RegState::Undef);
+void X86InstrInfo::emitGoLoadG(MachineBasicBlock &MBB,
+                              MachineBasicBlock::iterator Pos,
+                              const DebugLoc &DL) const {
   if (MBB.getParent()->getTarget().isPositionIndependent()) {
     // Shared objects cannot use local-exec TLS. Match Go's initial-exec
     // sequence, using the reserved g register to hold the TLS offset.
-    BuildMI(MBB, Pos, DL, TII.get(X86::MOV64rm), X86::R14)
+    BuildMI(MBB, Pos, DL, get(X86::MOV64rm), X86::R14)
         .addReg(X86::RIP)
         .addImm(1)
         .addReg(X86::NoRegister)
         .addExternalSymbol("runtime.tlsg", X86II::MO_GOTTPOFF)
         .addReg(X86::NoRegister);
-    BuildMI(MBB, Pos, DL, TII.get(X86::MOV64rm), X86::R14)
+    BuildMI(MBB, Pos, DL, get(X86::MOV64rm), X86::R14)
         .addReg(X86::R14, RegState::Kill)
         .addImm(1)
         .addReg(X86::NoRegister)
@@ -124,12 +121,21 @@ static void emitABIInternalState(MachineBasicBlock &MBB,
         .addReg(X86::FS);
     return;
   }
-  BuildMI(MBB, Pos, DL, TII.get(X86::MOV64rm), X86::R14)
+  BuildMI(MBB, Pos, DL, get(X86::MOV64rm), X86::R14)
       .addReg(X86::NoRegister)
       .addImm(1)
       .addReg(X86::NoRegister)
       .addExternalSymbol("runtime.tlsg", X86II::MO_TPOFF)
       .addReg(X86::FS);
+}
+
+static void emitABIInternalState(MachineBasicBlock &MBB,
+                                 MachineBasicBlock::iterator Pos,
+                                 const DebugLoc &DL, const X86InstrInfo &TII) {
+  BuildMI(MBB, Pos, DL, TII.get(X86::XORPSrr), X86::XMM15)
+      .addReg(X86::XMM15, RegState::Undef)
+      .addReg(X86::XMM15, RegState::Undef);
+  TII.emitGoLoadG(MBB, Pos, DL);
 }
 
 static bool repairGoABIState(MachineFunction &MF) {

@@ -243,6 +243,10 @@ class X86InstrInfo final : public X86GenInstrInfo {
 public:
   explicit X86InstrInfo(const X86Subtarget &STI);
 
+  /// Load Go's g from TLS when entering from ABI0, which does not preserve R14.
+  void emitGoLoadG(MachineBasicBlock &MBB, MachineBasicBlock::iterator Pos,
+                   const DebugLoc &DL) const;
+
   /// Given a machine instruction descriptor, returns the register
   /// class constraint for OpNum, or NULL. Returned register class
   /// may be different from the definition in the TD file, e.g.
