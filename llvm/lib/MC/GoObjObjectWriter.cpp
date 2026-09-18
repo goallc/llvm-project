@@ -1858,11 +1858,23 @@ uint64_t GoObjObjectWriter::writeObject() {
   };
   DenseSet<const MCSymbol *> SeenPrivateRelocationTargets;
   SmallVector<const MCSymbol *, 8> PrivateRelocationTargets;
-  for (const GoObjRelocationEntry &Reloc : Relocations) {
-    if (Reloc.Symbol && Reloc.Symbol->isTemporary() &&
-        Reloc.Symbol->isInSection() &&
-        SeenPrivateRelocationTargets.insert(Reloc.Symbol).second)
-      PrivateRelocationTargets.push_back(Reloc.Symbol);
+  auto AddPrivateTarget = [&](const MCSymbol *Target) {
+    if (Target && Target->isTemporary() && Target->isInSection() &&
+        SeenPrivateRelocationTargets.insert(Target).second)
+      PrivateRelocationTargets.push_back(Target);
+  };
+  for (const GoObjRelocationEntry &Reloc : Relocations)
+    AddPrivateTarget(Reloc.Symbol);
+  // Go linker edges have no MC fixup, but their private targets need the same
+  // independent carriers as ordinary relocation targets.
+  for (const MCSymbol &Symbol : Asm->symbols()) {
+    if (const auto *Markers = Asm->getContext().getGoObjMarkerRelocs(&Symbol))
+      for (const auto &Marker : *Markers)
+        AddPrivateTarget(Marker.Target);
+    if (const auto *Targets = Asm->getContext().getGoObjKeepTargets(&Symbol))
+      for (const MCSymbol *Target : *Targets)
+        AddPrivateTarget(Target);
+    AddPrivateTarget(Asm->getContext().getGoObjGotypeTarget(&Symbol));
   }
 
   for (const MCSymbol &Symbol : Asm->symbols()) {

@@ -135,6 +135,7 @@ jobs:
             "$build/test/CodeGen/X86/retpoline-external.ll"
             "$build/test/CodeGen/X86/retpoline-regparm.ll"
             "$build/test/CodeGen/X86/goobj-marker-relocations.ll"
+            "$build/test/CodeGen/Generic/goobj-anonymous-data.ll"
             "$build/test/CodeGen/X86/goobj-private-table-boundaries.ll"
             "$build/test/CodeGen/X86/goobj-weak-calls.ll"
             "$build/test/CodeGen/X86/goobj-weak-calls-invalid.ll"
