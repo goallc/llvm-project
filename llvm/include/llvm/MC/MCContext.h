@@ -343,6 +343,9 @@ private:
   /// Go object data relocations whose inferred relocation kind is weak.
   DenseMap<const MCSymbol *, std::vector<uint32_t>> GoObjWeakRelocs;
 
+  /// Direct call edges which do not make their target reachable in Go's linker.
+  DenseSet<std::pair<const MCSymbol *, const MCSymbol *>> GoObjWeakCalls;
+
   /// Go object zero-width R_KEEP targets keyed by their source symbol.
   DenseMap<const MCSymbol *, std::vector<const MCSymbol *>> GoObjKeepTargets;
 
@@ -931,6 +934,14 @@ public:
 
   void setGoObjWeakRelocs(const MCSymbol *Sym, std::vector<uint32_t> Offsets) {
     GoObjWeakRelocs[Sym] = std::move(Offsets);
+  }
+
+  void addGoObjWeakCall(const MCSymbol *Source, const MCSymbol *Target) {
+    GoObjWeakCalls.insert({Source, Target});
+  }
+
+  bool isGoObjWeakCall(const MCSymbol *Source, const MCSymbol *Target) const {
+    return GoObjWeakCalls.contains({Source, Target});
   }
 
   const std::vector<uint32_t> *getGoObjWeakRelocs(const MCSymbol *Sym) const {
