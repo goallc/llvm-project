@@ -781,7 +781,10 @@ bool AArch64RegisterInfo::requiresRegisterScavenging(
 
 bool AArch64RegisterInfo::requiresVirtualBaseRegisters(
     const MachineFunction &MF) const {
-  return true;
+  // LocalStackSlotAllocation materializes virtual frame bases at function
+  // entry. Go calls may move the stack, leaving such bases (including spills)
+  // stale. Keep frame indices until PEI resolves them against the current SP.
+  return !goabi::isGoCallingConv(MF.getFunction().getCallingConv());
 }
 
 bool

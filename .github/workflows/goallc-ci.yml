@@ -102,6 +102,8 @@ jobs:
             "$build/test/CodeGen/AArch64/fast-isel-statepoint-result.ll"
             "$build/test/CodeGen/AArch64/go-callconv.ll"
             "$build/test/CodeGen/AArch64/go-fast-isel-fallback.ll"
+            "$build/test/CodeGen/AArch64/go-fast-isel-frame-address.ll"
+            "$build/test/CodeGen/AArch64/go-frame-base.mir"
             "$build/test/CodeGen/AArch64/go-stack-byval.ll"
             "$build/test/CodeGen/AArch64/go-statepoint-stack-args.ll"
             "$build/test/CodeGen/AArch64/goobj-ir-config.ll"
