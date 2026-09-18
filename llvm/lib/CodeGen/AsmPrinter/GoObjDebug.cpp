@@ -578,7 +578,10 @@ public:
       return;
 
     const DebugLoc &DL = MI->getDebugLoc();
-    if (!DL || DL.getLine() == 0)
+    // A merged location can have no source line while still describing an
+    // exact inline scope. Record it so the previous instruction's inline
+    // frames do not leak into this instruction's traceback.
+    if (!DL)
       return;
 
     MCContext &Context = Asm.OutStreamer->getContext();
@@ -597,6 +600,14 @@ public:
     Location.Label = Label;
     Location.File = filePath(DL->getFile());
     Location.Line = DL.getLine();
+    // Go trace consumers require a source line. For an ambiguous merged
+    // location, use the containing function's declaration rather than a line
+    // inherited from an unrelated inline frame. Keep the original scope.
+    if (Location.Line == 0)
+      if (const DISubprogram *SP = DL->getScope()->getSubprogram()) {
+        Location.File = filePath(SP->getFile());
+        Location.Line = SP->getLine();
+      }
     Location.InlineFrames = getInlineFrames(DL.get());
     if (IsAnchor) {
       auto It = std::next(MI->getIterator());
