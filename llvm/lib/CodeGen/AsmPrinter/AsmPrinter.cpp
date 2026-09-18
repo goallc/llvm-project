@@ -3042,8 +3042,7 @@ void AsmPrinter::emitFunctionBody() {
   // function body.
   if (TT.getObjectFormat() != Triple::SPIRV &&
       (EmitFunctionSize || needFuncLabels(*MF, *this) || CurrentFnEnd ||
-       (TT.isOSBinFormatGoObj() && CurrentFnSym &&
-        OutContext.isGoObjSymbolContentAddressable(CurrentFnSym)))) {
+       (TT.isOSBinFormatGoObj() && CurrentFnSym))) {
     // Create a symbol for the end of function, if not already pre-created
     // (e.g. for .prefalign directive).
     if (!CurrentFnEnd)
@@ -3051,9 +3050,8 @@ void AsmPrinter::emitFunctionBody() {
     OutStreamer->emitLabel(CurrentFnEnd);
   }
 
-  if (TT.isOSBinFormatGoObj() && CurrentFnSym &&
-      OutContext.isGoObjSymbolContentAddressable(CurrentFnSym))
-    OutContext.setGoObjContentAddressableEnd(CurrentFnSym, CurrentFnEnd);
+  if (TT.isOSBinFormatGoObj() && CurrentFnSym)
+    OutContext.setGoObjFunctionEnd(CurrentFnSym, CurrentFnEnd);
 
   // If the target wants a .size directive for the size of the function, emit
   // it.
