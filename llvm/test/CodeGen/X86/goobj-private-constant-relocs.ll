@@ -8,6 +8,9 @@
 @before = internal constant i64 42, section ".rodata", align 8
 @.table = private unnamed_addr constant [2 x ptr] [ptr @target1, ptr @target2], section ".rodata", align 8
 @after = internal constant i64 84, section ".rodata", align 8
+@assembly_map = hidden constant i64 1, section ".rodata", !goobj.symbol.flags !0
+@shared_local = weak hidden constant i64 2, section ".rodata", !goobj.symbol.flags !0
+!0 = !{i32 2, i32 0}
 
 define goabiinternal ptr @private_table_address() {
 entry:
@@ -22,6 +25,10 @@ entry:
 
 ; CHECK-DAG: symdef [[POOL:[0-9]+]]: goallc.{{[0-9a-f]+}}.stmp_{{[0-9]+}} abi=65535 type=3 size=8 align={{[0-9]+}} flag=2 flag2=0
 ; CHECK-DAG: symdef [[TABLE:[0-9]+]]: goallc.{{[0-9a-f]+}}.stmp_{{[0-9]+}} abi=65535 type=3 size=16 align={{[0-9]+}} flag=2 flag2=0
+; CHECK-DAG: symdef {{[0-9]+}}: before abi=65535 type=3
+; CHECK-DAG: symdef {{[0-9]+}}: after abi=65535 type=3
+; CHECK-DAG: symdef {{[0-9]+}}: assembly_map abi=0 type=3 size=8 align={{[0-9]+}} flag=2
+; CHECK-DAG: symdef {{[0-9]+}}: shared_local abi=0 type=3 size=8 align={{[0-9]+}} flag=3
 ; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: off={{[0-9]+}} size={{[0-9]+}} type={{[0-9]+}} add=0 target=goallc.{{[0-9a-f]+}}.stmp_{{[0-9]+}} kind=unknown pkg=self sym=[[POOL]]
 ; CHECK-DAG: reloc [[TABLE]].{{[0-9]+}}: off=0 size=8 type=1 add=0 target=target1
 ; CHECK-DAG: reloc [[TABLE]].{{[0-9]+}}: off=8 size=8 type=1 add=0 target=target2

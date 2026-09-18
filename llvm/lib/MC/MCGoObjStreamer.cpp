@@ -10,6 +10,7 @@
 #include "llvm/MC/MCAssembler.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCSymbol.h"
+#include "llvm/MC/MCSymbolGoObj.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/SMLoc.h"
 
@@ -19,6 +20,10 @@ bool MCGoObjStreamer::emitSymbolAttribute(MCSymbol *Symbol,
                                           MCSymbolAttr Attribute) {
   switch (Attribute) {
   case MCSA_Global:
+  case MCSA_Weak:
+    static_cast<MCSymbolGoObj *>(Symbol)->setExternal(true);
+    getAssembler().registerSymbol(*Symbol);
+    return true;
   case MCSA_NoDeadStrip:
     getAssembler().registerSymbol(*Symbol);
     return true;
