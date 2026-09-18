@@ -1769,7 +1769,7 @@ uint64_t GoObjObjectWriter::writeObject() {
     bool IsABI0 = false;
   };
   auto GetSymbolIdentity = [&](const MCSymbol *Sym) {
-    if (!Sym)
+    if (!Sym || Asm->getContext().isGoObjSymbolAnonymous(Sym))
       return GoObjSymbolIdentity{};
     StringRef Name = Sym->getName();
     bool IsABI0 = Name.consume_back(ABI0Suffix);

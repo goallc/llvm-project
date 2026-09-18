@@ -1092,6 +1092,20 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
   }
 
   for (const GlobalObject &GO : M.global_objects()) {
+    const MDNode *MD = GO.getMetadata("goobj.symbol.anonymous");
+    if (!MD)
+      continue;
+    const auto *Marker =
+        MD->getNumOperands() == 1
+            ? mdconst::dyn_extract<ConstantInt>(MD->getOperand(0))
+            : nullptr;
+    if (!Marker || !Marker->getType()->isIntegerTy(1) || !Marker->isOne() ||
+        GO.isDeclaration() || !isa<GlobalVariable>(GO))
+      report_fatal_error("invalid !goobj.symbol.anonymous attachment");
+    AP.OutContext.setGoObjSymbolAnonymous(AP.getSymbol(&GO));
+  }
+
+  for (const GlobalObject &GO : M.global_objects()) {
     const MDNode *MD = GO.getMetadata("goobj.content_addressable");
     if (!MD)
       continue;
