@@ -46,7 +46,7 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Passes/PassBuilder.h"
-#include "llvm/Passes/PassPlugin.h"
+#include "llvm/Plugins/PassPlugin.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/TargetSelect.h"
@@ -459,8 +459,13 @@ parsePollyCustomOptions(StringRef Params) {
 ///                     The IR may still be modified.
 static void buildCommonPollyPipeline(FunctionPassManager &PM,
                                      OptimizationLevel Level,
+                                     IntrusiveRefCntPtr<vfs::FileSystem> FS,
                                      bool EnableForOpt) {
-  PassBuilder PB;
+  PassBuilder PB(
+      /*TM=*/nullptr,
+      /*PipelineTuningOptions=*/{},
+      /*PGOOpt=*/{},
+      /*PIC=*/nullptr, std::move(FS));
 
   ExitOnError Err("Inconsistent Polly configuration: ");
   PollyPassOptions &&Opts =
@@ -475,9 +480,10 @@ static void buildCommonPollyPipeline(FunctionPassManager &PM,
 }
 
 static void buildEarlyPollyPipeline(llvm::ModulePassManager &MPM,
-                                    llvm::OptimizationLevel Level) {
+                                    llvm::OptimizationLevel Level,
+                                    IntrusiveRefCntPtr<vfs::FileSystem> FS) {
   bool EnableForOpt =
-      shouldEnablePollyForOptimization() && Level.isOptimizingForSpeed();
+      shouldEnablePollyForOptimization() && Level != OptimizationLevel::O0;
   if (!shouldEnablePollyForDiagnostic() && !EnableForOpt)
     return;
 
@@ -494,7 +500,7 @@ static void buildEarlyPollyPipeline(llvm::ModulePassManager &MPM,
     FPM = FunctionPassManager();
   }
 
-  buildCommonPollyPipeline(FPM, Level, EnableForOpt);
+  buildCommonPollyPipeline(FPM, Level, std::move(FS), EnableForOpt);
   MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
 
   if (DumpAfter)
@@ -504,9 +510,10 @@ static void buildEarlyPollyPipeline(llvm::ModulePassManager &MPM,
 }
 
 static void buildLatePollyPipeline(FunctionPassManager &PM,
-                                   llvm::OptimizationLevel Level) {
+                                   llvm::OptimizationLevel Level,
+                                   IntrusiveRefCntPtr<vfs::FileSystem> FS) {
   bool EnableForOpt =
-      shouldEnablePollyForOptimization() && Level.isOptimizingForSpeed();
+      shouldEnablePollyForOptimization() && Level != OptimizationLevel::O0;
   if (!shouldEnablePollyForDiagnostic() && !EnableForOpt)
     return;
 
@@ -518,7 +525,7 @@ static void buildLatePollyPipeline(FunctionPassManager &PM,
         "not supported with NPM",
         false);
 
-  buildCommonPollyPipeline(PM, Level, EnableForOpt);
+  buildCommonPollyPipeline(PM, Level, std::move(FS), EnableForOpt);
 
   if (DumpAfter)
     PM.addPass(DumpFunctionPass("-after"));
@@ -539,37 +546,11 @@ static llvm::Expected<std::monostate> parseNoOptions(StringRef Params) {
   return std::monostate{};
 }
 
-static OwningScopAnalysisManagerFunctionProxy
-createScopAnalyses(FunctionAnalysisManager &FAM,
-                   PassInstrumentationCallbacks *PIC) {
-  OwningScopAnalysisManagerFunctionProxy Proxy;
-#define SCOP_ANALYSIS(NAME, CREATE_PASS)                                       \
-  Proxy.getManager().registerPass([PIC] {                                      \
-    (void)PIC;                                                                 \
-    return CREATE_PASS;                                                        \
-  });
-#include "PollyPasses.def"
-
-  Proxy.getManager().registerPass(
-      [&FAM] { return FunctionAnalysisManagerScopProxy(FAM); });
-  return Proxy;
-}
-
-static void registerFunctionAnalyses(FunctionAnalysisManager &FAM,
-                                     PassInstrumentationCallbacks *PIC) {
-
-#define FUNCTION_ANALYSIS(NAME, CREATE_PASS)                                   \
-  FAM.registerPass([] { return CREATE_PASS; });
-
-#include "PollyPasses.def"
-
-  FAM.registerPass([&FAM, PIC] { return createScopAnalyses(FAM, PIC); });
-}
-
 static llvm::Expected<bool>
 parseCGPipeline(StringRef Name, llvm::CGSCCPassManager &CGPM,
                 PassInstrumentationCallbacks *PIC,
-                ArrayRef<PassBuilder::PipelineElement> Pipeline) {
+                ArrayRef<PassBuilder::PipelineElement> Pipeline,
+                IntrusiveRefCntPtr<vfs::FileSystem> FS) {
 #define CGSCC_PASS(NAME, CREATE_PASS, PARSER)                                  \
   if (PassBuilder::checkParametrizedPassName(Name, NAME)) {                    \
     auto Params = PassBuilder::parsePassParameters(PARSER, Name, NAME);        \
@@ -587,15 +568,6 @@ static llvm::Expected<bool>
 parseFunctionPipeline(StringRef Name, FunctionPassManager &FPM,
                       PassInstrumentationCallbacks *PIC,
                       ArrayRef<PassBuilder::PipelineElement> Pipeline) {
-  if (llvm::parseAnalysisUtilityPasses<OwningScopAnalysisManagerFunctionProxy>(
-          "polly-scop-analyses", Name, FPM))
-    return true;
-
-#define FUNCTION_ANALYSIS(NAME, CREATE_PASS)                                   \
-  if (llvm::parseAnalysisUtilityPasses<                                        \
-          std::remove_reference<decltype(CREATE_PASS)>::type>(NAME, Name,      \
-                                                              FPM))            \
-    return true;
 
 #define FUNCTION_PASS(NAME, CREATE_PASS, PARSER)                               \
   if (PassBuilder::checkParametrizedPassName(Name, NAME)) {                    \
@@ -610,83 +582,6 @@ parseFunctionPipeline(StringRef Name, FunctionPassManager &FPM,
 
 #include "PollyPasses.def"
   return false;
-}
-
-static bool parseScopPass(StringRef Name, ScopPassManager &SPM,
-                          PassInstrumentationCallbacks *PIC) {
-#define SCOP_ANALYSIS(NAME, CREATE_PASS)                                       \
-  if (llvm::parseAnalysisUtilityPasses<                                        \
-          std::remove_reference<decltype(CREATE_PASS)>::type>(NAME, Name,      \
-                                                              SPM))            \
-    return true;
-
-#define SCOP_PASS(NAME, CREATE_PASS)                                           \
-  if (Name == NAME) {                                                          \
-    SPM.addPass(CREATE_PASS);                                                  \
-    return true;                                                               \
-  }
-
-#include "PollyPasses.def"
-
-  return false;
-}
-
-static bool parseScopPipeline(StringRef Name, FunctionPassManager &FPM,
-                              PassInstrumentationCallbacks *PIC,
-                              ArrayRef<PassBuilder::PipelineElement> Pipeline) {
-  if (Name != "scop")
-    return false;
-  if (!Pipeline.empty()) {
-    ScopPassManager SPM;
-    for (const auto &E : Pipeline)
-      if (!parseScopPass(E.Name, SPM, PIC))
-        return false;
-    FPM.addPass(createFunctionToScopPassAdaptor(std::move(SPM)));
-  }
-  return true;
-}
-
-static bool isScopPassName(StringRef Name) {
-#define SCOP_ANALYSIS(NAME, CREATE_PASS)                                       \
-  if (Name == "require<" NAME ">")                                             \
-    return true;                                                               \
-  if (Name == "invalidate<" NAME ">")                                          \
-    return true;
-
-#define SCOP_PASS(NAME, CREATE_PASS)                                           \
-  if (Name == NAME)                                                            \
-    return true;
-
-#include "PollyPasses.def"
-
-  return false;
-}
-
-static bool
-parseTopLevelPipeline(llvm::ModulePassManager &MPM,
-                      PassInstrumentationCallbacks *PIC,
-                      ArrayRef<PassBuilder::PipelineElement> Pipeline) {
-  StringRef FirstName = Pipeline.front().Name;
-
-  if (!isScopPassName(FirstName))
-    return false;
-
-  FunctionPassManager FPM;
-  ScopPassManager SPM;
-
-  for (auto &Element : Pipeline) {
-    auto &Name = Element.Name;
-    auto &InnerPipeline = Element.InnerPipeline;
-    if (!InnerPipeline.empty()) // Scop passes don't have inner pipelines
-      return false;
-    if (!parseScopPass(Name, SPM, PIC))
-      return false;
-  }
-
-  FPM.addPass(createFunctionToScopPassAdaptor(std::move(SPM)));
-  MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
-
-  return true;
 }
 
 static llvm::Expected<bool>
@@ -737,6 +632,7 @@ parseModulePipeline(StringRef Name, llvm::ModulePassManager &MPM,
 /// handle LICMed code to make it useful.
 void registerPollyPasses(PassBuilder &PB) {
   PassInstrumentationCallbacks *PIC = PB.getPassInstrumentationCallbacks();
+  IntrusiveRefCntPtr<vfs::FileSystem> FS = PB.getVirtualFileSystemPtr();
 
 #define MODULE_PASS(NAME, CREATE_PASS, PARSER)                                 \
   {                                                                            \
@@ -758,9 +654,6 @@ void registerPollyPasses(PassBuilder &PB) {
   }
 #include "PollyPasses.def"
 
-  PB.registerAnalysisRegistrationCallback([PIC](FunctionAnalysisManager &FAM) {
-    registerFunctionAnalyses(FAM, PIC);
-  });
   PB.registerPipelineParsingCallback(
       [PIC](StringRef Name, FunctionPassManager &FPM,
             ArrayRef<PassBuilder::PipelineElement> Pipeline) -> bool {
@@ -768,15 +661,10 @@ void registerPollyPasses(PassBuilder &PB) {
         return Err(parseFunctionPipeline(Name, FPM, PIC, Pipeline));
       });
   PB.registerPipelineParsingCallback(
-      [PIC](StringRef Name, FunctionPassManager &FPM,
-            ArrayRef<PassBuilder::PipelineElement> Pipeline) -> bool {
-        return parseScopPipeline(Name, FPM, PIC, Pipeline);
-      });
-  PB.registerPipelineParsingCallback(
-      [PIC](StringRef Name, CGSCCPassManager &CGPM,
-            ArrayRef<PassBuilder::PipelineElement> Pipeline) -> bool {
+      [PIC, FS](StringRef Name, CGSCCPassManager &CGPM,
+                ArrayRef<PassBuilder::PipelineElement> Pipeline) -> bool {
         ExitOnError Err("Unable to parse Polly call graph pass: ");
-        return Err(parseCGPipeline(Name, CGPM, PIC, Pipeline));
+        return Err(parseCGPipeline(Name, CGPM, PIC, Pipeline, FS));
       });
   PB.registerPipelineParsingCallback(
       [PIC](StringRef Name, ModulePassManager &MPM,
@@ -784,18 +672,19 @@ void registerPollyPasses(PassBuilder &PB) {
         ExitOnError Err("Unable to parse Polly module pass: ");
         return Err(parseModulePipeline(Name, MPM, PIC, Pipeline));
       });
-  PB.registerParseTopLevelPipelineCallback(
-      [PIC](llvm::ModulePassManager &MPM,
-            ArrayRef<PassBuilder::PipelineElement> Pipeline) -> bool {
-        return parseTopLevelPipeline(MPM, PIC, Pipeline);
-      });
 
   switch (PassPosition) {
   case POSITION_EARLY:
-    PB.registerPipelineStartEPCallback(buildEarlyPollyPipeline);
+    PB.registerPipelineStartEPCallback(
+        [FS](ModulePassManager &MPM, OptimizationLevel Level) {
+          buildEarlyPollyPipeline(MPM, Level, FS);
+        });
     break;
   case POSITION_BEFORE_VECTORIZER:
-    PB.registerVectorizerStartEPCallback(buildLatePollyPipeline);
+    PB.registerVectorizerStartEPCallback(
+        [FS](FunctionPassManager &FPM, OptimizationLevel Level) {
+          buildLatePollyPipeline(FPM, Level, FS);
+        });
     break;
   }
 }

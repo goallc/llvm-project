@@ -13,8 +13,8 @@
 #ifndef LLVM_LIB_TARGET_AARCH64_AARCH64MACHINEFUNCTIONINFO_H
 #define LLVM_LIB_TARGET_AARCH64_AARCH64MACHINEFUNCTIONINFO_H
 
+#include "AArch64SMEAttributes.h"
 #include "AArch64Subtarget.h"
-#include "Utils/AArch64SMEAttributes.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -37,14 +37,54 @@ struct AArch64FunctionInfo;
 class AArch64Subtarget;
 class MachineInstr;
 
-struct TPIDR2Object {
-  int FrameIndex = std::numeric_limits<int>::max();
-  unsigned Uses = 0;
+/// Condition of signing the return address in a function.
+///
+/// Corresponds to possible values of "sign-return-address" function attribute.
+enum class SignReturnAddress {
+  None,
+  NonLeaf,
+  All,
 };
 
 /// AArch64FunctionInfo - This class is derived from MachineFunctionInfo and
 /// contains private AArch64-specific information for each MachineFunction.
 class AArch64FunctionInfo final : public MachineFunctionInfo {
+public:
+  struct GoArgHome {
+    struct RegisterPiece {
+      unsigned Reg = 0;
+      uint32_t Offset = 0;
+      unsigned Size = 0;
+      bool IsFP = false;
+    };
+
+    unsigned ArgNo = 0;
+    int FrameIndex = 0;
+    SmallVector<RegisterPiece, 2> RegisterPieces;
+    uint64_t LogicalOffset = 0;
+
+    bool valueAlreadyInFrame() const { return RegisterPieces.empty(); }
+
+    void addRegisterPiece(unsigned Reg, uint32_t Offset, unsigned Size,
+                          bool IsFP) {
+      RegisterPieces.push_back({Reg, Offset, Size, IsFP});
+    }
+  };
+
+  struct GoArgPointerSlot {
+    int FrameIndex = 0;
+    uint32_t OffsetWithinObject = 0;
+    uint32_t ArgWord = 0;
+  };
+
+private:
+  /// Canonical fixed frame objects for Go arguments and the register pieces
+  /// that the pre-frame morestack path must save into them.
+  SmallVector<GoArgHome, 16> GoArgHomes;
+  SmallVector<GoArgPointerSlot, 16> GoArgPointerSlots;
+  int GoABI0FrameIndex = 0;
+  bool HasGoABI0FrameIndex = false;
+
   /// Number of bytes of arguments this function has on the stack. If the callee
   /// is expected to restore the argument stack this should be a multiple of 16,
   /// all usable during a tail call.
@@ -114,6 +154,12 @@ class AArch64FunctionInfo final : public MachineFunctionInfo {
   int StackHazardSlotIndex = std::numeric_limits<int>::max();
   int StackHazardCSRSlotIndex = std::numeric_limits<int>::max();
 
+  /// Frame index reserving the word occupied by LR at the bottom of a Go
+  /// frame. The Go prologue writes LR directly rather than through this frame
+  /// index; the object exists so generic frame layout cannot place a local or
+  /// spill at the same address.
+  int GoFrameLRSlotIndex = std::numeric_limits<int>::max();
+
   /// True if this function has a subset of CSRs that is handled explicitly via
   /// copies.
   bool IsSplitCSR = false;
@@ -170,13 +216,8 @@ class AArch64FunctionInfo final : public MachineFunctionInfo {
   // CalleeSavedStackSize) to the address of the frame record.
   int CalleeSaveBaseToFrameRecordOffset = 0;
 
-  /// SignReturnAddress is true if PAC-RET is enabled for the function with
-  /// defaults being sign non-leaf functions only, with the B key.
-  bool SignReturnAddress = false;
-
-  /// SignReturnAddressAll modifies the default PAC-RET mode to signing leaf
-  /// functions as well.
-  bool SignReturnAddressAll = false;
+  /// SignCondition controls when PAC-RET protection should be used.
+  SignReturnAddress SignCondition = SignReturnAddress::None;
 
   /// SignWithBKey modifies the default PAC-RET mode to signing with the B key.
   bool SignWithBKey = false;
@@ -241,19 +282,6 @@ class AArch64FunctionInfo final : public MachineFunctionInfo {
   // support).
   Register EarlyAllocSMESaveBuffer = AArch64::NoRegister;
 
-  // Holds the spill slot for ZT0.
-  int ZT0SpillSlotIndex = std::numeric_limits<int>::max();
-
-  // Note: The following properties are only used for the old SME ABI lowering:
-  /// The frame-index for the TPIDR2 object used for lazy saves.
-  TPIDR2Object TPIDR2;
-  // Holds a pointer to a buffer that is large enough to represent
-  // all SME ZA state and any additional state required by the
-  // __arm_sme_save/restore support routines.
-  Register SMESaveBufferAddr = MCRegister::NoRegister;
-  // true if SMESaveBufferAddr is used.
-  bool SMESaveBufferUsed = false;
-
 public:
   AArch64FunctionInfo(const Function &F, const AArch64Subtarget *STI);
 
@@ -269,22 +297,6 @@ public:
   Register getEarlyAllocSMESaveBuffer() const {
     return EarlyAllocSMESaveBuffer;
   }
-
-  void setZT0SpillSlotIndex(int FI) { ZT0SpillSlotIndex = FI; }
-  int getZT0SpillSlotIndex() const {
-    assert(hasZT0SpillSlotIndex() && "ZT0 spill slot index not set!");
-    return ZT0SpillSlotIndex;
-  }
-  bool hasZT0SpillSlotIndex() const {
-    return ZT0SpillSlotIndex != std::numeric_limits<int>::max();
-  }
-
-  // Old SME ABI lowering state getters/setters:
-  Register getSMESaveBufferAddr() const { return SMESaveBufferAddr; };
-  void setSMESaveBufferAddr(Register Reg) { SMESaveBufferAddr = Reg; };
-  unsigned isSMESaveBufferUsed() const { return SMESaveBufferUsed; };
-  void setSMESaveBufferUsed(bool Used = true) { SMESaveBufferUsed = Used; };
-  TPIDR2Object &getTPIDR2Obj() { return TPIDR2; }
 
   void setPredicateRegForFillSpill(unsigned Reg) {
     PredicateRegForFillSpill = Reg;
@@ -303,6 +315,30 @@ public:
 
   unsigned getBytesInStackArgArea() const { return BytesInStackArgArea; }
   void setBytesInStackArgArea(unsigned bytes) { BytesInStackArgArea = bytes; }
+
+  void clearGoArgHomes() { GoArgHomes.clear(); }
+  GoArgHome &addGoArgHome(unsigned ArgNo, int FrameIndex) {
+    GoArgHomes.push_back({ArgNo, FrameIndex, {}});
+    return GoArgHomes.back();
+  }
+  MutableArrayRef<GoArgHome> getGoArgHomes() { return GoArgHomes; }
+  ArrayRef<GoArgHome> getGoArgHomes() const { return GoArgHomes; }
+
+  bool hasGoABI0FrameIndex() const { return HasGoABI0FrameIndex; }
+  int getGoABI0FrameIndex() const { return GoABI0FrameIndex; }
+  void setGoABI0FrameIndex(int FrameIndex) {
+    GoABI0FrameIndex = FrameIndex;
+    HasGoABI0FrameIndex = true;
+  }
+
+  void clearGoArgPointerSlots() { GoArgPointerSlots.clear(); }
+  void addGoArgPointerSlot(int FrameIndex, uint32_t OffsetWithinObject,
+                           uint32_t ArgWord) {
+    GoArgPointerSlots.push_back({FrameIndex, OffsetWithinObject, ArgWord});
+  }
+  ArrayRef<GoArgPointerSlot> getGoArgPointerSlots() const {
+    return GoArgPointerSlots;
+  }
 
   unsigned getArgumentStackToRestore() const { return ArgumentStackToRestore; }
   void setArgumentStackToRestore(unsigned bytes) {
@@ -494,6 +530,18 @@ public:
     StackHazardCSRSlotIndex = Index;
   }
 
+  bool hasGoFrameLRSlotIndex() const {
+    return GoFrameLRSlotIndex != std::numeric_limits<int>::max();
+  }
+  int getGoFrameLRSlotIndex() const {
+    assert(hasGoFrameLRSlotIndex());
+    return GoFrameLRSlotIndex;
+  }
+  void setGoFrameLRSlotIndex(int Index) {
+    assert(!hasGoFrameLRSlotIndex());
+    GoFrameLRSlotIndex = Index;
+  }
+
   bool hasSplitSVEObjects() const { return SplitSVEObjects; }
   void setSplitSVEObjects(bool s) { SplitSVEObjects = s; }
 
@@ -516,7 +564,7 @@ public:
   }
   void setJumpTableEntryInfo(int Idx, unsigned Size, MCSymbol *PCRelSym) {
     if ((unsigned)Idx >= JumpTableEntryInfo.size())
-      JumpTableEntryInfo.resize(Idx+1);
+      JumpTableEntryInfo.resize(Idx + 1);
     JumpTableEntryInfo[Idx] = std::make_pair(Size, PCRelSym);
   }
 
@@ -591,8 +639,14 @@ public:
     CalleeSaveBaseToFrameRecordOffset = Offset;
   }
 
+  static bool shouldSignReturnAddress(SignReturnAddress Condition,
+                                      bool IsLRSpilled);
+
   bool shouldSignReturnAddress(const MachineFunction &MF) const;
-  bool shouldSignReturnAddress(bool SpillsLR) const;
+
+  SignReturnAddress getSignReturnAddressCondition() const {
+    return SignCondition;
+  }
 
   bool needsShadowCallStackPrologueEpilogue(MachineFunction &MF) const;
 
@@ -614,9 +668,7 @@ public:
   }
   bool hasSwiftAsyncContext() const { return HasSwiftAsyncContext; }
 
-  void setSwiftAsyncContextFrameIdx(int FI) {
-    SwiftAsyncContextFrameIdx = FI;
-  }
+  void setSwiftAsyncContextFrameIdx(int FI) { SwiftAsyncContextFrameIdx = FI; }
   int getSwiftAsyncContextFrameIdx() const { return SwiftAsyncContextFrameIdx; }
 
   bool needsDwarfUnwindInfo(const MachineFunction &MF) const;

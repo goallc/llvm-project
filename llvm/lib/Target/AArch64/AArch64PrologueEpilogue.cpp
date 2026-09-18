@@ -95,26 +95,31 @@ AArch64PrologueEpilogueCommon::AArch64PrologueEpilogueCommon(
 
   HasFP = AFL.hasFP(MF);
   NeedsWinCFI = AFL.needsWinCFI(MF);
+  IsGoFrame = AArch64FrameLowering::usesGoFrameLayout(MF);
 
-  // Windows unwind can't represent the required stack adjustments if we have
-  // both SVE callee-saves and dynamic stack allocations, and the frame pointer
-  // is before the SVE spills.  The allocation of the frame pointer must be the
-  // last instruction in the prologue so the unwinder can restore the stack
-  // pointer correctly. (And there isn't any unwind opcode for `addvl sp, x29,
-  // -17`.)
-  //
-  // Because of this, we do spills in the opposite order on Windows: first SVE,
-  // then GPRs. The main side-effect of this is that it makes accessing
-  // parameters passed on the stack more expensive.
-  //
-  // We could consider rearranging the spills for simpler cases.
-  if (Subtarget.isTargetWindows() && AFI->getSVECalleeSavedStackSize()) {
+  if (AFL.hasSVECalleeSavesAboveFrameRecord(MF)) {
     if (AFI->hasStackHazardSlotIndex())
       reportFatalUsageError("SME hazard padding is not supported on Windows");
     SVELayout = SVEStackLayout::CalleeSavesAboveFrameRecord;
   } else if (AFI->hasSplitSVEObjects()) {
     SVELayout = SVEStackLayout::Split;
   }
+}
+
+void AArch64PrologueEpilogueCommon::checkGoFrameLayout(
+    int64_t StackSize) const {
+  assert(IsGoFrame && "expected a Go frame");
+  if (!HasFP)
+    report_fatal_error(
+        "non-empty AArch64 GoObj frame requires a frame pointer");
+  if (StackSize < 16 || StackSize % 16 != 0)
+    report_fatal_error("AArch64 GoObj frame has invalid size");
+  if (IsFunclet || NeedsWinCFI || HomPrologEpilog || MFI.hasVarSizedObjects() ||
+      RegInfo.hasStackRealignment(MF) || AFI->hasSVEStackSize() ||
+      AFI->getCalleeSavedStackSize() != 0 ||
+      AFI->getTailCallReservedStack() != 0)
+    report_fatal_error(
+        "AArch64 GoObj frame uses unsupported prologue/epilogue features");
 }
 
 MachineBasicBlock::iterator
@@ -174,16 +179,22 @@ AArch64PrologueEpilogueCommon::convertCalleeSaveRestoreToSPPrePostIncDec(
   }
   TypeSize Scale = TypeSize::getFixed(1), Width = TypeSize::getFixed(0);
   int64_t MinOffset, MaxOffset;
-  bool Success = static_cast<const AArch64InstrInfo *>(TII)->getMemOpInfo(
-      NewOpc, Scale, Width, MinOffset, MaxOffset);
+  bool Success = TII->getMemOpInfo(NewOpc, Scale, Width, MinOffset, MaxOffset);
   (void)Success;
   assert(Success && "unknown load/store opcode");
 
   // If the first store isn't right where we want SP then we can't fold the
   // update in so create a normal arithmetic instruction instead.
+  //
+  // On Windows, some register pairs involving LR can't be folded because
+  // there isn't a corresponding unwind opcode.
   if (MBBI->getOperand(MBBI->getNumOperands() - 1).getImm() != 0 ||
       CSStackSizeInc < MinOffset * (int64_t)Scale.getFixedValue() ||
-      CSStackSizeInc > MaxOffset * (int64_t)Scale.getFixedValue()) {
+      CSStackSizeInc > MaxOffset * (int64_t)Scale.getFixedValue() ||
+      (NeedsWinCFI &&
+       (NewOpc == AArch64::LDPXpost || NewOpc == AArch64::STPXpre) &&
+       RegInfo.getEncodingValue(MBBI->getOperand(0).getReg()) + 1 !=
+           RegInfo.getEncodingValue(MBBI->getOperand(1).getReg()))) {
     // If we are destroying the frame, make sure we add the increment after the
     // last frame operation.
     if (FrameFlag == MachineInstr::FrameDestroy) {
@@ -323,6 +334,11 @@ bool AArch64PrologueEpilogueCommon::shouldCombineCSRLocalStackBump(
   // (to force a stp with predecrement) to match the packed unwind format,
   // provided that there actually are any callee saved registers to merge the
   // decrement with.
+  //
+  // Note that for certain paired saves, like "x19, lr", we can't actually
+  // emit an predecrement stp, but packed unwind still expects a separate stack
+  // adjustment.
+  //
   // This is potentially marginally slower, but allows using the packed
   // unwind format for functions that both have a local area and callee saved
   // registers. Using the packed unwind format notably reduces the size of
@@ -490,7 +506,10 @@ void AArch64PrologueEmitter::verifyPrologueClobbers() const {
 void AArch64PrologueEmitter::determineLocalsStackSize(
     uint64_t StackSize, uint64_t PrologueSaveSize) {
   AFI->setLocalStackSize(StackSize - PrologueSaveSize);
-  CombineSPBump = shouldCombineCSRLocalStackBump(StackSize);
+  // Go requires the frame record to be complete before a single architectural
+  // SP update, even when the generic immediate-folding heuristic would split a
+  // large local allocation from the callee-save area.
+  CombineSPBump = IsGoFrame || shouldCombineCSRLocalStackBump(StackSize);
 }
 
 // Return the maximum possible number of bytes for `Size` due to the
@@ -555,11 +574,15 @@ void AArch64PrologueEmitter::allocateStackSpace(
     // objects), we need to issue an extra probe, so these allocations start in
     // a known state.
     if (FollowupAllocs) {
-      // STR XZR, [SP]
-      BuildMI(MBB, MBBI, DL, TII->get(AArch64::STRXui))
-          .addReg(AArch64::XZR)
+      // LDR XZR, [SP]
+      BuildMI(MBB, MBBI, DL, TII->get(AArch64::LDRXui))
+          .addDef(AArch64::XZR)
           .addReg(AArch64::SP)
           .addImm(0)
+          .addMemOperand(MF.getMachineMemOperand(
+              MachinePointerInfo::getUnknownStack(MF),
+              MachineMemOperand::MOLoad | MachineMemOperand::MOVolatile, 8,
+              Align(8)))
           .setMIFlags(MachineInstr::FrameSetup);
     }
 
@@ -590,11 +613,15 @@ void AArch64PrologueEmitter::allocateStackSpace(
     }
     if (FollowupAllocs || upperBound(AllocSize) + RealignmentPadding >
                               AArch64::StackProbeMaxUnprobedStack) {
-      // STR XZR, [SP]
-      BuildMI(MBB, MBBI, DL, TII->get(AArch64::STRXui))
-          .addReg(AArch64::XZR)
+      // LDR XZR, [SP]
+      BuildMI(MBB, MBBI, DL, TII->get(AArch64::LDRXui))
+          .addDef(AArch64::XZR)
           .addReg(AArch64::SP)
           .addImm(0)
+          .addMemOperand(MF.getMachineMemOperand(
+              MachinePointerInfo::getUnknownStack(MF),
+              MachineMemOperand::MOLoad | MachineMemOperand::MOVolatile, 8,
+              Align(8)))
           .setMIFlags(MachineInstr::FrameSetup);
     }
     return;
@@ -628,6 +655,58 @@ void AArch64PrologueEmitter::allocateStackSpace(
     AFI->setStackRealigned(true);
 }
 
+void AArch64PrologueEmitter::emitGoFrameRecord(MachineBasicBlock::iterator MBBI,
+                                               const DebugLoc &DL,
+                                               int64_t StackSize) const {
+  checkGoFrameLayout(StackSize);
+
+  // The caller writes its FP link immediately below its SP. For a frame whose
+  // post-prologue stack pointer is NewSP, Go keeps:
+  //
+  //   NewSP-8  saved FP
+  //   NewSP+0  saved LR
+  //
+  // The small-frame pre-indexed store changes SP and saves LR atomically. For
+  // a large frame, form NewSP without changing SP, save the record, then make
+  // the single architectural SP update.
+  if (!MBB.isLiveIn(AArch64::FP))
+    MBB.addLiveIn(AArch64::FP);
+  if (!MBB.isLiveIn(AArch64::LR))
+    MBB.addLiveIn(AArch64::LR);
+
+  if (StackSize <= 0xf0) {
+    MachineBasicBlock::iterator LRStore =
+        BuildMI(MBB, MBBI, DL, TII->get(AArch64::STRXui))
+            .addReg(AArch64::LR)
+            .addReg(AArch64::SP)
+            .addImm(0)
+            .setMIFlag(MachineInstr::FrameSetup);
+    convertCalleeSaveRestoreToSPPrePostIncDec(LRStore, DL, -StackSize,
+                                              EmitAsyncCFI);
+    BuildMI(MBB, MBBI, DL, TII->get(AArch64::STURXi))
+        .addReg(AArch64::FP)
+        .addReg(AArch64::SP)
+        .addImm(-8)
+        .setMIFlag(MachineInstr::FrameSetup);
+  } else {
+    // Go reserves R27 as REGTMP, so it is safe to use even when a
+    // shrink-wrapped prologue has ordinary caller-saved registers live into its
+    // save point.
+    emitFrameOffset(MBB, MBBI, DL, AArch64::X27, AArch64::SP,
+                    StackOffset::getFixed(-StackSize), TII,
+                    MachineInstr::FrameSetup);
+    BuildMI(MBB, MBBI, DL, TII->get(AArch64::STPXi))
+        .addReg(AArch64::FP)
+        .addReg(AArch64::LR)
+        .addReg(AArch64::X27)
+        .addImm(-1)
+        .setMIFlag(MachineInstr::FrameSetup);
+    emitFrameOffset(MBB, MBBI, DL, AArch64::SP, AArch64::X27, StackOffset{},
+                    TII, MachineInstr::FrameSetup, false, NeedsWinCFI,
+                    &HasWinCFI, EmitAsyncCFI, StackOffset::getFixed(StackSize));
+  }
+}
+
 void AArch64PrologueEmitter::emitPrologue() {
   const MachineBasicBlock::iterator PrologueBeginI = MBB.begin();
   const MachineBasicBlock::iterator EndI = MBB.end();
@@ -646,7 +725,7 @@ void AArch64PrologueEmitter::emitPrologue() {
   // the epilogue. In this case, we still need to emit a SEH prologue sequence.
   // See `seh-minimal-prologue-epilogue.ll` test cases.
   if (AFI->getArgumentStackToRestore())
-    HasWinCFI = true;
+    HasWinCFI |= NeedsWinCFI;
 
   if (AFI->shouldSignReturnAddress(MF)) {
     // If pac-ret+leaf is in effect, PAUTH_PROLOGUE pseudo instructions
@@ -695,7 +774,12 @@ void AArch64PrologueEmitter::emitPrologue() {
   // function, including the funclet.
   int64_t NumBytes =
       IsFunclet ? AFL.getWinEHFuncletFrameSize(MF) : MFI.getStackSize();
-  if (!AFI->hasStackFrame() && !AFL.windowsRequiresStackProbe(MF, NumBytes))
+  if (IsGoFrame && NumBytes == 0) {
+    AFI->setLocalStackSize(0);
+    return;
+  }
+  if (!IsGoFrame && !AFI->hasStackFrame() &&
+      !AFL.windowsRequiresStackProbe(MF, NumBytes))
     return emitEmptyStackFramePrologue(NumBytes, PrologueBeginI, DL);
 
   bool IsWin64 = Subtarget.isCallingConvWin64(F.getCallingConv(), F.isVarArg());
@@ -704,6 +788,8 @@ void AArch64PrologueEmitter::emitPrologue() {
   auto PrologueSaveSize = AFI->getCalleeSavedStackSize() + FixedObject;
   // All of the remaining stack allocations are for locals.
   determineLocalsStackSize(NumBytes, PrologueSaveSize);
+  if (IsGoFrame)
+    checkGoFrameLayout(NumBytes);
 
   auto [PPR, ZPR] = getSVEStackFrameSizes();
   SVEStackAllocations SVEAllocs = getSVEStackAllocations({PPR, ZPR});
@@ -731,10 +817,13 @@ void AArch64PrologueEmitter::emitPrologue() {
     NumBytes -= AFI->getCalleeSavedStackSize();
   } else if (CombineSPBump) {
     assert(!AFL.getSVEStackSize(MF) && "Cannot combine SP bump with SVE");
-    emitFrameOffset(MBB, PrologueBeginI, DL, AArch64::SP, AArch64::SP,
-                    StackOffset::getFixed(-NumBytes), TII,
-                    MachineInstr::FrameSetup, false, NeedsWinCFI, &HasWinCFI,
-                    EmitAsyncCFI);
+    if (IsGoFrame)
+      emitGoFrameRecord(PrologueBeginI, DL, NumBytes);
+    else
+      emitFrameOffset(MBB, PrologueBeginI, DL, AArch64::SP, AArch64::SP,
+                      StackOffset::getFixed(-NumBytes), TII,
+                      MachineInstr::FrameSetup, false, NeedsWinCFI, &HasWinCFI,
+                      EmitAsyncCFI);
     NumBytes = 0;
   } else if (HomPrologEpilog) {
     // Stack has been already adjusted.
@@ -1010,9 +1099,14 @@ void AArch64PrologueEmitter::emitEmptyStackFramePrologue(
 void AArch64PrologueEmitter::emitFramePointerSetup(
     MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
     unsigned FixedObject) {
-  int64_t FPOffset = AFI->getCalleeSaveBaseToFrameRecordOffset();
-  if (CombineSPBump)
-    FPOffset += AFI->getLocalStackSize();
+  int64_t FPOffset;
+  if (IsGoFrame) {
+    FPOffset = -8;
+  } else {
+    FPOffset = AFI->getCalleeSaveBaseToFrameRecordOffset();
+    if (CombineSPBump)
+      FPOffset += AFI->getLocalStackSize();
+  }
 
   if (AFI->hasSwiftAsyncContext()) {
     // Before we update the live FP we have to ensure there's a valid (or
@@ -1059,13 +1153,18 @@ void AArch64PrologueEmitter::emitFramePointerSetup(
       NeedsWinCFI = false;
     }
   }
-  if (EmitAsyncCFI)
+  if (EmitAsyncCFI && HasFP)
     emitDefineCFAWithFP(MBBI, FixedObject);
 }
 
 // Define the current CFA rule to use the provided FP.
 void AArch64PrologueEmitter::emitDefineCFAWithFP(
     MachineBasicBlock::iterator MBBI, unsigned FixedObject) const {
+  if (IsGoFrame) {
+    CFIInstBuilder(MBB, MBBI, MachineInstr::FrameSetup)
+        .buildDefCFA(AArch64::FP, MFI.getStackSize() + 8);
+    return;
+  }
   const int OffsetToFirstCalleeSaveFromFP =
       AFI->getCalleeSaveBaseToFrameRecordOffset() -
       AFI->getCalleeSavedStackSize();
@@ -1135,7 +1234,12 @@ void AArch64PrologueEmitter::emitWindowsStackProbe(
         .setMIFlags(MachineInstr::FrameSetup);
   }
 
-  const char *ChkStk = Subtarget.getChkStkName();
+  const AArch64TargetLowering *TLI = Subtarget.getTargetLowering();
+  RTLIB::LibcallImpl ChkStkLibcall = TLI->getLibcallImpl(RTLIB::STACK_PROBE);
+  if (ChkStkLibcall == RTLIB::Unsupported)
+    reportFatalUsageError("no available implementation of __chkstk");
+
+  const char *ChkStk = TLI->getLibcallImplName(ChkStkLibcall).data();
   switch (MF.getTarget().getCodeModel()) {
   case CodeModel::Tiny:
   case CodeModel::Small:
@@ -1240,6 +1344,13 @@ void AArch64PrologueEmitter::emitWindowsStackProbe(
 
 void AArch64PrologueEmitter::emitCalleeSavedGPRLocations(
     MachineBasicBlock::iterator MBBI) const {
+  if (IsGoFrame) {
+    CFIInstBuilder CFIBuilder(MBB, MBBI, MachineInstr::FrameSetup);
+    CFIBuilder.buildOffset(AArch64::LR, -MFI.getStackSize());
+    CFIBuilder.buildOffset(AArch64::FP, -MFI.getStackSize() - 8);
+    return;
+  }
+
   const std::vector<CalleeSavedInfo> &CSI = MFI.getCalleeSavedInfo();
   if (CSI.empty())
     return;
@@ -1320,6 +1431,45 @@ AArch64EpilogueEmitter::AArch64EpilogueEmitter(MachineFunction &MF,
   SEHEpilogueStartI = MBB.end();
 }
 
+void AArch64EpilogueEmitter::emitGoFrameRestore(
+    MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
+    int64_t StackSize) const {
+  checkGoFrameLayout(StackSize);
+
+  if (StackSize <= 0xf0) {
+    BuildMI(MBB, MBBI, DL, TII->get(AArch64::LDURXi), AArch64::FP)
+        .addReg(AArch64::SP)
+        .addImm(-8)
+        .setMIFlag(MachineInstr::FrameDestroy);
+    MachineBasicBlock::iterator LRLoad =
+        BuildMI(MBB, MBBI, DL, TII->get(AArch64::LDRXui), AArch64::LR)
+            .addReg(AArch64::SP)
+            .addImm(0)
+            .setMIFlag(MachineInstr::FrameDestroy);
+    convertCalleeSaveRestoreToSPPrePostIncDec(
+        LRLoad, DL, StackSize, EmitCFI, MachineInstr::FrameDestroy, StackSize);
+  } else {
+    BuildMI(MBB, MBBI, DL, TII->get(AArch64::LDPXi))
+        .addReg(AArch64::FP, RegState::Define)
+        .addReg(AArch64::LR, RegState::Define)
+        .addReg(AArch64::SP)
+        .addImm(-1)
+        .setMIFlag(MachineInstr::FrameDestroy);
+    emitFrameOffset(MBB, MBBI, DL, AArch64::X27, AArch64::SP,
+                    StackOffset::getFixed(StackSize), TII,
+                    MachineInstr::FrameDestroy);
+    emitFrameOffset(MBB, MBBI, DL, AArch64::SP, AArch64::X27, StackOffset{},
+                    TII, MachineInstr::FrameDestroy, false, NeedsWinCFI,
+                    &HasWinCFI, EmitCFI);
+  }
+
+  if (EmitCFI) {
+    CFIInstBuilder CFIBuilder(MBB, MBBI, MachineInstr::FrameDestroy);
+    CFIBuilder.buildRestore(AArch64::FP);
+    CFIBuilder.buildRestore(AArch64::LR);
+  }
+}
+
 void AArch64EpilogueEmitter::moveSPBelowFP(MachineBasicBlock::iterator MBBI,
                                            StackOffset Offset) {
   // Other combinations could be supported, but are not currently needed.
@@ -1349,6 +1499,10 @@ void AArch64EpilogueEmitter::emitEpilogue() {
 
   int64_t NumBytes =
       IsFunclet ? AFL.getWinEHFuncletFrameSize(MF) : MFI.getStackSize();
+  if (IsGoFrame && NumBytes == 0)
+    return;
+  if (IsGoFrame)
+    checkGoFrameLayout(NumBytes);
 
   // All calls are tail calls in GHC calling conv, and functions have no
   // prologue/epilogue.
@@ -1494,10 +1648,19 @@ void AArch64EpilogueEmitter::emitEpilogue() {
       CFIInstBuilder(MBB, FirstGPRRestoreI, MachineInstr::FrameDestroy)
           .buildDefCFA(AArch64::SP, NumBytes);
 
-    emitFrameOffset(MBB, MBB.getFirstTerminator(), DL, AArch64::SP, AArch64::SP,
-                    StackOffset::getFixed(NumBytes + AfterCSRPopSize), TII,
-                    MachineInstr::FrameDestroy, false, NeedsWinCFI, &HasWinCFI,
-                    EmitCFI, StackOffset::getFixed(NumBytes));
+    if (IsGoFrame) {
+      if (PrologueSaveSize != 0 || AfterCSRPopSize != 0)
+        report_fatal_error(
+            "AArch64 GoObj frame cannot restore generic callee-save or "
+            "argument stack areas");
+      emitGoFrameRestore(MBB.getFirstTerminator(), DL, NumBytes);
+    } else {
+      emitFrameOffset(
+          MBB, MBB.getFirstTerminator(), DL, AArch64::SP, AArch64::SP,
+          StackOffset::getFixed(NumBytes + AfterCSRPopSize), TII,
+          MachineInstr::FrameDestroy, false, NeedsWinCFI, &HasWinCFI, EmitCFI,
+          StackOffset::getFixed(NumBytes));
+    }
     return;
   }
 
@@ -1652,6 +1815,8 @@ void AArch64EpilogueEmitter::emitEpilogue() {
 
 bool AArch64EpilogueEmitter::shouldCombineCSRLocalStackBump(
     uint64_t StackBumpBytes) const {
+  if (IsGoFrame)
+    return true;
   if (!AArch64PrologueEpilogueCommon::shouldCombineCSRLocalStackBump(
           StackBumpBytes))
     return false;
@@ -1762,11 +1927,8 @@ void AArch64EpilogueEmitter::finalizeEpilogue() const {
   if (AFI->shouldSignReturnAddress(MF)) {
     // If pac-ret+leaf is in effect, PAUTH_EPILOGUE pseudo instructions
     // are inserted by emitPacRetPlusLeafHardening().
-    if (!AFL.shouldSignReturnAddressEverywhere(MF)) {
-      BuildMI(MBB, MBB.getFirstTerminator(), DL,
-              TII->get(AArch64::PAUTH_EPILOGUE))
-          .setMIFlag(MachineInstr::FrameDestroy);
-    }
+    if (!AFL.shouldSignReturnAddressEverywhere(MF))
+      TII->createPauthEpilogueInstr(MBB, DL);
     // AArch64PointerAuth pass will insert SEH_PACSignLR
     HasWinCFI |= NeedsWinCFI;
   }

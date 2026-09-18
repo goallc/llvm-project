@@ -89,6 +89,12 @@ namespace CallingConv {
     /// Used for runtime calls that preserves none general registers.
     PreserveNone = 21,
 
+    /// Used for Go's register-based internal ABI.
+    GoABIInternal = 22,
+
+    /// Used for Go's stack-based ABI0.
+    GoABI0 = 23,
+
     /// This is the start of the target-specific calling conventions, e.g.
     /// fastcall and thiscall on X86.
     FirstTargetCC = 64,
@@ -323,6 +329,7 @@ constexpr bool isCallableCC(CallingConv::ID CC) {
   case CallingConv::AMDGPU_PS:
   case CallingConv::AMDGPU_VS:
   case CallingConv::SPIR_KERNEL:
+  case CallingConv::PTX_Kernel:
     return false;
   default:
     return true;

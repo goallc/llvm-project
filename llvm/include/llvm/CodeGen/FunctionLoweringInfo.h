@@ -18,6 +18,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/IndexedMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
@@ -27,6 +28,7 @@
 #include "llvm/IR/Value.h"
 #include "llvm/Support/KnownBits.h"
 #include <cassert>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -89,7 +91,7 @@ public:
 
   /// This method is called from TargetLowerinInfo::isSDNodeSourceOfDivergence
   /// to get the Value corresponding to the live-in virtual register.
-  const Value *getValueFromVirtualReg(Register Vreg);
+  LLVM_ABI const Value *getValueFromVirtualReg(Register Vreg);
 
   /// Track virtual registers created for exception pointers.
   DenseMap<const Value *, Register> CatchPadExceptionPointers;
@@ -100,6 +102,9 @@ public:
     enum RelocType {
       // Value did not need to be relocated and can be used directly.
       NoRelocate,
+      // A Go stack alloca is relocated by recomputing its FrameIndex address
+      // after the statepoint, without a spill slot or reload.
+      FrameIndexRemat,
       // Value was spilled to stack and needs filled at the gc.relocate.
       Spill,
       // Value was lowered to tied def and gc.relocate should be replaced with
@@ -131,8 +136,54 @@ public:
   /// anywhere in the function.
   DenseMap<const AllocaInst*, int> StaticAllocaMap;
 
+  /// A scalar load which can be read directly from the outgoing Go ABI result
+  /// area after a goret call. The virtual register is defined by target call
+  /// lowering and consumed when SelectionDAGBuilder visits the original load.
+  struct GoRetValueProjection {
+    const LoadInst *Load;
+    uint64_t Offset;
+    Register Reg;
+  };
+
+  /// Pure, non-address-observable goret carriers whose scalar users can be
+  /// forwarded from the physical call result area. Candidates are deliberately
+  /// bounded here so aggregate values never enter SelectionDAG as a large
+  /// multi-result SSA node.
+  DenseMap<const AllocaInst *, SmallVector<GoRetValueProjection, 4>>
+      GoRetValueProjections;
+
+  /// Pure initialization buffers which Go call lowering can forward directly
+  /// into the physical byval argument area. Direct gc-live uses of these
+  /// allocas describe only a rematerializable carrier address.
+  SmallPtrSet<const AllocaInst *, 8> GoByValCallCarriers;
+
+  /// Called only when byval forwarding or goret projection commits to
+  /// eliminating a home's contents. Remove its storage declarations and
+  /// remember the frame index for cleanup after instruction selection.
+  LLVM_ABI void invalidateDebugFrameIndex(int FI);
+
+  /// Clear remaining MIR descriptions once all blocks have been selected.
+  LLVM_ABI void finalizeDebugFrameIndices();
+
+  /// Loads become active only after target call lowering has emitted their
+  /// defining copies. This keeps unsupported targets on the ordinary memory
+  /// path even if the target-independent candidate analysis succeeds.
+  DenseMap<const LoadInst *, Register> ActiveGoRetValueProjections;
+
   /// ByValArgFrameIndexMap - Keep track of frame indices for byval arguments.
   DenseMap<const Argument*, int> ByValArgFrameIndexMap;
+
+  struct ArgumentValueHome {
+    uint64_t Offset;
+    uint64_t Size;
+    int FI;
+  };
+
+  /// Exact fixed stack homes from which formal argument values were loaded.
+  /// Unlike ByValArgFrameIndexMap, these describe the value stored in the
+  /// object, not an address passed as an argument.
+  DenseMap<const Argument *, SmallVector<ArgumentValueHome, 4>>
+      ArgumentValueHomeMap;
 
   /// ArgDbgValues - A list of DBG_VALUE instructions created during isel for
   /// function arguments that are inserted after scheduling is completed.
@@ -162,9 +213,9 @@ public:
   struct LiveOutInfo {
     unsigned NumSignBits : 31;
     unsigned IsValid : 1;
-    KnownBits Known = 1;
+    KnownBits Known;
 
-    LiveOutInfo() : NumSignBits(0), IsValid(true) {}
+    LiveOutInfo() : NumSignBits(0), IsValid(true), Known(1) {}
   };
 
   /// Record the preferred extend type (ISD::SIGN_EXTEND or ISD::ZERO_EXTEND)
@@ -197,12 +248,12 @@ public:
   /// set - Initialize this FunctionLoweringInfo with the given Function
   /// and its associated MachineFunction.
   ///
-  void set(const Function &Fn, MachineFunction &MF, SelectionDAG *DAG);
+  LLVM_ABI void set(const Function &Fn, MachineFunction &MF, SelectionDAG *DAG);
 
   /// clear - Clear out all the function-specific state. This returns this
   /// FunctionLoweringInfo to an empty state, ready to be used for a
   /// different function.
-  void clear();
+  LLVM_ABI void clear();
 
   /// isExportedInst - Return true if the specified value is an instruction
   /// exported from its block.
@@ -215,13 +266,39 @@ public:
     return MBBMap[BB->getNumber()];
   }
 
-  Register CreateReg(MVT VT, bool isDivergent = false);
+  LLVM_ABI Register CreateReg(MVT VT, bool isDivergent = false);
 
-  Register CreateRegs(const Value *V);
+  LLVM_ABI Register CreateRegs(const Value *V);
 
-  Register CreateRegs(Type *Ty, bool isDivergent = false);
+  LLVM_ABI Register CreateRegs(Type *Ty, bool isDivergent = false);
 
-  Register InitializeRegForValue(const Value *V);
+  LLVM_ABI Register InitializeRegForValue(const Value *V);
+
+  ArrayRef<GoRetValueProjection>
+  getGoRetValueProjections(const AllocaInst *AI) const {
+    auto It = GoRetValueProjections.find(AI);
+    return It == GoRetValueProjections.end()
+               ? ArrayRef<GoRetValueProjection>()
+               : ArrayRef<GoRetValueProjection>(It->second);
+  }
+
+  void activateGoRetValueProjections(const AllocaInst *AI) {
+    for (const GoRetValueProjection &Projection : getGoRetValueProjections(AI))
+      ActiveGoRetValueProjections.try_emplace(Projection.Load, Projection.Reg);
+  }
+
+  Register getActiveGoRetValueProjection(const LoadInst *Load) const {
+    auto It = ActiveGoRetValueProjections.find(Load);
+    return It == ActiveGoRetValueProjections.end() ? Register() : It->second;
+  }
+
+  bool isGoRetValueProjectionCarrier(const AllocaInst *AI) const {
+    return GoRetValueProjections.contains(AI);
+  }
+
+  bool isGoByValCallCarrier(const AllocaInst *AI) const {
+    return GoByValCallCarriers.contains(AI);
+  }
 
   /// GetLiveOutRegInfo - Gets LiveOutInfo for a register, returning NULL if the
   /// register is a PHI destination and the PHI's LiveOutInfo is not valid.
@@ -241,7 +318,8 @@ public:
   /// the register's LiveOutInfo is for a smaller bit width, it is extended to
   /// the larger bit width by zero extension. The bit width must be no smaller
   /// than the LiveOutInfo's existing bit width.
-  const LiveOutInfo *GetLiveOutRegInfo(Register Reg, unsigned BitWidth);
+  LLVM_ABI const LiveOutInfo *GetLiveOutRegInfo(Register Reg,
+                                                unsigned BitWidth);
 
   /// AddLiveOutRegInfo - Adds LiveOutInfo for a register.
   void AddLiveOutRegInfo(Register Reg, unsigned NumSignBits,
@@ -259,13 +337,13 @@ public:
 
   /// ComputePHILiveOutRegInfo - Compute LiveOutInfo for a PHI's destination
   /// register based on the LiveOutInfo of its operands.
-  void ComputePHILiveOutRegInfo(const PHINode*);
+  LLVM_ABI void ComputePHILiveOutRegInfo(const PHINode *);
 
   /// InvalidatePHILiveOutRegInfo - Invalidates a PHI's LiveOutInfo, to be
   /// called when a block is visited before all of its predecessors.
   void InvalidatePHILiveOutRegInfo(const PHINode *PN) {
     // PHIs with no uses have no ValueMap entry.
-    DenseMap<const Value*, Register>::const_iterator It = ValueMap.find(PN);
+    auto It = ValueMap.find(PN);
     if (It == ValueMap.end())
       return;
 
@@ -279,13 +357,18 @@ public:
 
   /// setArgumentFrameIndex - Record frame index for the byval
   /// argument.
-  void setArgumentFrameIndex(const Argument *A, int FI);
+  LLVM_ABI void setArgumentFrameIndex(const Argument *A, int FI);
 
   /// getArgumentFrameIndex - Get frame index for the byval argument.
-  int getArgumentFrameIndex(const Argument *A);
+  LLVM_ABI int getArgumentFrameIndex(const Argument *A);
 
-  Register getCatchPadExceptionPointerVReg(const Value *CPI,
-                                           const TargetRegisterClass *RC);
+  LLVM_ABI void addArgumentValueHome(const Argument *A, uint64_t Offset,
+                                     uint64_t Size, int FI);
+  LLVM_ABI int getArgumentValueHome(const Argument *A, uint64_t Offset,
+                                    uint64_t Size) const;
+
+  LLVM_ABI Register getCatchPadExceptionPointerVReg(
+      const Value *CPI, const TargetRegisterClass *RC);
 
   /// Set the call site currently being processed.
   void setCurrentCallSite(unsigned Site) { CurCallSite = Site; }
@@ -294,6 +377,10 @@ public:
   unsigned getCurrentCallSite() { return CurCallSite; }
 
 private:
+  // A fixed ABI home can survive for stack growth after its contents were
+  // forwarded, so MachineFrameInfo's dead-object flag alone is insufficient.
+  SmallSet<int, 8> EliminatedDebugFrameIndices;
+
   /// LiveOutRegInfo - Information about live out vregs.
   IndexedMap<LiveOutInfo, VirtReg2IndexFunctor> LiveOutRegInfo;
 };

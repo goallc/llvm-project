@@ -10,6 +10,7 @@
 #define LLVM_MC_MCCONTEXT_H
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
@@ -23,6 +24,7 @@
 #include "llvm/MC/MCPseudoProbe.h"
 #include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCSectionGOFF.h"
+#include "llvm/MC/MCSectionGoObj.h"
 #include "llvm/MC/MCSymbolTableEntry.h"
 #include "llvm/MC/SectionKind.h"
 #include "llvm/Support/Allocator.h"
@@ -47,6 +49,7 @@ namespace llvm {
 
 class CodeViewContext;
 class MCAsmInfo;
+class MCExpr;
 class MCInst;
 class MCLabel;
 class MCObjectFileInfo;
@@ -55,6 +58,7 @@ class MCSection;
 class MCSectionCOFF;
 class MCSectionDXContainer;
 class MCSectionELF;
+class MCSectionGoObj;
 class MCSectionMachO;
 class MCSectionSPIRV;
 class MCSectionWasm;
@@ -94,7 +98,136 @@ public:
     IsSPIRV,
     IsWasm,
     IsXCOFF,
-    IsDXContainer
+    IsDXContainer,
+    IsGoObj
+  };
+
+  /// Name-only late-helper index. IR code owns construction and validation;
+  /// MCContext owns its lifetime along with the other module emission state.
+  struct GoObjBuiltinNameIndex {
+    const void *Owner = nullptr;
+    StringMap<std::vector<std::string>> Names[2];
+
+    void clear() {
+      Owner = nullptr;
+      Names[0].clear();
+      Names[1].clear();
+    }
+  };
+
+  struct GoObjPCSPEntry {
+    const MCSymbol *Label;
+    int32_t Value;
+  };
+
+  struct GoObjUnsafePointEntry {
+    const MCSymbol *Label;
+    int32_t Value;
+  };
+
+  struct GoObjArgLiveEntry {
+    const MCSymbol *Label;
+    uint16_t Bitmap;
+  };
+
+  struct GoObjArgLiveInfo {
+    uint8_t StartOffset;
+    uint8_t NumSlots;
+    std::vector<GoObjArgLiveEntry> Entries;
+  };
+
+  struct GoObjStackMapLocation {
+    enum LocationType : uint8_t {
+      Unprocessed,
+      Register,
+      Direct,
+      Indirect,
+      Constant,
+      ConstantIndex,
+    };
+
+    LocationType Type;
+    uint16_t Size;
+    uint16_t DwarfRegNum;
+    int64_t Offset;
+  };
+
+  struct GoObjStackMapEntry {
+    const MCExpr *CallsiteOffsetExpr;
+    uint64_t ID;
+    uint64_t StackSize;
+    uint32_t PointerSize;
+    uint32_t NumDeoptLocations;
+    std::vector<GoObjStackMapLocation> Locations;
+  };
+
+  struct GoObjRelocOverride {
+    uint32_t Offset;
+    uint16_t Type;
+  };
+
+  struct GoObjMarkerReloc {
+    const MCSymbol *Target = nullptr;
+    uint16_t Type = 0;
+    int64_t Addend = 0;
+  };
+
+  struct GoObjImport {
+    std::string PackagePath;
+    std::string PackagePrefix;
+    std::array<uint8_t, 8> Fingerprint = {};
+  };
+
+  struct GoObjImportedSymbolRef {
+    std::string PackagePrefix;
+    uint32_t SymIdx = 0;
+    uint8_t Flags2 = 0;
+  };
+
+  struct GoObjDebugInlineFrame {
+    const MCSymbol *Callee = nullptr;
+    std::string CallFile;
+    uint32_t CallLine = 0;
+    uint64_t SiteID = 0;
+  };
+
+  // Labels keep source and inline state attached to final machine layout.
+  struct GoObjDebugLocation {
+    const MCSymbol *Label = nullptr;
+    std::string File;
+    uint32_t Line = 0;
+    std::vector<GoObjDebugInlineFrame> InlineFrames;
+    std::vector<GoObjDebugInlineFrame> AnchorChildFrames;
+  };
+
+  struct GoObjVariableLocation {
+    const MCSymbol *Begin = nullptr;
+    const MCSymbol *End = nullptr;
+    std::vector<uint8_t> Expression;
+  };
+
+  struct GoObjDebugVariable {
+    std::string Name;
+    std::string TypeName;
+    std::string File;
+    uint32_t DeclLine = 0;
+    uint32_t ArgNo = 0;
+    uint16_t DictIndex = 0;
+    bool IsReturn = false;
+    std::vector<GoObjVariableLocation> Locations;
+  };
+
+  struct GoObjDebugGlobal {
+    const MCSymbol *Symbol = nullptr;
+    std::string Name;
+  };
+
+  struct GoObjFunctionDebugInfo {
+    std::string Name;
+    std::string File;
+    uint32_t StartLine = 0;
+    std::vector<GoObjDebugLocation> Locations;
+    std::vector<GoObjDebugVariable> Variables;
   };
 
 private:
@@ -117,7 +250,7 @@ private:
   DiagHandlerTy DiagHandler;
 
   /// The MCAsmInfo for this target.
-  const MCAsmInfo *MAI = nullptr;
+  const MCAsmInfo &MAI;
 
   /// The MCRegisterInfo for this target.
   const MCRegisterInfo *MRI = nullptr;
@@ -144,6 +277,7 @@ private:
   SpecificBumpPtrAllocator<MCSectionELF> ELFAllocator;
   SpecificBumpPtrAllocator<MCSectionMachO> MachOAllocator;
   SpecificBumpPtrAllocator<MCSectionGOFF> GOFFAllocator;
+  SpecificBumpPtrAllocator<MCSectionGoObj> GoObjAllocator;
   SpecificBumpPtrAllocator<MCSectionSPIRV> SPIRVAllocator;
   SpecificBumpPtrAllocator<MCSectionWasm> WasmAllocator;
   SpecificBumpPtrAllocator<MCSectionXCOFF> XCOFFAllocator;
@@ -153,6 +287,112 @@ private:
 
   /// Bindings of names to symbol table values.
   SymbolTable Symbols;
+
+  GoObjBuiltinNameIndex GoObjBuiltinNames;
+
+  /// MC symbols known to denote Go functions, including declarations.
+  DenseSet<const MCSymbol *> GoObjFunctionSymbols;
+
+  /// Package-local indices assigned to Go object definitions by the frontend.
+  DenseMap<const MCSymbol *, uint32_t> GoObjPackageSymbolIndexes;
+
+  /// Semantic type for static read-only symbols synthesized after IR lowering.
+  std::optional<uint8_t> GoObjStaticRODataType;
+
+  /// Compiler-validated cgo directives serialized in the Go object header.
+  std::string GoObjCgoPragmas;
+
+  /// Go object definitions that are resolved by name instead of package index.
+  DenseSet<const MCSymbol *> GoObjNonPackageSymbols;
+
+  /// Go object symbol stack sizes keyed by MC symbol.
+  DenseMap<const MCSymbol *, uint32_t> GoObjSymbolStackSizes;
+
+  /// Go object symbol argument sizes keyed by MC symbol.
+  DenseMap<const MCSymbol *, uint32_t> GoObjSymbolArgSizes;
+
+  /// Whether a Go object symbol uses a frame pointer, keyed by MC symbol.
+  DenseMap<const MCSymbol *, bool> GoObjSymbolHasFramePointers;
+
+  /// Go object symbol flags keyed by MC symbol.
+  DenseMap<const MCSymbol *, std::pair<uint8_t, uint8_t>> GoObjSymbolFlags;
+
+  /// Go object function ID and function flags keyed by MC symbol.
+  DenseMap<const MCSymbol *, std::pair<uint8_t, uint8_t>> GoObjFunctionInfos;
+
+  /// Go object traceback argument data keyed by function MC symbol.
+  DenseMap<const MCSymbol *, const MCSymbol *> GoObjFunctionArgInfos;
+
+  /// Final-layout liveness of ABIInternal register argument homes.
+  DenseMap<const MCSymbol *, GoObjArgLiveInfo> GoObjFunctionArgLiveInfos;
+
+  /// Native Go content-addressable identity hashes keyed by MC symbol.
+  DenseMap<const MCSymbol *, std::string> GoObjSymbolContentHashes;
+
+  /// Go text symbols whose content hash must be computed after code emission.
+  DenseSet<const MCSymbol *> GoObjContentAddressableSymbols;
+
+  /// End labels for Go text symbols, excluding inter-function padding.
+  DenseMap<const MCSymbol *, const MCSymbol *> GoObjFunctionEnds;
+
+  /// Go object data-relocation type overrides keyed by MC symbol. LLVM IR
+  /// constants describe an address but not Go's weak-address variants.
+  DenseMap<const MCSymbol *, std::vector<GoObjRelocOverride>>
+      GoObjRelocOverrides;
+
+  /// Go object data relocations whose inferred relocation kind is weak.
+  DenseMap<const MCSymbol *, std::vector<uint32_t>> GoObjWeakRelocs;
+
+  /// Direct call edges which do not make their target reachable in Go's linker.
+  DenseSet<std::pair<const MCSymbol *, const MCSymbol *>> GoObjWeakCalls;
+
+  /// Go object zero-width R_KEEP targets keyed by their source symbol.
+  DenseMap<const MCSymbol *, std::vector<const MCSymbol *>> GoObjKeepTargets;
+
+  /// Go object zero-width linker marker relocations keyed by source symbol.
+  DenseMap<const MCSymbol *, std::vector<GoObjMarkerReloc>> GoObjMarkerRelocs;
+
+  /// Imported packages and their opaque linker fingerprints, in source order.
+  std::vector<GoObjImport> GoObjImports;
+
+  /// Indexed imported references keyed by their MC symbol.
+  DenseMap<const MCSymbol *, GoObjImportedSymbolRef> GoObjImportedSymbolRefs;
+
+  /// Explicit LLVM global alignments for Go object data symbols.
+  DenseMap<const MCSymbol *, uint32_t> GoObjSymbolAlignments;
+
+  /// Exact LLVM global sizes for Go object data symbols.
+  DenseMap<const MCSymbol *, uint64_t> GoObjSymbolSizes;
+
+  /// Go type auxiliary targets for data symbols.
+  DenseMap<const MCSymbol *, const MCSymbol *> GoObjGotypeTargets;
+
+  /// Go object pcsp entries keyed by MC symbol.
+  DenseMap<const MCSymbol *, std::vector<GoObjPCSPEntry>>
+      GoObjSymbolPCSPEntries;
+
+  /// Final-layout labels at non-tail indirect call instructions, keyed by
+  /// their containing Go object function.
+  DenseMap<const MCSymbol *, std::vector<const MCSymbol *>>
+      GoObjSymbolIndirectCallLabels;
+
+  /// Go object asynchronous-preemption PC-data transitions keyed by symbol.
+  DenseMap<const MCSymbol *, std::vector<GoObjUnsafePointEntry>>
+      GoObjSymbolUnsafePointEntries;
+
+  /// Whether a Go object function is unsafe for asynchronous preemption over
+  /// its complete PC range.
+  DenseMap<const MCSymbol *, bool> GoObjSymbolAsyncUnsafe;
+
+  /// Go object statepoint stack maps keyed by function MC symbol.
+  DenseMap<const MCSymbol *, std::vector<GoObjStackMapEntry>>
+      GoObjSymbolStackMapEntries;
+
+  DenseMap<const MCSymbol *, GoObjFunctionDebugInfo> GoObjFunctionDebugInfos;
+  std::vector<GoObjDebugGlobal> GoObjDebugGlobals;
+  DenseSet<const MCSymbol *> GoObjInlineAnchorSymbols;
+  unsigned GoObjDwarfVersion = 0;
+  std::string GoObjDwarfPackageName;
 
   /// A mapping from a local label number and an instance count to a symbol.
   /// For example, in the assembly
@@ -175,7 +415,7 @@ private:
   unsigned GetInstance(unsigned LocalLabelVal);
 
   /// SHT_LLVM_BB_ADDR_MAP version to emit.
-  uint8_t BBAddrMapVersion = 4;
+  uint8_t BBAddrMapVersion = 5;
 
   /// The file name of the log file from the environment variable
   /// AS_SECURE_LOG_FILE.  Which must be set before the .secure_log_unique
@@ -316,6 +556,7 @@ private:
   std::map<COFFSectionKey, MCSectionCOFF *> COFFUniquingMap;
   StringMap<MCSectionELF *> ELFUniquingMap;
   std::map<std::string, MCSectionGOFF *> GOFFUniquingMap;
+  StringMap<MCSectionGoObj *> GoObjUniquingMap;
   std::map<WasmSectionKey, MCSectionWasm *> WasmUniquingMap;
   std::map<XCOFFSectionKey, MCSectionXCOFF *> XCOFFUniquingMap;
   StringMap<MCSectionDXContainer *> DXCUniquingMap;
@@ -325,8 +566,6 @@ private:
 
   /// Do automatic reset in destructor
   bool AutoReset;
-
-  MCTargetOptions const *TargetOptions;
 
   bool HadError = false;
 
@@ -378,11 +617,14 @@ private:
   DenseSet<StringRef> ELFSeenGenericMergeableSections;
 
 public:
-  LLVM_ABI explicit MCContext(const Triple &TheTriple, const MCAsmInfo *MAI,
-                              const MCRegisterInfo *MRI,
-                              const MCSubtargetInfo *MSTI,
+  GoObjBuiltinNameIndex &getGoObjBuiltinNameIndex() {
+    return GoObjBuiltinNames;
+  }
+
+  LLVM_ABI explicit MCContext(const Triple &TheTriple, const MCAsmInfo &MAI,
+                              const MCRegisterInfo &MRI,
+                              const MCSubtargetInfo &MSTI,
                               const SourceMgr *Mgr = nullptr,
-                              MCTargetOptions const *TargetOpts = nullptr,
                               bool DoAutoReset = true,
                               StringRef Swift5ReflSegmentName = {});
   MCContext(const MCContext &) = delete;
@@ -391,6 +633,7 @@ public:
 
   Environment getObjectFileType() const { return Env; }
   bool isELF() const { return Env == IsELF; }
+  bool isGoObj() const { return Env == IsGoObj; }
   bool isMachO() const { return Env == IsMachO; }
   bool isXCOFF() const { return Env == IsXCOFF; }
 
@@ -409,7 +652,7 @@ public:
 
   void setObjectFileInfo(const MCObjectFileInfo *Mofi) { MOFI = Mofi; }
 
-  const MCAsmInfo *getAsmInfo() const { return MAI; }
+  const MCAsmInfo &getAsmInfo() const { return MAI; }
 
   const MCRegisterInfo *getRegisterInfo() const { return MRI; }
 
@@ -417,7 +660,7 @@ public:
 
   const MCSubtargetInfo *getSubtargetInfo() const { return MSTI; }
 
-  const MCTargetOptions *getTargetOptions() const { return TargetOptions; }
+  LLVM_ABI const MCTargetOptions &getTargetOptions() const;
 
   LLVM_ABI CodeViewContext &getCVContext();
 
@@ -460,8 +703,8 @@ public:
 
   /// Get or create a symbol for a basic block. For non-always-emit symbols,
   /// this behaves like createTempSymbol, except that it uses the
-  /// PrivateLabelPrefix instead of the PrivateGlobalPrefix. When AlwaysEmit is
-  /// true, behaves like getOrCreateSymbol, prefixed with PrivateLabelPrefix.
+  /// InternalSymbolPrefix. When AlwaysEmit is true, behaves like
+  /// getOrCreateSymbol, prefixed with InternalSymbolPrefix.
   LLVM_ABI MCSymbol *createBlockSymbol(const Twine &Name,
                                        bool AlwaysEmit = false);
 
@@ -526,6 +769,390 @@ public:
   /// registerInlineAsmLabel - Records that the name is a label referenced in
   /// inline assembly.
   LLVM_ABI void registerInlineAsmLabel(MCSymbol *Sym);
+
+  void setGoObjFunctionSymbol(const MCSymbol *Sym) {
+    GoObjFunctionSymbols.insert(Sym);
+  }
+
+  bool isGoObjFunctionSymbol(const MCSymbol *Sym) const {
+    return GoObjFunctionSymbols.contains(Sym);
+  }
+
+  void setGoObjPackageSymbolIndex(const MCSymbol *Sym, uint32_t Index) {
+    GoObjPackageSymbolIndexes[Sym] = Index;
+  }
+
+  std::optional<uint32_t>
+  getGoObjPackageSymbolIndex(const MCSymbol *Sym) const {
+    auto It = GoObjPackageSymbolIndexes.find(Sym);
+    if (It == GoObjPackageSymbolIndexes.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjStaticRODataType(uint8_t Type) { GoObjStaticRODataType = Type; }
+
+  std::optional<uint8_t> getGoObjStaticRODataType() const {
+    return GoObjStaticRODataType;
+  }
+
+  void setGoObjCgoPragmas(StringRef Pragmas) {
+    GoObjCgoPragmas = Pragmas.str();
+  }
+
+  StringRef getGoObjCgoPragmas() const { return GoObjCgoPragmas; }
+
+  void setGoObjSymbolNonPackage(const MCSymbol *Sym) {
+    GoObjNonPackageSymbols.insert(Sym);
+  }
+
+  bool isGoObjSymbolNonPackage(const MCSymbol *Sym) const {
+    return GoObjNonPackageSymbols.contains(Sym);
+  }
+
+  void setGoObjSymbolStackSize(const MCSymbol *Sym, uint32_t StackSize) {
+    GoObjSymbolStackSizes[Sym] = StackSize;
+  }
+
+  std::optional<uint32_t> getGoObjSymbolStackSize(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolStackSizes.find(Sym);
+    if (It == GoObjSymbolStackSizes.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjSymbolArgSize(const MCSymbol *Sym, uint32_t ArgSize) {
+    GoObjSymbolArgSizes[Sym] = ArgSize;
+  }
+
+  std::optional<uint32_t> getGoObjSymbolArgSize(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolArgSizes.find(Sym);
+    if (It == GoObjSymbolArgSizes.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjSymbolHasFramePointer(const MCSymbol *Sym,
+                                     bool HasFramePointer) {
+    GoObjSymbolHasFramePointers[Sym] = HasFramePointer;
+  }
+
+  std::optional<bool> getGoObjSymbolHasFramePointer(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolHasFramePointers.find(Sym);
+    if (It == GoObjSymbolHasFramePointers.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjSymbolFlags(const MCSymbol *Sym, uint8_t Flag, uint8_t Flag2) {
+    GoObjSymbolFlags[Sym] = {Flag, Flag2};
+  }
+
+  std::optional<std::pair<uint8_t, uint8_t>>
+  getGoObjSymbolFlags(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolFlags.find(Sym);
+    if (It == GoObjSymbolFlags.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjFunctionInfo(const MCSymbol *Sym, uint8_t FuncID,
+                            uint8_t FuncFlag) {
+    GoObjFunctionInfos[Sym] = {FuncID, FuncFlag};
+  }
+
+  std::optional<std::pair<uint8_t, uint8_t>>
+  getGoObjFunctionInfo(const MCSymbol *Sym) const {
+    auto It = GoObjFunctionInfos.find(Sym);
+    if (It == GoObjFunctionInfos.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjFunctionArgInfo(const MCSymbol *Sym, const MCSymbol *ArgInfo) {
+    GoObjFunctionArgInfos[Sym] = ArgInfo;
+  }
+
+  const MCSymbol *getGoObjFunctionArgInfo(const MCSymbol *Sym) const {
+    auto It = GoObjFunctionArgInfos.find(Sym);
+    return It == GoObjFunctionArgInfos.end() ? nullptr : It->second;
+  }
+
+  void setGoObjFunctionArgLiveInfo(const MCSymbol *Sym,
+                                   GoObjArgLiveInfo Info) {
+    GoObjFunctionArgLiveInfos[Sym] = std::move(Info);
+  }
+
+  const GoObjArgLiveInfo *
+  getGoObjFunctionArgLiveInfo(const MCSymbol *Sym) const {
+    auto It = GoObjFunctionArgLiveInfos.find(Sym);
+    return It == GoObjFunctionArgLiveInfos.end() ? nullptr : &It->second;
+  }
+
+  void setGoObjSymbolContentHash(const MCSymbol *Sym, std::string Hash) {
+    GoObjSymbolContentHashes[Sym] = std::move(Hash);
+  }
+
+  StringRef getGoObjSymbolContentHash(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolContentHashes.find(Sym);
+    if (It == GoObjSymbolContentHashes.end())
+      return {};
+    return It->second;
+  }
+
+  void setGoObjSymbolContentAddressable(const MCSymbol *Sym) {
+    GoObjContentAddressableSymbols.insert(Sym);
+  }
+
+  bool isGoObjSymbolContentAddressable(const MCSymbol *Sym) const {
+    return GoObjContentAddressableSymbols.contains(Sym);
+  }
+
+  void setGoObjFunctionEnd(const MCSymbol *Sym, const MCSymbol *End) {
+    GoObjFunctionEnds[Sym] = End;
+  }
+
+  const MCSymbol *getGoObjFunctionEnd(const MCSymbol *Sym) const {
+    auto It = GoObjFunctionEnds.find(Sym);
+    if (It == GoObjFunctionEnds.end())
+      return nullptr;
+    return It->second;
+  }
+
+  void setGoObjRelocOverrides(const MCSymbol *Sym,
+                              std::vector<GoObjRelocOverride> Overrides) {
+    GoObjRelocOverrides[Sym] = std::move(Overrides);
+  }
+
+  const std::vector<GoObjRelocOverride> *
+  getGoObjRelocOverrides(const MCSymbol *Sym) const {
+    auto It = GoObjRelocOverrides.find(Sym);
+    if (It == GoObjRelocOverrides.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void setGoObjWeakRelocs(const MCSymbol *Sym, std::vector<uint32_t> Offsets) {
+    GoObjWeakRelocs[Sym] = std::move(Offsets);
+  }
+
+  void addGoObjWeakCall(const MCSymbol *Source, const MCSymbol *Target) {
+    GoObjWeakCalls.insert({Source, Target});
+  }
+
+  bool isGoObjWeakCall(const MCSymbol *Source, const MCSymbol *Target) const {
+    return GoObjWeakCalls.contains({Source, Target});
+  }
+
+  const std::vector<uint32_t> *getGoObjWeakRelocs(const MCSymbol *Sym) const {
+    auto It = GoObjWeakRelocs.find(Sym);
+    if (It == GoObjWeakRelocs.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void setGoObjKeepTargets(const MCSymbol *Sym,
+                           std::vector<const MCSymbol *> Targets) {
+    GoObjKeepTargets[Sym] = std::move(Targets);
+  }
+
+  const std::vector<const MCSymbol *> *
+  getGoObjKeepTargets(const MCSymbol *Sym) const {
+    auto It = GoObjKeepTargets.find(Sym);
+    if (It == GoObjKeepTargets.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void setGoObjMarkerRelocs(const MCSymbol *Sym,
+                            std::vector<GoObjMarkerReloc> Relocs) {
+    GoObjMarkerRelocs[Sym] = std::move(Relocs);
+  }
+
+  const std::vector<GoObjMarkerReloc> *
+  getGoObjMarkerRelocs(const MCSymbol *Sym) const {
+    auto It = GoObjMarkerRelocs.find(Sym);
+    if (It == GoObjMarkerRelocs.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void setGoObjImports(std::vector<GoObjImport> Imports) {
+    GoObjImports = std::move(Imports);
+  }
+
+  ArrayRef<GoObjImport> getGoObjImports() const { return GoObjImports; }
+
+  void setGoObjImportedSymbolRef(const MCSymbol *Sym,
+                                 GoObjImportedSymbolRef Ref) {
+    GoObjImportedSymbolRefs[Sym] = std::move(Ref);
+  }
+
+  const GoObjImportedSymbolRef *
+  getGoObjImportedSymbolRef(const MCSymbol *Sym) const {
+    auto It = GoObjImportedSymbolRefs.find(Sym);
+    if (It == GoObjImportedSymbolRefs.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void setGoObjSymbolAlignment(const MCSymbol *Sym, uint32_t Alignment) {
+    GoObjSymbolAlignments[Sym] = Alignment;
+  }
+
+  std::optional<uint32_t> getGoObjSymbolAlignment(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolAlignments.find(Sym);
+    if (It == GoObjSymbolAlignments.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjSymbolSize(const MCSymbol *Sym, uint64_t Size) {
+    GoObjSymbolSizes[Sym] = Size;
+  }
+
+  std::optional<uint64_t> getGoObjSymbolSize(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolSizes.find(Sym);
+    if (It == GoObjSymbolSizes.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  void setGoObjGotypeTarget(const MCSymbol *Sym, const MCSymbol *Target) {
+    GoObjGotypeTargets[Sym] = Target;
+  }
+
+  const MCSymbol *getGoObjGotypeTarget(const MCSymbol *Sym) const {
+    auto It = GoObjGotypeTargets.find(Sym);
+    if (It == GoObjGotypeTargets.end())
+      return nullptr;
+    return It->second;
+  }
+
+  void setGoObjSymbolPCSPEntries(const MCSymbol *Sym,
+                                 std::vector<GoObjPCSPEntry> Entries) {
+    GoObjSymbolPCSPEntries[Sym] = std::move(Entries);
+  }
+
+  const std::vector<GoObjPCSPEntry> *
+  getGoObjSymbolPCSPEntries(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolPCSPEntries.find(Sym);
+    if (It == GoObjSymbolPCSPEntries.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void addGoObjSymbolIndirectCallLabel(const MCSymbol *Sym,
+                                       const MCSymbol *Label) {
+    GoObjSymbolIndirectCallLabels[Sym].push_back(Label);
+  }
+
+  const std::vector<const MCSymbol *> *
+  getGoObjSymbolIndirectCallLabels(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolIndirectCallLabels.find(Sym);
+    if (It == GoObjSymbolIndirectCallLabels.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void
+  setGoObjSymbolUnsafePointEntries(const MCSymbol *Sym,
+                                   std::vector<GoObjUnsafePointEntry> Entries) {
+    GoObjSymbolUnsafePointEntries[Sym] = std::move(Entries);
+  }
+
+  const std::vector<GoObjUnsafePointEntry> *
+  getGoObjSymbolUnsafePointEntries(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolUnsafePointEntries.find(Sym);
+    if (It == GoObjSymbolUnsafePointEntries.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void setGoObjSymbolAsyncUnsafe(const MCSymbol *Sym, bool AsyncUnsafe) {
+    GoObjSymbolAsyncUnsafe[Sym] = AsyncUnsafe;
+  }
+
+  bool isGoObjSymbolAsyncUnsafe(const MCSymbol *Sym) const {
+    return GoObjSymbolAsyncUnsafe.lookup(Sym);
+  }
+
+  void addGoObjSymbolStackMapEntry(const MCSymbol *Sym,
+                                   GoObjStackMapEntry Entry) {
+    GoObjSymbolStackMapEntries[Sym].push_back(std::move(Entry));
+  }
+
+  const std::vector<GoObjStackMapEntry> *
+  getGoObjSymbolStackMapEntries(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolStackMapEntries.find(Sym);
+    if (It == GoObjSymbolStackMapEntries.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void setGoObjFunctionSource(const MCSymbol *Sym, StringRef File,
+                              uint32_t StartLine) {
+    GoObjFunctionDebugInfo &Info = GoObjFunctionDebugInfos[Sym];
+    Info.File = File.str();
+    Info.StartLine = StartLine;
+  }
+
+  void setGoObjSubprogramDebugInfo(const MCSymbol *Sym, StringRef Name,
+                                   StringRef File, uint32_t StartLine,
+                                   std::vector<GoObjDebugVariable> Variables) {
+    GoObjFunctionDebugInfo &Info = GoObjFunctionDebugInfos[Sym];
+    Info.Name = Name.str();
+    Info.File = File.str();
+    Info.StartLine = StartLine;
+    Info.Variables = std::move(Variables);
+  }
+
+  void addGoObjDebugLocation(const MCSymbol *Sym, GoObjDebugLocation Location) {
+    GoObjFunctionDebugInfos[Sym].Locations.push_back(std::move(Location));
+  }
+
+  const GoObjFunctionDebugInfo *
+  getGoObjFunctionDebugInfo(const MCSymbol *Sym) const {
+    auto It = GoObjFunctionDebugInfos.find(Sym);
+    return It == GoObjFunctionDebugInfos.end() ? nullptr : &It->second;
+  }
+
+  void addGoObjVariableLocation(const MCSymbol *Sym, unsigned VariableIndex,
+                                GoObjVariableLocation Location) {
+    GoObjFunctionDebugInfos[Sym]
+        .Variables.at(VariableIndex)
+        .Locations.push_back(std::move(Location));
+  }
+
+  void addGoObjDebugGlobal(GoObjDebugGlobal Global) {
+    GoObjDebugGlobals.push_back(std::move(Global));
+  }
+
+  ArrayRef<GoObjDebugGlobal> getGoObjDebugGlobals() const {
+    return GoObjDebugGlobals;
+  }
+
+  void markGoObjInlineAnchor(const MCSymbol *Sym) {
+    GoObjInlineAnchorSymbols.insert(Sym);
+  }
+
+  bool isGoObjInlineAnchor(const MCSymbol *Sym) const {
+    return GoObjInlineAnchorSymbols.contains(Sym);
+  }
+
+  void setGoObjDwarfVersion(unsigned Version) {
+    assert((Version == 0 || Version == 4 || Version == 5) &&
+           "unsupported GoObj DWARF version");
+    GoObjDwarfVersion = Version;
+  }
+
+  unsigned getGoObjDwarfVersion() const { return GoObjDwarfVersion; }
+
+  void setGoObjDwarfPackageName(StringRef Name) {
+    GoObjDwarfPackageName = Name.str();
+  }
+
+  StringRef getGoObjDwarfPackageName() const { return GoObjDwarfPackageName; }
 
   /// Allocates and returns a new `WasmSignature` instance (with empty parameter
   /// and return type lists).
@@ -637,6 +1264,8 @@ public:
                             unsigned UniqueID = MCSection::NonUniqueID);
 
   LLVM_ABI MCSectionSPIRV *getSPIRVSection();
+
+  LLVM_ABI MCSectionGoObj *getGoObjSection(StringRef Section, SectionKind K);
 
   MCSectionWasm *getWasmSection(const Twine &Section, SectionKind K,
                                 unsigned Flags = 0) {

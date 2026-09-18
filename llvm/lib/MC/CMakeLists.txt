@@ -1,8 +1,10 @@
 add_llvm_component_library(LLVMMC
   ConstantPools.cpp
+  DXContainerInfo.cpp
   DXContainerPSVInfo.cpp
   DXContainerRootSignature.cpp
   ELFObjectWriter.cpp
+  GoObjObjectWriter.cpp
   GOFFObjectWriter.cpp
   MCAsmBackend.cpp
   MCAsmInfo.cpp
@@ -26,11 +28,14 @@ add_llvm_component_library(LLVMMC
   MCExpr.cpp
   MCFragment.cpp
   MCGOFFStreamer.cpp
+  MCGoObjStreamer.cpp
   MCInst.cpp
   MCInstPrinter.cpp
   MCInstrAnalysis.cpp
   MCInstrDesc.cpp
   MCInstrInfo.cpp
+  MCLFI.cpp
+  MCLFIRewriter.cpp
   MCLabel.cpp
   MCLinkerOptimizationHint.cpp
   MCMachOStreamer.cpp
@@ -50,6 +55,7 @@ add_llvm_component_library(LLVMMC
   MCSubtargetInfo.cpp
   MCSymbol.cpp
   MCSymbolELF.cpp
+  MCSymbolGOFF.cpp
   MCSymbolXCOFF.cpp
   MCTargetOptions.cpp
   MCTargetOptionsCommandFlags.cpp
@@ -80,6 +86,7 @@ add_llvm_component_library(LLVMMC
 
   DEPENDS
   intrinsics_gen
+  llvm_vcsrevision_h
   )
 
 add_subdirectory(MCParser)

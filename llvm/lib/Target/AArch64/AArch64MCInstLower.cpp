@@ -93,16 +93,14 @@ MCSymbol *AArch64MCInstLower::GetGlobalValueSymbol(const GlobalValue *GV,
 
   SmallString<128> Name;
 
-  if ((TargetFlags & AArch64II::MO_DLLIMPORT) &&
-      TheTriple.isWindowsArm64EC() &&
-      !(TargetFlags & AArch64II::MO_ARM64EC_CALLMANGLE) &&
-      isa<Function>(GV)) {
+  if ((TargetFlags & AArch64II::MO_DLLIMPORT) && TheTriple.isWindowsArm64EC() &&
+      !(TargetFlags & AArch64II::MO_ARM64EC_CALLMANGLE) && isa<Function>(GV)) {
     // __imp_aux is specific to arm64EC; it represents the actual address of
     // an imported function without any thunks.
     //
     // If we see a reference to an "aux" symbol, also emit a reference to the
     // corresponding non-aux symbol.  Otherwise, the Microsoft linker behaves
-    // strangely when linking against x64 import libararies.
+    // strangely when linking against x64 import libraries.
     //
     // emitSymbolAttribute() doesn't have any real effect here; it just
     // ensures the symbol name appears in the assembly without any
@@ -128,8 +126,7 @@ MCSymbol *AArch64MCInstLower::GetGlobalValueSymbol(const GlobalValue *GV,
   if (TargetFlags & AArch64II::MO_COFFSTUB) {
     MachineModuleInfoCOFF &MMICOFF =
         Printer.MMI->getObjFileInfo<MachineModuleInfoCOFF>();
-    MachineModuleInfoImpl::StubValueTy &StubSym =
-        MMICOFF.getGVStubEntry(MCSym);
+    MachineModuleInfoImpl::StubValueTy &StubSym = MMICOFF.getGVStubEntry(MCSym);
 
     if (!StubSym.getPointer())
       StubSym = MachineModuleInfoImpl::StubValueTy(Printer.getSymbol(GV), true);
@@ -325,7 +322,9 @@ MCOperand AArch64MCInstLower::LowerSymbolOperand(const MachineOperand &MO,
   if (Printer.TM.getTargetTriple().isOSBinFormatCOFF())
     return lowerSymbolOperandCOFF(MO, Sym);
 
-  assert(Printer.TM.getTargetTriple().isOSBinFormatELF() && "Invalid target");
+  assert((Printer.TM.getTargetTriple().isOSBinFormatELF() ||
+          Printer.TM.getTargetTriple().isOSBinFormatGoObj()) &&
+         "Invalid target");
   return lowerSymbolOperandELF(MO, Sym);
 }
 

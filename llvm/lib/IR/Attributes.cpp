@@ -265,6 +265,10 @@ Attribute Attribute::getWithByRefType(LLVMContext &Context, Type *Ty) {
   return get(Context, ByRef, Ty);
 }
 
+Attribute Attribute::getWithGoRetType(LLVMContext &Context, Type *Ty) {
+  return get(Context, GoRet, Ty);
+}
+
 Attribute Attribute::getWithPreallocatedType(LLVMContext &Context, Type *Ty) {
   return get(Context, Preallocated, Ty);
 }
@@ -286,6 +290,11 @@ Attribute Attribute::getWithMemoryEffects(LLVMContext &Context,
 Attribute Attribute::getWithNoFPClass(LLVMContext &Context,
                                       FPClassTest ClassMask) {
   return get(Context, NoFPClass, ClassMask);
+}
+
+Attribute Attribute::getWithDeadOnReturnInfo(LLVMContext &Context,
+                                             DeadOnReturnInfo DI) {
+  return get(Context, DeadOnReturn, DI.toIntValue());
 }
 
 Attribute Attribute::getWithCaptureInfo(LLVMContext &Context, CaptureInfo CI) {
@@ -451,6 +460,13 @@ uint64_t Attribute::getDereferenceableBytes() const {
   return pImpl->getValueAsInt();
 }
 
+DeadOnReturnInfo Attribute::getDeadOnReturnInfo() const {
+  assert(hasAttribute(Attribute::DeadOnReturn) &&
+         "Trying to get dead_on_return bytes from"
+         "a parameter without such an attribute!");
+  return DeadOnReturnInfo::createFromIntValue(pImpl->getValueAsInt());
+}
+
 uint64_t Attribute::getDereferenceableOrNullBytes() const {
   assert(hasAttribute(Attribute::DereferenceableOrNull) &&
          "Trying to get dereferenceable bytes from "
@@ -501,6 +517,10 @@ CaptureInfo Attribute::getCaptureInfo() const {
   return CaptureInfo::createFromIntValue(pImpl->getValueAsInt());
 }
 
+DenormalFPEnv Attribute::getDenormalFPEnv() const {
+  return DenormalFPEnv::createFromIntValue(pImpl->getValueAsInt());
+}
+
 FPClassTest Attribute::getNoFPClass() const {
   assert(hasAttribute(Attribute::NoFPClass) &&
          "Can only call getNoFPClass() on nofpclass attribute");
@@ -544,7 +564,6 @@ std::string Attribute::getAsString(bool InAttrGrp) const {
     Result += '(';
     raw_string_ostream OS(Result);
     getValueAsType()->print(OS, false, true);
-    OS.flush();
     Result += ')';
     return Result;
   }
@@ -573,6 +592,13 @@ std::string Attribute::getAsString(bool InAttrGrp) const {
 
   if (hasAttribute(Attribute::DereferenceableOrNull))
     return AttrWithBytesToString("dereferenceable_or_null");
+
+  if (hasAttribute(Attribute::DeadOnReturn)) {
+    uint64_t DeadBytes = getValueAsInt();
+    if (DeadBytes == std::numeric_limits<uint64_t>::max())
+      return "dead_on_return";
+    return AttrWithBytesToString("dead_on_return");
+  }
 
   if (hasAttribute(Attribute::AllocSize)) {
     unsigned ElemSize;
@@ -635,14 +661,28 @@ std::string Attribute::getAsString(bool InAttrGrp) const {
       OS << getModRefStr(OtherMR);
     }
 
+    bool TargetPrintedForAll = false;
     for (auto Loc : MemoryEffects::locations()) {
       ModRefInfo MR = ME.getModRef(Loc);
       if (MR == OtherMR)
         continue;
 
-      if (!First)
+      if (!First && !TargetPrintedForAll)
         OS << ", ";
       First = false;
+
+      // isTargetMemLocSameForAll is fine for target location < 3
+      // If more targets are added it should do something like:
+      // memory(target_mem:read, target_mem3:none, target_mem5:write).
+      if (ME.isTargetMemLoc(Loc) && ME.isTargetMemLocSameForAll()) {
+        if (!TargetPrintedForAll) {
+          OS << "target_mem: ";
+          OS << getModRefStr(MR);
+          TargetPrintedForAll = true;
+        }
+        // Only works when target memories are last to be listed in Location.
+        continue;
+      }
 
       switch (Loc) {
       case IRMemLocation::ArgMem:
@@ -656,25 +696,39 @@ std::string Attribute::getAsString(bool InAttrGrp) const {
         break;
       case IRMemLocation::Other:
         llvm_unreachable("This is represented as the default access kind");
+      case IRMemLocation::TargetMem0:
+        OS << "target_mem0: ";
+        break;
+      case IRMemLocation::TargetMem1:
+        OS << "target_mem1: ";
+        break;
       }
       OS << getModRefStr(MR);
     }
     OS << ")";
-    OS.flush();
     return Result;
   }
 
   if (hasAttribute(Attribute::Captures)) {
     std::string Result;
+    raw_string_ostream(Result) << getCaptureInfo();
+    return Result;
+  }
+
+  if (hasAttribute(Attribute::DenormalFPEnv)) {
+    std::string Result = "denormal_fpenv(";
     raw_string_ostream OS(Result);
-    OS << getCaptureInfo();
+
+    struct DenormalFPEnv FPEnv = getDenormalFPEnv();
+    FPEnv.print(OS, /*OmitIfSame=*/true);
+
+    OS << ')';
     return Result;
   }
 
   if (hasAttribute(Attribute::NoFPClass)) {
     std::string Result = "nofpclass";
-    raw_string_ostream OS(Result);
-    OS << getNoFPClass();
+    raw_string_ostream(Result) << getNoFPClass();
     return Result;
   }
 
@@ -686,7 +740,6 @@ std::string Attribute::getAsString(bool InAttrGrp) const {
     OS << "i" << CR.getBitWidth() << " ";
     OS << CR.getLower() << ", " << CR.getUpper();
     OS << ")";
-    OS.flush();
     return Result;
   }
 
@@ -697,7 +750,6 @@ std::string Attribute::getAsString(bool InAttrGrp) const {
     OS << "initializes(";
     CRL.print(OS);
     OS << ")";
-    OS.flush();
     return Result;
   }
 
@@ -1156,12 +1208,20 @@ uint64_t AttributeSet::getDereferenceableBytes() const {
   return SetNode ? SetNode->getDereferenceableBytes() : 0;
 }
 
+DeadOnReturnInfo AttributeSet::getDeadOnReturnInfo() const {
+  return SetNode ? SetNode->getDeadOnReturnInfo() : DeadOnReturnInfo(0);
+}
+
 uint64_t AttributeSet::getDereferenceableOrNullBytes() const {
   return SetNode ? SetNode->getDereferenceableOrNullBytes() : 0;
 }
 
 Type *AttributeSet::getByRefType() const {
   return SetNode ? SetNode->getAttributeType(Attribute::ByRef) : nullptr;
+}
+
+Type *AttributeSet::getGoRetType() const {
+  return SetNode ? SetNode->getAttributeType(Attribute::GoRet) : nullptr;
 }
 
 Type *AttributeSet::getByValType() const {
@@ -1357,6 +1417,12 @@ Type *AttributeSetNode::getAttributeType(Attribute::AttrKind Kind) const {
 uint64_t AttributeSetNode::getDereferenceableBytes() const {
   if (auto A = findEnumAttribute(Attribute::Dereferenceable))
     return A->getDereferenceableBytes();
+  return 0;
+}
+
+DeadOnReturnInfo AttributeSetNode::getDeadOnReturnInfo() const {
+  if (auto A = findEnumAttribute(Attribute::DeadOnReturn))
+    return A->getDeadOnReturnInfo();
   return 0;
 }
 
@@ -1945,6 +2011,10 @@ Type *AttributeList::getParamByRefType(unsigned Index) const {
   return getAttributes(Index + FirstArgIndex).getByRefType();
 }
 
+Type *AttributeList::getParamGoRetType(unsigned Index) const {
+  return getAttributes(Index + FirstArgIndex).getGoRetType();
+}
+
 Type *AttributeList::getParamPreallocatedType(unsigned Index) const {
   return getAttributes(Index + FirstArgIndex).getPreallocatedType();
 }
@@ -1975,6 +2045,10 @@ uint64_t AttributeList::getParamDereferenceableBytes(unsigned Index) const {
 
 uint64_t AttributeList::getRetDereferenceableOrNullBytes() const {
   return getRetAttrs().getDereferenceableOrNullBytes();
+}
+
+DeadOnReturnInfo AttributeList::getDeadOnReturnInfo(unsigned Index) const {
+  return getParamAttrs(Index).getDeadOnReturnInfo();
 }
 
 uint64_t
@@ -2199,6 +2273,13 @@ AttrBuilder &AttrBuilder::addDereferenceableAttr(uint64_t Bytes) {
   return addRawIntAttr(Attribute::Dereferenceable, Bytes);
 }
 
+AttrBuilder &AttrBuilder::addDeadOnReturnAttr(DeadOnReturnInfo Info) {
+  if (Info.isZeroSized())
+    return *this;
+
+  return addRawIntAttr(Attribute::DeadOnReturn, Info.toIntValue());
+}
+
 AttrBuilder &AttrBuilder::addDereferenceableOrNullAttr(uint64_t Bytes) {
   if (Bytes == 0)
     return *this;
@@ -2243,6 +2324,10 @@ AttrBuilder &AttrBuilder::addMemoryAttr(MemoryEffects ME) {
 
 AttrBuilder &AttrBuilder::addCapturesAttr(CaptureInfo CI) {
   return addRawIntAttr(Attribute::Captures, CI.toIntValue());
+}
+
+AttrBuilder &AttrBuilder::addDenormalFPEnvAttr(DenormalFPEnv FPEnv) {
+  return addRawIntAttr(Attribute::DenormalFPEnv, FPEnv.toIntValue());
 }
 
 AttrBuilder &AttrBuilder::addNoFPClassAttr(FPClassTest Mask) {
@@ -2337,6 +2422,11 @@ AttrBuilder &AttrBuilder::addFromEquivalentMetadata(const Instruction &I) {
   if (const MDNode *Range = I.getMetadata(LLVMContext::MD_range))
     addRangeAttr(getConstantRangeFromMetadata(*Range));
 
+  if (const MDNode *NoFPClass = I.getMetadata(LLVMContext::MD_nofpclass)) {
+    ConstantInt *CI = mdconst::extract<ConstantInt>(NoFPClass->getOperand(0));
+    addNoFPClassAttr(static_cast<FPClassTest>(CI->getZExtValue()));
+  }
+
   return *this;
 }
 
@@ -2410,6 +2500,10 @@ AttributeMask AttributeFuncs::typeIncompatible(Type *Ty, AttributeSet AS,
     // Attributes that only apply to integers.
     if (ASK & ASK_SAFE_TO_DROP)
       Incompatible.addAttribute(Attribute::AllocAlign);
+  }
+
+  if (!Ty->isIntegerTy() && !Ty->isByteTy()) {
+    // Attributes that only apply to integers and bytes.
     if (ASK & ASK_UNSAFE_TO_DROP)
       Incompatible.addAttribute(Attribute::SExt).addAttribute(Attribute::ZExt);
   }
@@ -2498,16 +2592,16 @@ static bool denormModeCompatible(DenormalMode CallerMode,
 }
 
 static bool checkDenormMode(const Function &Caller, const Function &Callee) {
-  DenormalMode CallerMode = Caller.getDenormalModeRaw();
-  DenormalMode CalleeMode = Callee.getDenormalModeRaw();
+  DenormalFPEnv CallerEnv = Caller.getDenormalFPEnv();
+  DenormalFPEnv CalleeEnv = Callee.getDenormalFPEnv();
 
-  if (denormModeCompatible(CallerMode, CalleeMode)) {
-    DenormalMode CallerModeF32 = Caller.getDenormalModeF32Raw();
-    DenormalMode CalleeModeF32 = Callee.getDenormalModeF32Raw();
+  if (denormModeCompatible(CallerEnv.DefaultMode, CalleeEnv.DefaultMode)) {
+    DenormalMode CallerModeF32 = CallerEnv.F32Mode;
+    DenormalMode CalleeModeF32 = CalleeEnv.F32Mode;
     if (CallerModeF32 == DenormalMode::getInvalid())
-      CallerModeF32 = CallerMode;
+      CallerModeF32 = CallerEnv.DefaultMode;
     if (CalleeModeF32 == DenormalMode::getInvalid())
-      CalleeModeF32 = CalleeMode;
+      CalleeModeF32 = CalleeEnv.DefaultMode;
     return denormModeCompatible(CallerModeF32, CalleeModeF32);
   }
 

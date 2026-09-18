@@ -162,7 +162,13 @@ def RetCC_AArch64_AAPCS : CallingConv<[
 ]>;
 
 let Entry = 1 in
-def CC_AArch64_Win64PCS : CallingConv<AArch64_Common>;
+def CC_AArch64_Win64PCS : CallingConv<!listconcat(
+  [
+    // 'CFGuardTarget' is used for Arm64EC; it passes its parameter in X9.
+    CCIfCFGuardTarget<CCAssignToReg<[X9]>>
+  ],
+  AArch64_Common)
+>;
 
 // Vararg functions on windows pass floats in integer registers
 let Entry = 1 in
@@ -177,6 +183,9 @@ def CC_AArch64_Win64_VarArg : CallingConv<[
 // a stack layout compatible with the x64 calling convention.
 let Entry = 1 in
 def CC_AArch64_Arm64EC_VarArg : CallingConv<[
+  // 'CFGuardTarget' is used for Arm64EC; it passes its parameter in X9.
+  CCIfCFGuardTarget<CCAssignToReg<[X9]>>,
+
   CCIfNest<CCAssignToReg<[X15]>>,
 
   // Convert small floating-point values to integer.
@@ -265,6 +274,9 @@ def CC_AArch64_Arm64EC_Thunk : CallingConv<[
   CCIfType<[f16],
            CCAssignToRegWithShadow<[H0, H1, H2, H3],
                                    [X0, X1, X2, X3]>>,
+  CCIfType<[bf16],
+           CCAssignToRegWithShadow<[H0, H1, H2, H3],
+                                   [X0, X1, X2, X3]>>,
   CCIfType<[f32],
            CCAssignToRegWithShadow<[S0, S1, S2, S3],
                                    [X0, X1, X2, X3]>>,
@@ -285,7 +297,7 @@ def CC_AArch64_Arm64EC_Thunk : CallingConv<[
 
   // Integer/FP values get stored in stack slots that are 8 bytes in size and
   // 8-byte aligned if there are no more registers to hold them.
-  CCIfType<[i8, i16, i32, i64, f16, f32, f64], CCAssignToStack<8, 8>>
+  CCIfType<[i8, i16, i32, i64, f16, bf16, f32, f64], CCAssignToStack<8, 8>>
 ]>;
 
 // The native side of ARM64EC thunks
@@ -304,6 +316,7 @@ def RetCC_AArch64_Arm64EC_Thunk : CallingConv<[
 
   // The X86-64 calling convention always returns FP values in XMM0.
   CCIfType<[f16], CCAssignToReg<[H0, H1]>>,
+  CCIfType<[bf16], CCAssignToReg<[H0, H1]>>,
   CCIfType<[f32], CCAssignToReg<[S0, S1]>>,
   CCIfType<[f64], CCAssignToReg<[D0, D1]>>,
   CCIfType<[f128], CCAssignToReg<[Q0, Q1]>>,
@@ -345,7 +358,7 @@ def CC_AArch64_Arm64EC_CFGuard_Check : CallingConv<[
 
 let Entry = 1 in
 def RetCC_AArch64_Arm64EC_CFGuard_Check : CallingConv<[
-  CCIfType<[i64], CCAssignToReg<[X11]>>
+  CCIfType<[i64], CCAssignToReg<[X11, X9]>>
 ]>;
 
 
@@ -564,6 +577,51 @@ def CC_AArch64_Preserve_None : CallingConv<[
   CCDelegateTo<CC_AArch64_AAPCS>
 ]>;
 
+// Go's frontend has already made the whole-value register-or-memory decision.
+// Direct parameters are ABIInternal register values; typed byval parameters
+// are the only ordinary stack-input carrier. Leaving direct values unmatched
+// when the register list is exhausted keeps frontend/backend ABI drift
+// fail-closed instead of silently splitting one Go value across locations.
+let Entry = 1 in
+def CC_AArch64_Go : CallingConv<[
+  // The closure context is not part of the ordinary Go argument layout.
+  CCIfNest<CCIfType<[i64], CCAssignToReg<[X26]>>>,
+
+  // A goret pointer is an IR carrier for an in-frame result object, not a
+  // machine pointer argument.
+  CCIfGoRet<CCPassGoRet<0, 1>>,
+
+  // Preserve the exact size and alignment carried by byval(T).
+  CCIfByVal<CCPassByVal<0, 1>>,
+
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i1, i8, i16], CCPromoteToType<i32>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i32],
+      CCAssignToReg<[W0, W1, W2, W3, W4, W5, W6, W7,
+                     W8, W9, W10, W11, W12, W13, W14, W15]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i64],
+      CCAssignToReg<[X0, X1, X2, X3, X4, X5, X6, X7,
+                     X8, X9, X10, X11, X12, X13, X14, X15]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[f16, bf16],
+      CCAssignToReg<[H0, H1, H2, H3, H4, H5, H6, H7,
+                     H8, H9, H10, H11, H12, H13, H14, H15]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[f32],
+      CCAssignToReg<[S0, S1, S2, S3, S4, S5, S6, S7,
+                     S8, S9, S10, S11, S12, S13, S14, S15]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[f64],
+      CCAssignToReg<[D0, D1, D2, D3, D4, D5, D6, D7,
+                     D8, D9, D10, D11, D12, D13, D14, D15]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[v16i8, v8i16, v4i32, v2i64, v8f16, v8bf16, v4f32, v2f64],
+      CCAssignToReg<[Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7,
+                     Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15]>>>
+]>;
+
 // The order of the callee-saves in this file is important, because the
 // FrameLowering code will use this order to determine the layout the
 // callee-save area in the stack frame. As can be observed below, Darwin
@@ -608,10 +666,13 @@ def CSR_Win_AArch64_RT_AllRegs
     : CalleeSavedRegs<(add CSR_Win_AArch64_RT_MostRegs, (sequence "Q%u", 8, 31))>;
 
 // The Control Flow Guard check call uses a custom calling convention that also
-// preserves X0-X8 and Q0-Q7.
+// preserves X0-X8 and Q0-Q7. On native AArch64, X15 is the target function and
+// is preserved by the checker. On Arm64EC X15 is not used by the checker, but
+// is also guaranteed to be preserved.
 def CSR_Win_AArch64_CFGuard_Check : CalleeSavedRegs<(add CSR_Win_AArch64_AAPCS,
                                                (sequence "X%u", 0, 8),
-                                               (sequence "Q%u", 0, 7))>;
+                                               (sequence "Q%u", 0, 7),
+                                               X15)>;
 
 // To match the x64 calling convention, Arm64EC thunks preserve q6-q15.
 def CSR_Win_AArch64_Arm64EC_Thunk : CalleeSavedRegs<(add (sequence "Q%u", 6, 15),
@@ -704,6 +765,13 @@ def CSR_AArch64_AllRegs
 def CSR_AArch64_NoRegs : CalleeSavedRegs<(add)>;
 
 def CSR_AArch64_NoneRegs : CalleeSavedRegs<(add LR, FP)>;
+
+def CSR_AArch64_Go : CalleeSavedRegs<(add X18, X28, LR, FP)>;
+
+// Go 'returned' arguments use X0 for both the first i64 argument and result.
+// Preserve X0 in addition to the registers preserved by the Go ABI.
+def CSR_AArch64_Go_ThisReturn
+    : CalleeSavedRegs<(add CSR_AArch64_Go, X0)>;
 
 def CSR_AArch64_RT_MostRegs :  CalleeSavedRegs<(add CSR_AArch64_AAPCS,
                                                 (sequence "X%u", 9, 15))>;

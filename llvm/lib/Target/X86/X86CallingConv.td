@@ -383,6 +383,7 @@ def RetCC_X86_Win64_C : CallingConv<[
   // GCC returns FP values in RAX on Win64.
   CCIfType<[f32], CCIfNotSubtarget<"hasSSE1()", CCBitConvertToType<i32>>>,
   CCIfType<[f64], CCIfNotSubtarget<"hasSSE1()", CCBitConvertToType<i64>>>,
+  // f128 has custom behavior in X86TargetLowering::CanLowerReturn.
 
   // Otherwise, everything is the same as 'normal' X86-64 C CC.
   CCDelegateTo<RetCC_X86_64_C>
@@ -391,7 +392,7 @@ def RetCC_X86_Win64_C : CallingConv<[
 // X86-64 vectorcall return-value convention.
 def RetCC_X86_64_Vectorcall : CallingConv<[
   // Vectorcall calling convention always returns FP values in XMMs.
-  CCIfType<[f32, f64, f128], 
+  CCIfType<[f32, f64, f128],
     CCAssignToReg<[XMM0, XMM1, XMM2, XMM3]>>,
 
   // Otherwise, everything is the same as Windows X86-64 C CC.
@@ -1033,6 +1034,11 @@ def CC_Intel_OCL_BI : CallingConv<[
 ]>;
 
 def CC_X86_64_Preserve_None : CallingConv<[
+  // Byval arguments must be passed on the stack as required by the x86-64 ABI. 
+  // This must come before the register assignment rules to prevent byval arguments 
+  // from being incorrectly assigned to registers, which would cause the required 
+  // caller-side copy to not be emitted.
+  CCIfByVal<CCPassByVal<8, 8>>,
   // We don't preserve general registers, so all of them can be used to pass
   // arguments except
   //   - RBP        frame pointer
@@ -1049,6 +1055,59 @@ def CC_X86_64_Preserve_None : CallingConv<[
 
   // Otherwise it's the same as the regular C calling convention.
   CCDelegateTo<CC_X86_64_C>
+]>;
+
+// Go's frontend is the source of truth for whole-value assignment. A direct
+// parameter is guaranteed to fit completely in the ABIInternal register
+// budget; a non-empty value assigned wholly to memory is represented by a
+// typed byval pointer. Do not add a stack fallback for direct values here: an
+// exhausted register list is an ABI carrier mismatch and must fail closed.
+let Entry = 1 in
+def CC_X86_64_Go : CallingConv<[
+  // The closure context is not part of the ordinary Go argument layout.
+  CCIfNest<CCIfType<[i64], CCAssignToReg<[RDX]>>>,
+
+  // A goret pointer is an IR carrier for an in-frame result object, not a
+  // machine pointer argument.
+  CCIfGoRet<CCPassGoRet<0, 1>>,
+
+  // Preserve the exact size and alignment carried by byval(T).
+  CCIfByVal<CCPassByVal<0, 1>>,
+
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i1], CCPromoteToType<i8>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i8], CCAssignToReg<[AL, BL, CL, DIL, SIL,
+                                  R8B, R9B, R10B, R11B]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i16], CCAssignToReg<[AX, BX, CX, DI, SI,
+                                   R8W, R9W, R10W, R11W]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i32], CCAssignToReg<[EAX, EBX, ECX, EDI, ESI,
+                                   R8D, R9D, R10D, R11D]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[i64], CCAssignToReg<[RAX, RBX, RCX, RDI, RSI,
+                                   R8, R9, R10, R11]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[f32, f64],
+      CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4,
+                     XMM5, XMM6, XMM7, XMM8, XMM9,
+                     XMM10, XMM11, XMM12, XMM13, XMM14]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[v16i8, v8i16, v4i32, v2i64, v8f16, v8bf16, v4f32, v2f64],
+      CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4,
+                     XMM5, XMM6, XMM7, XMM8, XMM9,
+                     XMM10, XMM11, XMM12, XMM13, XMM14]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[v32i8, v16i16, v8i32, v4i64, v16f16, v16bf16, v8f32, v4f64],
+      CCAssignToReg<[YMM0, YMM1, YMM2, YMM3, YMM4,
+                     YMM5, YMM6, YMM7, YMM8, YMM9,
+                     YMM10, YMM11, YMM12, YMM13, YMM14]>>>,
+  CCIfCC<"CallingConv::GoABIInternal",
+    CCIfType<[v64i8, v32i16, v16i32, v8i64, v32f16, v32bf16, v16f32, v8f64],
+      CCAssignToReg<[ZMM0, ZMM1, ZMM2, ZMM3, ZMM4,
+                     ZMM5, ZMM6, ZMM7, ZMM8, ZMM9,
+                     ZMM10, ZMM11, ZMM12, ZMM13, ZMM14]>>>
 ]>;
 
 //===----------------------------------------------------------------------===//
@@ -1133,9 +1192,13 @@ def CSR_Win64_NoSSE : CalleeSavedRegs<(add RBX, RBP, RDI, RSI, R12, R13, R14, R1
 
 def CSR_Win64 : CalleeSavedRegs<(add CSR_Win64_NoSSE,
                                      (sequence "XMM%u", 6, 15))>;
+def CSR_Win64_APX : CalleeSavedRegs<(add CSR_Win64_NoSSE, R30, R31,
+                                         (sequence "XMM%u", 6, 15))>;
 
 def CSR_Win64_SwiftError : CalleeSavedRegs<(sub CSR_Win64, R12)>;
+def CSR_Win64_APX_SwiftError : CalleeSavedRegs<(sub CSR_Win64_APX, R12)>;
 def CSR_Win64_SwiftTail : CalleeSavedRegs<(sub CSR_Win64, R13, R14)>;
+def CSR_Win64_APX_SwiftTail : CalleeSavedRegs<(sub CSR_Win64_APX, R13, R14)>;
 
 // The function used by Darwin to obtain the address of a thread-local variable
 // uses rdi to pass a single parameter and rax for the return value. All other
@@ -1155,6 +1218,8 @@ def CSR_64_RT_MostRegs : CalleeSavedRegs<(add CSR_64, RAX, RCX, RDX, RSI, RDI,
 
 def CSR_Win64_RT_MostRegs : CalleeSavedRegs<(add CSR_64_RT_MostRegs,
                                                  (sequence "XMM%u", 6, 15))>;
+def CSR_Win64_APX_RT_MostRegs : CalleeSavedRegs<(add CSR_64_RT_MostRegs, R30, R31,
+                                                     (sequence "XMM%u", 6, 15))>;
 
 // All registers - except r11 and return registers.
 def CSR_64_RT_AllRegs     : CalleeSavedRegs<(add CSR_64_RT_MostRegs,
@@ -1187,16 +1252,37 @@ def CSR_64_AllRegs_AVX512 : CalleeSavedRegs<(sub (add CSR_64_MostRegs, RAX,
                                                       (sequence "K%u", 0, 7)),
                                                  (sequence "XMM%u", 0, 15))>;
 def CSR_64_NoneRegs    : CalleeSavedRegs<(add RBP)>;
+// Go functions only use RBP as an ordinary callee-saved register. R14 and
+// XMM15 contain reserved runtime state and are repaired at ABI boundaries
+// instead of being spilled by PEI.
+def CSR_64_GoFunction  : CalleeSavedRegs<(add RBP)>;
+
+// Call-preserved masks for the two Go calling conventions. ABIInternal
+// preserves the reserved runtime state.
+def CSR_64_GoABIInternal : CalleeSavedRegs<(add R14, RBP, XMM15)>;
+// ABI0 does not establish or preserve the ABIInternal state registers. Keep
+// R14 and XMM15 reserved in Go functions, but model them as clobbered at an
+// ABI0 call so values read from either register cannot remain assigned there
+// across the boundary. The late X86 Go ABI pass restores their current state
+// after the call.
+def CSR_64_GoABI0      : CalleeSavedRegs<(add RBP)>;
 
 // Standard C + YMM6-15
 def CSR_Win64_Intel_OCL_BI_AVX : CalleeSavedRegs<(add RBX, RBP, RDI, RSI, R12,
                                                   R13, R14, R15,
                                                   (sequence "YMM%u", 6, 15))>;
+def CSR_Win64_APX_Intel_OCL_BI_AVX : CalleeSavedRegs<(add RBX, RBP, RDI, RSI, R12,
+                                                      R13, R14, R15, R30, R31,
+                                                      (sequence "YMM%u", 6, 15))>;
 
 def CSR_Win64_Intel_OCL_BI_AVX512 : CalleeSavedRegs<(add RBX, RBP, RDI, RSI,
                                                      R12, R13, R14, R15,
                                                      (sequence "ZMM%u", 6, 21),
                                                      K4, K5, K6, K7)>;
+def CSR_Win64_APX_Intel_OCL_BI_AVX512 : CalleeSavedRegs<(add RBX, RBP, RDI, RSI,
+                                                         R12, R13, R14, R15, R30, R31,
+                                                         (sequence "ZMM%u", 6, 21),
+                                                         K4, K5, K6, K7)>;
 //Standard C + XMM 8-15
 def CSR_64_Intel_OCL_BI       : CalleeSavedRegs<(add CSR_64,
                                                  (sequence "XMM%u", 8, 15))>;
@@ -1217,8 +1303,16 @@ def CSR_Win32_CFGuard_Check_NoSSE : CalleeSavedRegs<(add CSR_32_RegCall_NoSSE, E
 def CSR_Win32_CFGuard_Check       : CalleeSavedRegs<(add CSR_32_RegCall, ECX)>;
 def CSR_Win64_RegCall_NoSSE : CalleeSavedRegs<(add RBX, RBP,
                                               (sequence "R%u", 10, 15))>;
-def CSR_Win64_RegCall       : CalleeSavedRegs<(add CSR_Win64_RegCall_NoSSE,                                  
+def CSR_Win64_RegCall       : CalleeSavedRegs<(add CSR_Win64_RegCall_NoSSE,
                                               (sequence "XMM%u", 8, 15))>;
+def CSR_Win64_APX_RegCall   : CalleeSavedRegs<(add CSR_Win64_RegCall_NoSSE, R30, R31,
+                                              (sequence "XMM%u", 8, 15))>;
+def CSR_Win64_CFGuard_Check_NoSSE : CalleeSavedRegs<(add CSR_Win64_RegCall_NoSSE, RCX)>;
+def CSR_Win64_CFGuard_Check       : CalleeSavedRegs<(add CSR_Win64_RegCall, RCX)>;
+def CSR_Win64_APX_CFGuard_Check   : CalleeSavedRegs<(add CSR_Win64_RegCall_NoSSE,
+                                                     (sequence "R%u", 16, 31),
+                                                     (sequence "XMM%u", 8, 15),
+                                                     RCX)>;
 def CSR_SysV64_RegCall_NoSSE : CalleeSavedRegs<(add RBX, RBP,
                                                (sequence "R%u", 12, 15))>;
 def CSR_SysV64_RegCall       : CalleeSavedRegs<(add CSR_SysV64_RegCall_NoSSE,               

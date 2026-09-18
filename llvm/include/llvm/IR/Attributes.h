@@ -47,6 +47,8 @@ class Instruction;
 class Type;
 class raw_ostream;
 enum FPClassTest : unsigned;
+struct DenormalFPEnv;
+struct DenormalMode;
 
 enum class AllocFnKind : uint64_t {
   Unknown = 0,
@@ -58,6 +60,40 @@ enum class AllocFnKind : uint64_t {
   Aligned = 1 << 5,       // Allocator function aligns allocations per the
                           // `allocalign` argument
   LLVM_MARK_AS_BITMASK_ENUM(/* LargestValue = */ Aligned)
+};
+
+class DeadOnReturnInfo {
+public:
+  DeadOnReturnInfo() : DeadBytes(std::nullopt) {}
+  DeadOnReturnInfo(uint64_t DeadOnReturnBytes) : DeadBytes(DeadOnReturnBytes) {}
+
+  uint64_t getNumberOfDeadBytes() const {
+    assert(DeadBytes.has_value() &&
+           "This attribute does not specify a byte count. Did you forget to "
+           "check if the attribute covers all reachable memory?");
+    return DeadBytes.value();
+  }
+
+  bool coversAllReachableMemory() const { return !DeadBytes.has_value(); }
+
+  static DeadOnReturnInfo createFromIntValue(uint64_t Data) {
+    if (Data == std::numeric_limits<uint64_t>::max())
+      return DeadOnReturnInfo();
+    return DeadOnReturnInfo(Data);
+  }
+
+  uint64_t toIntValue() const {
+    if (DeadBytes.has_value())
+      return DeadBytes.value();
+    return std::numeric_limits<uint64_t>::max();
+  }
+
+  bool isZeroSized() const {
+    return DeadBytes.has_value() && DeadBytes.value() == 0;
+  }
+
+private:
+  std::optional<uint64_t> DeadBytes;
 };
 
 //===----------------------------------------------------------------------===//
@@ -169,6 +205,7 @@ public:
   LLVM_ABI static Attribute getWithStructRetType(LLVMContext &Context,
                                                  Type *Ty);
   LLVM_ABI static Attribute getWithByRefType(LLVMContext &Context, Type *Ty);
+  LLVM_ABI static Attribute getWithGoRetType(LLVMContext &Context, Type *Ty);
   LLVM_ABI static Attribute getWithPreallocatedType(LLVMContext &Context,
                                                     Type *Ty);
   LLVM_ABI static Attribute getWithInAllocaType(LLVMContext &Context, Type *Ty);
@@ -178,6 +215,8 @@ public:
                                                  MemoryEffects ME);
   LLVM_ABI static Attribute getWithNoFPClass(LLVMContext &Context,
                                              FPClassTest Mask);
+  LLVM_ABI static Attribute getWithDeadOnReturnInfo(LLVMContext &Context,
+                                                    DeadOnReturnInfo DI);
   LLVM_ABI static Attribute getWithCaptureInfo(LLVMContext &Context,
                                                CaptureInfo CI);
 
@@ -276,6 +315,11 @@ public:
   /// dereferenceable attribute.
   LLVM_ABI uint64_t getDereferenceableBytes() const;
 
+  /// Returns the number of dead_on_return bytes from the dead_on_return
+  /// attribute, or std::nullopt if all memory reachable through the pointer is
+  /// marked dead on return.
+  LLVM_ABI DeadOnReturnInfo getDeadOnReturnInfo() const;
+
   /// Returns the number of dereferenceable_or_null bytes from the
   /// dereferenceable_or_null attribute.
   LLVM_ABI uint64_t getDereferenceableOrNullBytes() const;
@@ -299,6 +343,9 @@ public:
 
   /// Returns memory effects.
   LLVM_ABI MemoryEffects getMemoryEffects() const;
+
+  /// Returns denormal_fpenv.
+  LLVM_ABI struct DenormalFPEnv getDenormalFPEnv() const;
 
   /// Returns information from captures attribute.
   LLVM_ABI CaptureInfo getCaptureInfo() const;
@@ -401,7 +448,8 @@ public:
 
   /// Add attributes to the attribute set. Returns a new set because attribute
   /// sets are immutable.
-  AttributeSet addAttributes(LLVMContext &C, const AttrBuilder &B) const;
+  LLVM_ABI AttributeSet addAttributes(LLVMContext &C,
+                                      const AttrBuilder &B) const;
 
   /// Remove the specified attribute from this set. Returns a new set because
   /// attribute sets are immutable.
@@ -445,10 +493,12 @@ public:
   LLVM_ABI MaybeAlign getAlignment() const;
   LLVM_ABI MaybeAlign getStackAlignment() const;
   LLVM_ABI uint64_t getDereferenceableBytes() const;
+  LLVM_ABI DeadOnReturnInfo getDeadOnReturnInfo() const;
   LLVM_ABI uint64_t getDereferenceableOrNullBytes() const;
   LLVM_ABI Type *getByValType() const;
   LLVM_ABI Type *getStructRetType() const;
   LLVM_ABI Type *getByRefType() const;
+  LLVM_ABI Type *getGoRetType() const;
   LLVM_ABI Type *getPreallocatedType() const;
   LLVM_ABI Type *getInAllocaType() const;
   LLVM_ABI Type *getElementType() const;
@@ -479,21 +529,8 @@ public:
 /// \class
 /// Provide DenseMapInfo for AttributeSet.
 template <> struct DenseMapInfo<AttributeSet, void> {
-  static AttributeSet getEmptyKey() {
-    auto Val = static_cast<uintptr_t>(-1);
-    Val <<= PointerLikeTypeTraits<void *>::NumLowBitsAvailable;
-    return AttributeSet(reinterpret_cast<AttributeSetNode *>(Val));
-  }
-
-  static AttributeSet getTombstoneKey() {
-    auto Val = static_cast<uintptr_t>(-2);
-    Val <<= PointerLikeTypeTraits<void *>::NumLowBitsAvailable;
-    return AttributeSet(reinterpret_cast<AttributeSetNode *>(Val));
-  }
-
   static unsigned getHashValue(AttributeSet AS) {
-    return (unsigned((uintptr_t)AS.SetNode) >> 4) ^
-           (unsigned((uintptr_t)AS.SetNode) >> 9);
+    return DenseMapInfo<const void *>::getHashValue(AS.SetNode);
   }
 
   static bool isEqual(AttributeSet LHS, AttributeSet RHS) { return LHS == RHS; }
@@ -544,9 +581,6 @@ private:
 
   static AttributeList getImpl(LLVMContext &C, ArrayRef<AttributeSet> AttrSets);
 
-  AttributeList setAttributesAtIndex(LLVMContext &C, unsigned Index,
-                                     AttributeSet Attrs) const;
-
 public:
   AttributeList() = default;
 
@@ -568,6 +602,11 @@ public:
                                     AttributeSet Attrs);
   LLVM_ABI static AttributeList get(LLVMContext &C, unsigned Index,
                                     const AttrBuilder &B);
+
+  /// Set the attribute set at the given index.
+  /// Returns a new list because attribute lists are immutable.
+  [[nodiscard]] LLVM_ABI AttributeList setAttributesAtIndex(
+      LLVMContext &C, unsigned Index, AttributeSet Attrs) const;
 
   // TODO: remove non-AtIndex versions of these methods.
   /// Add an attribute to the attribute set at the given index.
@@ -938,6 +977,9 @@ public:
   /// Return the byref type for the specified function parameter.
   LLVM_ABI Type *getParamByRefType(unsigned ArgNo) const;
 
+  /// Return the goret type for the specified function parameter.
+  LLVM_ABI Type *getParamGoRetType(unsigned ArgNo) const;
+
   /// Return the preallocated type for the specified function parameter.
   LLVM_ABI Type *getParamPreallocatedType(unsigned ArgNo) const;
 
@@ -963,6 +1005,9 @@ public:
   /// Get the number of dereferenceable_or_null bytes (or zero if unknown) of
   /// the return value.
   LLVM_ABI uint64_t getRetDereferenceableOrNullBytes() const;
+
+  /// Get the number of dead_on_return bytes (or zero if unknown) of an arg.
+  LLVM_ABI DeadOnReturnInfo getDeadOnReturnInfo(unsigned Index) const;
 
   /// Get the number of dereferenceable_or_null bytes (or zero if unknown) of an
   /// arg.
@@ -1051,21 +1096,8 @@ public:
 /// \class
 /// Provide DenseMapInfo for AttributeList.
 template <> struct DenseMapInfo<AttributeList, void> {
-  static AttributeList getEmptyKey() {
-    auto Val = static_cast<uintptr_t>(-1);
-    Val <<= PointerLikeTypeTraits<void*>::NumLowBitsAvailable;
-    return AttributeList(reinterpret_cast<AttributeListImpl *>(Val));
-  }
-
-  static AttributeList getTombstoneKey() {
-    auto Val = static_cast<uintptr_t>(-2);
-    Val <<= PointerLikeTypeTraits<void*>::NumLowBitsAvailable;
-    return AttributeList(reinterpret_cast<AttributeListImpl *>(Val));
-  }
-
   static unsigned getHashValue(AttributeList AS) {
-    return (unsigned((uintptr_t)AS.pImpl) >> 4) ^
-           (unsigned((uintptr_t)AS.pImpl) >> 9);
+    return DenseMapInfo<const void *>::getHashValue(AS.pImpl);
   }
 
   static bool isEqual(AttributeList LHS, AttributeList RHS) {
@@ -1198,6 +1230,9 @@ public:
   /// Retrieve the byref type.
   Type *getByRefType() const { return getTypeAttr(Attribute::ByRef); }
 
+  /// Retrieve the goret type.
+  Type *getGoRetType() const { return getTypeAttr(Attribute::GoRet); }
+
   /// Retrieve the preallocated type.
   Type *getPreallocatedType() const {
     return getTypeAttr(Attribute::Preallocated);
@@ -1241,6 +1276,10 @@ public:
   /// This turns the number of dereferenceable bytes into the form used
   /// internally in Attribute.
   LLVM_ABI AttrBuilder &addDereferenceableAttr(uint64_t Bytes);
+
+  /// This turns the number of dead_on_return bytes into the form used
+  /// internally in Attribute.
+  LLVM_ABI AttrBuilder &addDeadOnReturnAttr(DeadOnReturnInfo Info);
 
   /// This turns the number of dereferenceable_or_null bytes into the
   /// form used internally in Attribute.
@@ -1294,6 +1333,9 @@ public:
 
   /// Add captures attribute.
   LLVM_ABI AttrBuilder &addCapturesAttr(CaptureInfo CI);
+
+  /// Add denormal_fpenv attribute.
+  LLVM_ABI AttrBuilder &addDenormalFPEnvAttr(DenormalFPEnv Mode);
 
   // Add nofpclass attribute
   LLVM_ABI AttrBuilder &addNoFPClassAttr(FPClassTest NoFPClassMask);

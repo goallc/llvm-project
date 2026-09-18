@@ -284,7 +284,7 @@ private:
   /// Mark a physreg as used in this instruction.
   void markRegUsedInInstr(MCPhysReg PhysReg) {
     for (MCRegUnit Unit : TRI->regunits(PhysReg))
-      UsedInInstr[Unit] = InstrGen | 1;
+      UsedInInstr[static_cast<unsigned>(Unit)] = InstrGen | 1;
   }
 
   // Check if physreg is clobbered by instruction's regmask(s).
@@ -299,7 +299,8 @@ private:
     if (LookAtPhysRegUses && isClobberedByRegMasks(PhysReg))
       return true;
     for (MCRegUnit Unit : TRI->regunits(PhysReg))
-      if (UsedInInstr[Unit] >= (InstrGen | !LookAtPhysRegUses))
+      if (UsedInInstr[static_cast<unsigned>(Unit)] >=
+          (InstrGen | !LookAtPhysRegUses))
         return true;
     return false;
   }
@@ -308,15 +309,16 @@ private:
   /// This is only used by the special livethrough handling code.
   void markPhysRegUsedInInstr(MCRegister PhysReg) {
     for (MCRegUnit Unit : TRI->regunits(PhysReg)) {
-      assert(UsedInInstr[Unit] <= InstrGen && "non-phys use before phys use?");
-      UsedInInstr[Unit] = InstrGen;
+      assert(UsedInInstr[static_cast<unsigned>(Unit)] <= InstrGen &&
+             "non-phys use before phys use?");
+      UsedInInstr[static_cast<unsigned>(Unit)] = InstrGen;
     }
   }
 
   /// Remove mark of physical register being used in the instruction.
   void unmarkRegUsedInInstr(MCRegister PhysReg) {
     for (MCRegUnit Unit : TRI->regunits(PhysReg))
-      UsedInInstr[Unit] = 0;
+      UsedInInstr[static_cast<unsigned>(Unit)] = 0;
   }
 
   enum : unsigned {
@@ -492,7 +494,8 @@ int RegAllocFastImpl::getStackSpaceFor(Register VirtReg) {
   if (Alignment > CurrentAlign && !TRI->canRealignStack(MF))
     Alignment = CurrentAlign;
 
-  int FrameIdx = MFI->CreateSpillStackObject(Size, Alignment);
+  int FrameIdx =
+      MFI->CreateSpillStackObject(Size, Alignment, TRI->getSpillStackID(RC));
 
   // Assign the slot.
   StackSlotForVirtReg[VirtReg] = FrameIdx;
@@ -518,7 +521,7 @@ bool RegAllocFastImpl::mayBeSpillFromInlineAsmBr(const MachineInstr &MI) const {
   if (MBB->isInlineAsmBrIndirectTarget() && TII->isStoreToStackSlot(MI, FI) &&
       MFI->isSpillSlotObjectIndex(FI))
     for (const auto &Op : MI.operands())
-      if (Op.isReg() && MBB->isLiveIn(Op.getReg()))
+      if (Op.isReg() && Op.getReg().isValid() && MBB->isLiveIn(Op.getReg()))
         return true;
   return false;
 }
@@ -1713,9 +1716,11 @@ void RegAllocFastImpl::allocateInstruction(MachineInstr &MI) {
   }
 
   LLVM_DEBUG(dbgs() << "<< " << MI);
-  if (MI.isCopy() && MI.getOperand(0).getReg() == MI.getOperand(1).getReg() &&
+  if (MI.isCopy() &&
+      (MI.getOperand(0).getReg() == MI.getOperand(1).getReg() ||
+       MI.getOperand(0).isDead()) &&
       MI.getNumOperands() == 2) {
-    LLVM_DEBUG(dbgs() << "Mark identity copy for removal\n");
+    LLVM_DEBUG(dbgs() << "Mark unnecessary copy for removal: " << MI);
     Coalesced.push_back(&MI);
   }
 }
@@ -1774,7 +1779,7 @@ void RegAllocFastImpl::handleBundle(MachineInstr &MI) {
       if (!Reg.isVirtual() || !shouldAllocateRegister(Reg))
         continue;
 
-      DenseMap<Register, LiveReg>::iterator DI = BundleVirtRegsMap.find(Reg);
+      auto DI = BundleVirtRegsMap.find(Reg);
       assert(DI != BundleVirtRegsMap.end() && "Unassigned virtual register");
 
       setPhysReg(MI, MO, DI->second);

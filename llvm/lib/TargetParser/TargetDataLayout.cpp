@@ -18,7 +18,7 @@ static StringRef getManglingComponent(const Triple &T) {
     return "-m:l";
   if (T.isOSBinFormatMachO())
     return "-m:o";
-  if ((T.isOSWindows() || T.isUEFI()) && T.isOSBinFormatCOFF())
+  if (T.isOSWindowsOrUEFI() && T.isOSBinFormatCOFF())
     return T.getArch() == Triple::x86 ? "-m:x" : "-m:w";
   if (T.isOSBinFormatXCOFF())
     return "-m:a";
@@ -93,9 +93,14 @@ static std::string computeAArch64DataLayout(const Triple &TT) {
            "128-n32:64-S128-Fn32";
   std::string Endian = TT.isLittleEndian() ? "e" : "E";
   std::string Ptr32 = TT.getEnvironment() == Triple::GNUILP32 ? "-p:32:32" : "";
+  // Go's arm64 ABI gives SIMD values 64-bit alignment in memory even though
+  // they are carried in 128-bit vector registers. Describe that ABI alignment
+  // explicitly so aggregate layout and argument homes agree with cmd/compile.
+  std::string VectorAlign =
+      TT.isOSBinFormatGoObj() ? "-v128:64:64" : "";
   return Endian + "-m:e" + Ptr32 +
-         "-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-"
-         "n32:64-S128-Fn32";
+         "-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128"
+         + VectorAlign + "-n32:64-S128-Fn32";
 }
 
 // DataLayout: little or big endian
@@ -247,6 +252,10 @@ static std::string computePowerDataLayout(const Triple &T, StringRef ABIName) {
   else
     Ret += "-n32";
 
+  // The ABI alignment for doubles on AIX is 4 bytes.
+  if (T.isOSAIX())
+    Ret += "-f64:32:64";
+
   // Specify the vector alignment explicitly. For v256i1 and v512i1, the
   // calculated alignment would be 256*alignment(i1) and 512*alignment(i1),
   // which is 256 and 512 bytes - way over aligned.
@@ -276,6 +285,13 @@ static std::string computeAMDDataLayout(const Triple &TT) {
 }
 
 static std::string computeRISCVDataLayout(const Triple &TT, StringRef ABIName) {
+  if (TT.isOSBinFormatMachO()) {
+    assert(TT.isLittleEndian() && "Invalid endianness");
+    assert(TT.isArch32Bit() && "Invalid triple");
+    assert((ABIName != "ilp32e") && "Invalid ABI.");
+    return "e-m:o-p:32:32-i64:64-n32-S128";
+  }
+
   std::string Ret;
 
   if (TT.isLittleEndian())
@@ -285,24 +301,36 @@ static std::string computeRISCVDataLayout(const Triple &TT, StringRef ABIName) {
 
   Ret += "-m:e";
 
-  // Pointer and integer sizes.
+  // TODO: Maybe we should move RISCVABI to TargetParser, so we can reuse that
+  // logic here instead of duplicating the string handling?
+  bool IsPureCapABI = ABIName.starts_with("il32pc64") ||
+                      ABIName.starts_with("l64pc128") ||
+                      ABIName.starts_with("cheriot");
+
   if (TT.isRISCV64()) {
-    Ret += "-p:64:64-i64:64-i128:128";
-    Ret += "-n32:64";
+    Ret += "-p:64:64";
+    if (IsPureCapABI)
+      Ret += "-pe200:128:128:128:64";
+    Ret += "-i64:64-i128:128-n32:64";
   } else {
     assert(TT.isRISCV32() && "only RV32 and RV64 are currently supported");
-    Ret += "-p:32:32-i64:64";
-    Ret += "-n32";
+    Ret += "-p:32:32";
+    if (IsPureCapABI)
+      Ret += "-pe200:64:64:64:32";
+    Ret += "-i64:64-n32";
   }
 
   // Stack alignment based on ABI.
-  StringRef ABI = ABIName;
-  if (ABI == "ilp32e")
+  if (ABIName == "ilp32e")
     Ret += "-S32";
-  else if (ABI == "lp64e")
+  else if (ABIName == "lp64e")
     Ret += "-S64";
   else
     Ret += "-S128";
+
+  // TODO: Support non-purecap CHERI ABIs.
+  if (IsPureCapABI)
+    Ret += "-A200-P200-G200";
 
   return Ret;
 }
@@ -345,6 +373,9 @@ static std::string computeSystemZDataLayout(const Triple &TT) {
 
   // Big endian.
   Ret += "E";
+
+  // The natural stack alignment is 64 bits.
+  Ret += "-S64";
 
   // Data mangling.
   Ret += getManglingComponent(TT);
@@ -414,6 +445,13 @@ static std::string computeX86DataLayout(const Triple &TT) {
   if (TT.isOSIAMCU())
     Ret += "-f128:32";
 
+  // The Go amd64 ABI guarantees only 64-bit stack alignment. Match the ABI
+  // alignment of fixed-width SIMD values to that guarantee so IR
+  // optimizations do not introduce vector accesses with stronger alignment
+  // requirements.
+  if (Is64Bit && TT.isOSBinFormatGoObj())
+    Ret += "-v128:64:64-v256:64:64-v512:64:64";
+
   // The registers can hold 8, 16, 32 or, in x86-64, 64 bits.
   if (Is64Bit)
     Ret += "-n8:16:32:64";
@@ -423,6 +461,8 @@ static std::string computeX86DataLayout(const Triple &TT) {
   // The stack is aligned to 32 bits on some ABIs and 128 bits on others.
   if ((!Is64Bit && TT.isOSWindows()) || TT.isOSIAMCU())
     Ret += "-a:0:32-S32";
+  else if (TT.isOSBinFormatGoObj())
+    Ret += "-S64";
   else
     Ret += "-S128";
 
@@ -459,8 +499,7 @@ static std::string computeSPIRVDataLayout(const Triple &TT) {
     return "e-p:32:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-"
            "v256:256-v512:512-v1024:1024-n8:16:32:64-G1";
   if (Arch == Triple::spirv)
-    return "e-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-"
-           "v512:512-v1024:1024-n8:16:32:64-G10";
+    return "e-ve-i64:64-n8:16:32:64-G10";
   if (TT.getVendor() == Triple::VendorType::AMD &&
       TT.getOS() == Triple::OSType::AMDHSA)
     return "e-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-"
@@ -549,11 +588,8 @@ std::string Triple::computeDataLayout(StringRef ABIName) const {
   case Triple::csky:
     return computeCSKYDataLayout(*this);
   case Triple::dxil:
-    // TODO: We need to align vectors on the element size generally, but for now
-    // we hard code this for 3-element 32- and 64-bit vectors as a workaround.
-    // See https://github.com/llvm/llvm-project/issues/123968
-    return "e-m:e-p:32:32-i1:32-i8:8-i16:16-i32:32-i64:64-f16:16-"
-           "f32:32-f64:64-n8:16:32:64-v48:16:16-v96:32:32-v192:64:64";
+    return "e-m:e-ve-p:32:32-i1:32-i8:8-i16:16-i32:32-i64:64-f16:16-"
+           "f32:32-f64:64-n8:16:32:64";
   case Triple::hexagon:
     return "e-m:e-p:32:32:32-a:0-n16:32-"
            "i64:64:64-i32:32:32-i16:16:16-i1:8:8-f32:32:32-f64:64:64-"
@@ -575,8 +611,8 @@ std::string Triple::computeDataLayout(StringRef ABIName) const {
   case Triple::ppc64:
   case Triple::ppc64le:
     return computePowerDataLayout(*this, ABIName);
+  case Triple::amdgpu:
   case Triple::r600:
-  case Triple::amdgcn:
     return computeAMDDataLayout(*this);
   case Triple::riscv32:
   case Triple::riscv64:
@@ -590,11 +626,25 @@ std::string Triple::computeDataLayout(StringRef ABIName) const {
   case Triple::systemz:
     return computeSystemZDataLayout(*this);
   case Triple::tce:
+    return "E-p:32:32:32-i1:8:8-i8:8:32-i16:16:32-i32:32:32-i64:32:32-"
+           "f16:16:16-f32:32:32-f64:32:32-v64:64:64-i128:128-v128:128:128-"
+           "v256:256:256-v512:512:512-v1024:1024:1024-v2048:2048:2048-"
+           "v4096:4096:4096-a0:0:32-n32";
   case Triple::tcele:
+    return "e-p:32:32:32-i1:8:8-i8:8:32-i16:16:32-i32:32:32-i64:32:32-"
+           "f16:16:16-f32:32:32-f64:32:32-v64:64:64-i128:128-v128:128:128-"
+           "v256:256:256-v512:512:512-v1024:1024:1024-v2048:2048:2048-"
+           "v4096:4096:4096-a0:0:32-n32";
+  case Triple::tcele64:
+    return "e-p:64:64:64-i1:8:64-i8:8:64-i16:16:64-i32:32:64-i64:64:64-"
+           "f16:16:64-f32:32:64-f64:64:64-v64:64:64-i128:128-v128:128:128-"
+           "v256:256:256-v512:512:512-v1024:1024:1024-v2048:2048:2048-"
+           "v4096:4096:4096-a0:0:64-n64";
   case Triple::x86:
   case Triple::x86_64:
     return computeX86DataLayout(*this);
   case Triple::xcore:
+    return "e-m:e-p:32:32-i1:8:32-i8:8:32-i16:16:32-i64:32-f64:32-a:0:32-n32";
   case Triple::xtensa:
     return "e-m:e-p:32:32-i8:8:32-i16:16:32-i64:64-n32";
   case Triple::nvptx:

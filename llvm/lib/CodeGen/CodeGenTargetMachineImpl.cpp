@@ -11,8 +11,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/CodeGenTargetMachineImpl.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/RuntimeLibcallInfo.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/BasicTTIImpl.h"
+#include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
@@ -21,6 +25,7 @@
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCGoObjObjectWriter.h"
 #include "llvm/MC/MCInstPrinter.h"
 #include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCObjectWriter.h"
@@ -28,6 +33,7 @@
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Target/RegisterTargetPassConfigCallback.h"
@@ -43,6 +49,22 @@ static cl::opt<bool> EnableNoTrapAfterNoreturn(
     "no-trap-after-noreturn", cl::Hidden,
     cl::desc("Do not emit a trap instruction for 'unreachable' IR instructions "
              "after noreturn calls, even if --trap-unreachable is set."));
+
+static cl::opt<std::string>
+    GoObjPackagePath("goobj-package-path", cl::Hidden,
+                     cl::desc("Package path to record in Go object files"));
+
+static cl::opt<std::string>
+    GoObjVersion("goobj-version", cl::Hidden,
+                 cl::desc("Go toolchain version to record in Go object files"));
+
+static cl::opt<std::string> GoObjExperiments(
+    "goobj-experiments", cl::Hidden,
+    cl::desc("Comma-separated Go experiments to record in Go object files"));
+
+static cl::opt<bool>
+    GoObjShared("goobj-shared", cl::Hidden,
+                cl::desc("Mark generated Go object files as shared"));
 
 void CodeGenTargetMachineImpl::initAsmInfo() {
   MRI.reset(TheTarget.createMCRegInfo(getTargetTriple()));
@@ -123,6 +145,14 @@ addPassesToGenerateCode(CodeGenTargetMachineImpl &TM, PassManagerBase &PM,
   PassConfig->setDisableVerify(DisableVerify);
   PM.add(PassConfig);
   PM.add(&MMIWP);
+
+  const TargetOptions &Options = TM.Options;
+  TargetLibraryInfoImpl TLII(TM.getTargetTriple(), Options.VecLib);
+  PM.add(new TargetLibraryInfoWrapperPass(TLII));
+  PM.add(new RuntimeLibraryInfoWrapper(
+      TM.getTargetTriple(), Options.ExceptionModel, Options.FloatABIType,
+      Options.EABIVersion, Options.MCOptions.ABIName, Options.VecLib));
+
   invokeGlobalTargetPassConfigCallbacks(TM, PM, PassConfig);
 
   if (PassConfig->addISelPasses())
@@ -159,9 +189,9 @@ CodeGenTargetMachineImpl::createMCStreamer(raw_pwrite_stream &Out,
                                            raw_pwrite_stream *DwoOut,
                                            CodeGenFileType FileType,
                                            MCContext &Context) {
-  const MCSubtargetInfo &STI = *getMCSubtargetInfo();
-  const MCAsmInfo &MAI = *getMCAsmInfo();
-  const MCRegisterInfo &MRI = *getMCRegisterInfo();
+  const MCSubtargetInfo &STI = getMCSubtargetInfo();
+  const MCAsmInfo &MAI = getMCAsmInfo();
+  const MCRegisterInfo &MRI = getMCRegisterInfo();
   const MCInstrInfo &MII = *getMCInstrInfo();
 
   std::unique_ptr<MCStreamer> AsmStreamer;
@@ -169,9 +199,7 @@ CodeGenTargetMachineImpl::createMCStreamer(raw_pwrite_stream &Out,
   switch (FileType) {
   case CodeGenFileType::AssemblyFile: {
     std::unique_ptr<MCInstPrinter> InstPrinter(getTarget().createMCInstPrinter(
-        getTargetTriple(),
-        Options.MCOptions.OutputAsmVariant.value_or(MAI.getAssemblerDialect()),
-        MAI, MII, MRI));
+        getTargetTriple(), MAI.getOutputAssemblerDialect(), MAI, MII, MRI));
     for (StringRef Opt : Options.MCOptions.InstPrinterOptions)
       if (!InstPrinter->applyTargetSpecificCLOption(Opt))
         return createStringError("invalid InstPrinter option '" + Opt + "'");
@@ -204,10 +232,49 @@ CodeGenTargetMachineImpl::createMCStreamer(raw_pwrite_stream &Out,
                                      inconvertibleErrorCode());
 
     Triple T(getTargetTriple());
+    std::unique_ptr<MCObjectWriter> OW;
+    if (DwoOut) {
+      OW = MAB->createDwoObjectWriter(Out, *DwoOut);
+    } else if (T.isOSBinFormatGoObj()) {
+      MCGoObjObjectWriterConfig Config;
+      Config.SourceKind = GoObj::SourceKind::Compiler;
+      if (std::optional<codegen::GoObjConfig> IRConfig =
+              codegen::getGoObjConfig()) {
+        Config.GOOS = std::move(IRConfig->GOOS);
+        Config.GOARCH = std::move(IRConfig->GOARCH);
+        Config.GOARCHSettingKey = std::move(IRConfig->GOARCHSettingKey);
+        Config.GOARCHSettingValue = std::move(IRConfig->GOARCHSettingValue);
+        Config.Version = std::move(IRConfig->Version);
+        Config.BuildID = std::move(IRConfig->BuildID);
+        Config.PackagePath = std::move(IRConfig->PackagePath);
+        Config.Experiments = std::move(IRConfig->Experiments);
+        Config.Fingerprint = IRConfig->Fingerprint;
+        Config.IsMain = IRConfig->IsMain;
+        Config.IsShared = IRConfig->IsShared;
+        Config.IsStd = IRConfig->IsStd;
+      } else {
+        Config.PackagePath = GoObjPackagePath;
+        if (!GoObjVersion.empty())
+          Config.Version = GoObjVersion;
+        if (!GoObjExperiments.empty()) {
+          Config.Experiments.clear();
+          SmallVector<StringRef, 8> Experiments;
+          StringRef(GoObjExperiments)
+              .split(Experiments, ',', -1, /*KeepEmpty=*/false);
+          for (StringRef Experiment : Experiments)
+            Config.Experiments.push_back(Experiment.str());
+        }
+        Config.IsShared = GoObjShared;
+      }
+      OW = createGoObjObjectWriter(
+          cast<MCGoObjObjectTargetWriter>(MAB->createObjectTargetWriter()), Out,
+          std::move(Config));
+    } else {
+      OW = MAB->createObjectWriter(Out);
+    }
+
     AsmStreamer.reset(getTarget().createMCObjectStreamer(
-        T, Context, std::unique_ptr<MCAsmBackend>(MAB),
-        DwoOut ? MAB->createDwoObjectWriter(Out, *DwoOut)
-               : MAB->createObjectWriter(Out),
+        T, Context, std::unique_ptr<MCAsmBackend>(MAB), std::move(OW),
         std::unique_ptr<MCCodeEmitter>(MCE), STI));
     break;
   }
@@ -271,8 +338,8 @@ bool CodeGenTargetMachineImpl::addPassesToEmitMC(PassManagerBase &PM,
 
   // Create the code emitter for the target if it exists.  If not, .o file
   // emission fails.
-  const MCSubtargetInfo &STI = *getMCSubtargetInfo();
-  const MCRegisterInfo &MRI = *getMCRegisterInfo();
+  const MCSubtargetInfo &STI = getMCSubtargetInfo();
+  const MCRegisterInfo &MRI = getMCRegisterInfo();
   std::unique_ptr<MCCodeEmitter> MCE(
       getTarget().createMCCodeEmitter(*getMCInstrInfo(), *Ctx));
   if (!MCE)

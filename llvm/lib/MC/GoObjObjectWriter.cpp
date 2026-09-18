@@ -1,0 +1,4033 @@
+//===- lib/MC/GoObjObjectWriter.cpp - Go object writer -------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include "GoObjStackMapUtils.h"
+#include "GoObjSymbolRangeIndex.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/BinaryFormat/Dwarf.h"
+#include "llvm/BinaryFormat/GoObj.h"
+#include "llvm/MC/MCAsmBackend.h"
+#include "llvm/MC/MCAsmInfo.h"
+#include "llvm/MC/MCAssembler.h"
+#include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCDwarf.h"
+#include "llvm/MC/MCExpr.h"
+#include "llvm/MC/MCFixup.h"
+#include "llvm/MC/MCGoObjObjectWriter.h"
+#include "llvm/MC/MCSection.h"
+#include "llvm/MC/MCValue.h"
+#include "llvm/Support/Alignment.h"
+#include "llvm/Support/EndianStream.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MathExtras.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/SHA256.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <optional>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+using namespace llvm;
+
+int64_t MCGoObjObjectTargetWriter::getRelocAddend(const MCValue &Target,
+                                                  const MCFixup &) const {
+  return Target.getConstant();
+}
+
+namespace {
+
+struct GoObjSymRef {
+  uint32_t PkgIdx = GoObj::PkgIdxInvalid;
+  uint32_t SymIdx = 0;
+};
+
+struct GoObjSymbol {
+  struct Relocation {
+    uint32_t Offset = 0;
+    uint8_t Size = 0;
+    uint16_t Type = 0;
+    int64_t Addend = 0;
+    uint32_t PkgIdx = GoObj::PkgIdxInvalid;
+    uint32_t SymIdx = 0;
+    std::optional<uint32_t> TargetSymbolIndex;
+    const MCSymbol *TargetSymbol = nullptr;
+  };
+
+  struct Auxiliary {
+    Auxiliary(uint8_t Type, uint32_t TargetSymbolIndex)
+        : Type(Type), TargetSymbolIndex(TargetSymbolIndex) {}
+    Auxiliary(uint8_t Type, GoObjSymRef DirectTarget)
+        : Type(Type), DirectTarget(DirectTarget) {}
+
+    uint8_t Type;
+    uint32_t TargetSymbolIndex = 0;
+    std::optional<GoObjSymRef> DirectTarget;
+  };
+
+  std::string Name;
+  const MCSymbol *Symbol = nullptr;
+  const MCSection *Section = nullptr;
+  uint64_t SectionBegin = 0;
+  uint64_t SectionEnd = 0;
+  GoObj::DefinedSymbolBlock DefinedBlock = GoObj::DefinedSymbolBlock::Symdef;
+  uint8_t Type = GoObj::Sxxx;
+  uint8_t Flag = 0;
+  uint8_t Flag2 = 0;
+  uint16_t ABI = 0;
+  uint64_t Size = 0;
+  uint32_t Align = 0;
+  SmallString<0> Data;
+  std::optional<std::array<uint8_t, GoObj::HashSize>> ContentHash;
+  std::optional<std::array<uint8_t, GoObj::Hash64Size>> ContentHash64;
+  bool ComputeContentHash = false;
+  std::vector<Relocation> Relocations;
+  std::vector<Auxiliary> Auxiliaries;
+};
+
+struct GoObjPCTabEntry {
+  uint64_t PC = 0;
+  int32_t Value = 0;
+};
+
+struct GoObjInlineTreeNode {
+  int32_t Parent = -1;
+  uint32_t File = 0;
+  int32_t Line = 0;
+  const MCSymbol *Callee = nullptr;
+  int32_t ParentPC = -1;
+  uint64_t SiteID = 0;
+};
+
+struct GoObjFuncDebugLines {
+  SmallVector<uint32_t, 4> Files;
+  SmallVector<GoObjPCTabEntry, 8> PCFile;
+  SmallVector<GoObjPCTabEntry, 8> PCLine;
+  SmallVector<GoObjPCTabEntry, 8> PCInline;
+  SmallVector<GoObjInlineTreeNode, 4> InlineTree;
+  int32_t StartLine = 1;
+
+  bool hasLines() const { return !PCFile.empty() && !PCLine.empty(); }
+};
+
+struct GoObjDwarfRange {
+  uint64_t Begin = 0;
+  uint64_t End = 0;
+};
+
+struct GoObjDwarfCarrierData {
+  SmallString<0> Data;
+  std::vector<GoObjSymbol::Relocation> Relocations;
+};
+
+uint32_t checkedUint32(uint64_t Value, const Twine &What) {
+  if (Value > std::numeric_limits<uint32_t>::max())
+    report_fatal_error(What + " exceeds GoObj uint32 limit");
+  return static_cast<uint32_t>(Value);
+}
+
+uint16_t checkedUint16(uint64_t Value, const Twine &What) {
+  if (Value > std::numeric_limits<uint16_t>::max())
+    report_fatal_error(What + " exceeds GoObj uint16 limit");
+  return static_cast<uint16_t>(Value);
+}
+
+uint32_t getGoObjPCQuantum(const Triple &TT) {
+  switch (TT.getArch()) {
+  case Triple::x86:
+  case Triple::x86_64:
+    return 1;
+  default:
+    return 4;
+  }
+}
+
+uint16_t getGoObjStackPointerDwarfReg(const Triple &TT) {
+  switch (TT.getArch()) {
+  case Triple::x86_64:
+    return 7;
+  case Triple::aarch64:
+  case Triple::aarch64_be:
+    return 31;
+  default:
+    report_fatal_error(
+        "GoObj statepoint stack maps do not support this architecture");
+  }
+}
+
+uint8_t getGoObjSymbolType(const MCSection *Section) {
+  if (!Section)
+    return GoObj::SBSS;
+
+  if (Section->isText())
+    return GoObj::STEXT;
+
+  StringRef Name = Section->getName();
+  if (Name.starts_with(".noptrdata"))
+    return GoObj::SNOPTRDATA;
+  if (Name.starts_with(".noptrbss"))
+    return GoObj::SNOPTRBSS;
+  if (Section->isBssSection())
+    return GoObj::SBSS;
+  // ELF uses .data.rel.ro for constants that need dynamic relocations.
+  // Go's linker owns the relocation and RELRO layout; these are still
+  // read-only Go symbols, not mutable globals requiring a GC type.
+  if (Name.starts_with(".rodata") || Name == ".data.rel.ro" ||
+      Name.starts_with(".data.rel.ro.") || Name.starts_with("__TEXT,__const"))
+    return GoObj::SRODATA;
+  if (Name.starts_with(".debug_") || Name.starts_with("__DWARF,"))
+    return GoObj::SDWARFCONST;
+
+  return GoObj::SDATA;
+}
+
+std::optional<uint8_t>
+getGoObjExplicitSectionSymbolType(const MCSection *Section) {
+  if (!Section)
+    return std::nullopt;
+  StringRef Name = Section->getName();
+  if (Name == ".noptrbss.libfuzzer_8bit_counter" ||
+      Name.starts_with(".noptrbss.libfuzzer_8bit_counter."))
+    return GoObj::SLIBFUZZER_8BIT_COUNTER;
+  if (Name == ".noptrbss.coverage_counter" ||
+      Name.starts_with(".noptrbss.coverage_counter."))
+    return GoObj::SCOVERAGE_COUNTER;
+  if (Name == ".text.fips" || Name.starts_with(".text.fips."))
+    return GoObj::STEXTFIPS;
+  if (Name == ".rodata.fips" || Name.starts_with(".rodata.fips."))
+    return GoObj::SRODATAFIPS;
+  if (Name == ".noptrdata.fips" || Name.starts_with(".noptrdata.fips."))
+    return GoObj::SNOPTRDATAFIPS;
+  if (Name == ".data.fips" || Name.starts_with(".data.fips."))
+    return GoObj::SDATAFIPS;
+  return std::nullopt;
+}
+
+void appendSectionContents(SmallVectorImpl<char> &Contents,
+                           const MCAssembler &Asm, const MCSection &Section) {
+  raw_svector_ostream ContentsOS(Contents);
+  Asm.writeSectionData(ContentsOS, &Section);
+}
+
+void addDefinedSymbol(std::vector<GoObjSymbol> &Symbols, const MCSymbol *MCSym,
+                      const MCSection *Section, uint64_t SectionBegin,
+                      uint64_t SectionEnd,
+                      GoObj::DefinedSymbolBlock DefinedBlock, StringRef Name,
+                      uint8_t Type, uint8_t Flag, uint8_t Flag2, uint16_t ABI,
+                      uint64_t Size, uint32_t Align, ArrayRef<char> Data) {
+  GoObjSymbol Sym;
+  Sym.Name = Name.str();
+  Sym.Symbol = MCSym;
+  Sym.Section = Section;
+  Sym.SectionBegin = SectionBegin;
+  Sym.SectionEnd = SectionEnd;
+  Sym.DefinedBlock = DefinedBlock;
+  Sym.Type = Type;
+  Sym.Flag = Flag;
+  Sym.Flag2 = Flag2;
+  Sym.ABI = ABI;
+  Sym.Size = Size;
+  Sym.Align = Align;
+  Sym.Data.append(Data.begin(), Data.end());
+  Symbols.push_back(std::move(Sym));
+}
+
+void appendUvarint(SmallVectorImpl<char> &Data, uint64_t Value) {
+  while (Value >= 0x80) {
+    Data.push_back(static_cast<char>((Value & 0x7f) | 0x80));
+    Value >>= 7;
+  }
+  Data.push_back(static_cast<char>(Value));
+}
+
+void appendVarint(SmallVectorImpl<char> &Data, int64_t Value) {
+  uint64_t UValue = static_cast<uint64_t>(Value) << 1;
+  if (Value < 0)
+    UValue = ~UValue;
+  appendUvarint(Data, UValue);
+}
+
+void appendDwarfSLEB128(SmallVectorImpl<char> &Data, int64_t Value) {
+  bool More;
+  do {
+    uint8_t Byte = Value & 0x7f;
+    bool Sign = (Byte & 0x40) != 0;
+    Value >>= 7;
+    More = !((Value == 0 && !Sign) || (Value == -1 && Sign));
+    if (More)
+      Byte |= 0x80;
+    Data.push_back(static_cast<char>(Byte));
+  } while (More);
+}
+
+void appendUint32LE(SmallVectorImpl<char> &Data, uint32_t Value) {
+  size_t Offset = Data.size();
+  Data.resize(Offset + 4);
+  support::endian::write32le(Data.data() + Offset, Value);
+}
+
+void appendCString(SmallVectorImpl<char> &Data, StringRef Value) {
+  Data.append(Value.begin(), Value.end());
+  Data.push_back(0);
+}
+
+uint32_t
+appendDwarfRelocation(SmallVectorImpl<char> &Data,
+                      std::vector<GoObjSymbol::Relocation> &Relocations,
+                      uint8_t Size, uint16_t Type, int64_t Addend,
+                      std::optional<uint32_t> TargetSymbolIndex,
+                      const MCSymbol *TargetSymbol = nullptr) {
+  uint32_t Offset = checkedUint32(Data.size(), "DWARF carrier offset");
+  Data.resize(Data.size() + Size, 0);
+  GoObjSymbol::Relocation Reloc;
+  Reloc.Offset = Offset;
+  Reloc.Size = Size;
+  Reloc.Type = Type;
+  Reloc.Addend = Addend;
+  Reloc.TargetSymbolIndex = TargetSymbolIndex;
+  Reloc.TargetSymbol = TargetSymbol;
+  Relocations.push_back(Reloc);
+  return Offset;
+}
+
+uint64_t getPCDeltaUnits(uint64_t Delta, uint32_t PCQuantum) {
+  return (Delta + PCQuantum - 1) / PCQuantum;
+}
+
+SmallString<0> makePCTab(int32_t InitialValue,
+                         ArrayRef<GoObjPCTabEntry> Entries, uint64_t CodeSize,
+                         uint32_t PCQuantum) {
+  SmallString<0> Data;
+  int32_t OldValue = -1;
+  uint64_t PC = 0;
+  bool Started = false;
+
+  auto Emit = [&](uint64_t EventPC, int32_t Value) {
+    if (EventPC > CodeSize)
+      report_fatal_error("GoObj pc-value event exceeds function size");
+    if (Started)
+      appendUvarint(Data, getPCDeltaUnits(EventPC - PC, PCQuantum));
+    appendVarint(Data, static_cast<int64_t>(Value) - OldValue);
+    OldValue = Value;
+    PC = EventPC;
+    Started = true;
+  };
+
+  Emit(0, InitialValue);
+  for (const GoObjPCTabEntry &Entry : Entries) {
+    if (Entry.Value == OldValue)
+      continue;
+    Emit(Entry.PC, Entry.Value);
+  }
+
+  appendUvarint(Data, getPCDeltaUnits(CodeSize - PC, PCQuantum));
+  appendUvarint(Data, 0);
+  return Data;
+}
+
+SmallString<0> makeConstantPCTab(int32_t Value, uint64_t CodeSize,
+                                 uint32_t PCQuantum) {
+  return makePCTab(Value, {}, CodeSize, PCQuantum);
+}
+
+SmallString<0> makeFuncInfoData(uint32_t ArgSize, uint32_t StackSize,
+                                uint8_t FuncID, uint8_t FuncFlag,
+                                ArrayRef<uint32_t> Files, int32_t StartLine,
+                                ArrayRef<GoObjInlineTreeNode> InlineTree) {
+  SmallString<0> Data;
+  raw_svector_ostream OS(Data);
+  support::endian::Writer W(OS, llvm::endianness::little);
+  W.write<uint32_t>(ArgSize);   // Args.
+  W.write<uint32_t>(StackSize); // Locals.
+  W.write<uint8_t>(FuncID);
+  W.write<uint8_t>(FuncFlag);
+  W.write<uint8_t>(0);
+  W.write<uint8_t>(0);
+  W.write<uint32_t>(static_cast<uint32_t>(StartLine));
+  W.write<uint32_t>(checkedUint32(Files.size(), "GoObj FuncInfo file count"));
+  for (uint32_t File : Files)
+    W.write<uint32_t>(File);
+  W.write<uint32_t>(
+      checkedUint32(InlineTree.size(), "GoObj FuncInfo inline tree count"));
+  for (const GoObjInlineTreeNode &Node : InlineTree) {
+    W.write<uint32_t>(static_cast<uint32_t>(Node.Parent));
+    W.write<uint32_t>(Node.File);
+    W.write<uint32_t>(static_cast<uint32_t>(Node.Line));
+    W.write<uint32_t>(0); // Callee package index, patched after ref numbering.
+    W.write<uint32_t>(0); // Callee symbol index, patched after ref numbering.
+    W.write<uint32_t>(static_cast<uint32_t>(Node.ParentPC));
+  }
+  return Data;
+}
+
+SmallString<0> makeEmptyStackMap() {
+  SmallString<0> Data;
+  raw_svector_ostream OS(Data);
+  support::endian::Writer W(OS, llvm::endianness::little);
+  W.write<uint32_t>(1); // One bitmap, selected by PCDATA_StackMapIndex 0.
+  W.write<uint32_t>(0); // Zero pointer bits.
+  return Data;
+}
+
+SmallString<0> makeStackMap(uint32_t NBits,
+                            ArrayRef<SmallVector<uint8_t, 8>> Bitmaps) {
+  SmallString<0> Data;
+  raw_svector_ostream OS(Data);
+  support::endian::Writer W(OS, llvm::endianness::little);
+  W.write<uint32_t>(checkedUint32(Bitmaps.size(), "GoObj stack map count"));
+  W.write<uint32_t>(NBits);
+  size_t BytesPerBitmap = divideCeil(NBits, 8u);
+  for (const auto &Bitmap : Bitmaps) {
+    if (Bitmap.size() != BytesPerBitmap)
+      report_fatal_error("GoObj stack map bitmap has invalid size");
+    const char *BitmapData = reinterpret_cast<const char *>(Bitmap.data());
+    Data.append(BitmapData, BitmapData + Bitmap.size());
+  }
+  return Data;
+}
+
+struct GoObjStatepointStackMaps {
+  struct StackObject {
+    int32_t FrameOffset;
+    uint32_t ByteSize;
+    uint32_t PointerBytes;
+    SmallVector<uint8_t, 8> Bitmap;
+
+    bool operator==(const StackObject &Other) const {
+      return FrameOffset == Other.FrameOffset && ByteSize == Other.ByteSize &&
+             PointerBytes == Other.PointerBytes && Bitmap == Other.Bitmap;
+    }
+  };
+
+  SmallString<0> Args;
+  SmallString<0> Locals;
+  SmallString<0> PCData;
+  SmallString<0> OpenDefer;
+  SmallVector<StackObject, 4> StackObjects;
+};
+
+struct GoObjGCFrameLayout {
+  uint32_t FuncInfoLocalsSize;
+  uint32_t StackObjectVarpOffset;
+  uint32_t GCLocalsStart;
+  uint32_t GCLocalsSize;
+  uint32_t GCLocalsBitOffset;
+  uint32_t EntryArgsStart;
+};
+
+GoObjGCFrameLayout getGoObjGCFrameLayout(const Triple &TT, uint32_t StackSize,
+                                         uint32_t PointerSize,
+                                         bool HasFramePointer) {
+  // At an amd64 function entry, RSP points at the return address. Entry
+  // argument pointer locations in the entry stack map are relative to that
+  // pre-frame RSP, so the caller's argument area begins one word above it. The
+  // same bias applies after subtracting StackSize for ordinary statepoints.
+  if (TT.getArch() == Triple::x86_64) {
+    if (StackSize == 0)
+      return {0, 0, 0, 0, 0, PointerSize};
+    if (!PointerSize || StackSize < PointerSize || StackSize % PointerSize != 0)
+      report_fatal_error("X86 GoObj frame has invalid GC layout");
+
+    if (HasFramePointer) {
+      // A suspended amd64 frame includes the next callee's return-address word
+      // below its current SP in _func.locals. LLVM stack-map locations are
+      // relative to the pre-call SP, so bit 0 has no non-negative location.
+      // The saved frame pointer at the top of the frame is excluded from the
+      // scannable locals area.
+      return {StackSize, StackSize - PointerSize,
+              0,         StackSize - PointerSize,
+              1,         PointerSize};
+    }
+
+    // Frameless functions do not reserve the saved-frame-pointer word. Their
+    // entire physical frame is scannable and the first stack-map word is bit 0.
+    return {StackSize, StackSize, 0, StackSize, 0, PointerSize};
+  }
+  if (TT.getArch() != Triple::aarch64)
+    return {StackSize, StackSize, 0, StackSize, 0, 0};
+  if (StackSize == 0)
+    return {0, 0, 0, 0, 0, PointerSize};
+  if (!PointerSize || StackSize < 2 * PointerSize ||
+      StackSize % PointerSize != 0)
+    report_fatal_error("AArch64 GoObj frame has invalid GC layout");
+
+  // Go arm64 frames keep LR at 0(SP). The caller's FP link occupies the top
+  // word at frame.varp, and this function's FP link is stored below SP for the
+  // next callee. _func.locals is frame.varp-SP, so it excludes LR from the
+  // physical frame size. Locals pointer maps exclude both reserved words and
+  // therefore describe [SP+PointerSize, frame.varp).
+  return {StackSize - PointerSize,
+          StackSize - PointerSize,
+          PointerSize,
+          StackSize - 2 * PointerSize,
+          0,
+          PointerSize};
+}
+
+struct GoObjStackMapPair {
+  SmallVector<uint8_t, 8> Args;
+  SmallVector<uint8_t, 8> Locals;
+
+  bool operator==(const GoObjStackMapPair &Other) const {
+    return Args == Other.Args && Locals == Other.Locals;
+  }
+};
+
+struct GoObjAllocaPtrMapRecord {
+  MCContext::GoObjStackMapLocation Base;
+  uint64_t ByteSize;
+  bool ContentsLive;
+  SmallVector<uint64_t, 4> BitmapWords;
+};
+
+struct GoObjOpenDeferRecord {
+  MCContext::GoObjStackMapLocation Bits;
+  MCContext::GoObjStackMapLocation Slots;
+  uint64_t SlotCount;
+};
+
+bool sameStackMapLocation(const MCContext::GoObjStackMapLocation &LHS,
+                          const MCContext::GoObjStackMapLocation &RHS) {
+  return LHS.Type == RHS.Type && LHS.Size == RHS.Size &&
+         LHS.DwarfRegNum == RHS.DwarfRegNum && LHS.Offset == RHS.Offset;
+}
+
+bool sameOpenDeferRecord(const GoObjOpenDeferRecord &LHS,
+                         const GoObjOpenDeferRecord &RHS) {
+  return sameStackMapLocation(LHS.Bits, RHS.Bits) &&
+         sameStackMapLocation(LHS.Slots, RHS.Slots) &&
+         LHS.SlotCount == RHS.SlotCount;
+}
+
+bool sameAllocaPtrMapBase(const GoObjAllocaPtrMapRecord &LHS,
+                          const GoObjAllocaPtrMapRecord &RHS) {
+  return LHS.Base.Type == RHS.Base.Type && LHS.Base.Size == RHS.Base.Size &&
+         LHS.Base.DwarfRegNum == RHS.Base.DwarfRegNum &&
+         LHS.Base.Offset == RHS.Base.Offset;
+}
+
+bool sameAllocaPtrMapLayout(const GoObjAllocaPtrMapRecord &LHS,
+                            const GoObjAllocaPtrMapRecord &RHS) {
+  return sameAllocaPtrMapBase(LHS, RHS) && LHS.ByteSize == RHS.ByteSize &&
+         LHS.BitmapWords == RHS.BitmapWords;
+}
+
+int64_t
+getAllocaPtrMapConstant(const MCContext::GoObjStackMapLocation &Location,
+                        StringRef Description) {
+  if (Location.Type != MCContext::GoObjStackMapLocation::Constant)
+    report_fatal_error("GoObj alloca ptrmap " + Description +
+                       " is not a constant");
+  return Location.Offset;
+}
+
+uint64_t getNonnegativeAllocaPtrMapConstant(
+    const MCContext::GoObjStackMapLocation &Location, StringRef Description) {
+  int64_t Value = getAllocaPtrMapConstant(Location, Description);
+  if (Value < 0)
+    report_fatal_error("GoObj alloca ptrmap " + Description + " is negative");
+  return static_cast<uint64_t>(Value);
+}
+
+std::optional<GoObjOpenDeferRecord>
+parseOpenDeferRecord(const MCContext::GoObjStackMapEntry &Entry) {
+  if (Entry.NumDeoptLocations > Entry.Locations.size())
+    report_fatal_error("GoObj statepoint deopt location count is invalid");
+  ArrayRef<MCContext::GoObjStackMapLocation> Deopts =
+      ArrayRef(Entry.Locations).take_front(Entry.NumDeoptLocations);
+  auto IsConstant = [](const auto &Location, int64_t Value) {
+    return Location.Type == MCContext::GoObjStackMapLocation::Constant &&
+           Location.Offset == Value;
+  };
+
+  std::optional<size_t> Begin;
+  bool SawEnd = false;
+  for (auto [Index, Location] : llvm::enumerate(Deopts)) {
+    if (IsConstant(Location, GoObj::OpenDeferBeginMagic)) {
+      if (Begin)
+        report_fatal_error(
+            "GoObj statepoint contains multiple open-defer records");
+      Begin = Index;
+    }
+    SawEnd |= IsConstant(Location, GoObj::OpenDeferEndMagic);
+  }
+  if (!Begin) {
+    if (SawEnd)
+      report_fatal_error("GoObj open-defer protocol is truncated");
+    return std::nullopt;
+  }
+  if (*Begin + 2 >= Deopts.size())
+    report_fatal_error("GoObj open-defer protocol is truncated");
+  uint64_t ProtocolLength = getNonnegativeAllocaPtrMapConstant(
+      Deopts[*Begin + 1], "open-defer leading protocol length");
+  uint64_t SlotCount = getNonnegativeAllocaPtrMapConstant(
+      Deopts[*Begin + 2], "open-defer slot count");
+  if (ProtocolLength != 6 || ProtocolLength > Deopts.size() - *Begin - 1)
+    report_fatal_error("GoObj open-defer protocol length is invalid");
+  size_t End = *Begin + static_cast<size_t>(ProtocolLength) - 1;
+  if (!IsConstant(Deopts[End], GoObj::OpenDeferEndMagic) ||
+      getNonnegativeAllocaPtrMapConstant(
+          Deopts[End + 1], "open-defer trailing protocol length") !=
+          ProtocolLength)
+    report_fatal_error("GoObj open-defer protocol envelope is malformed");
+  if (SlotCount == 0)
+    report_fatal_error("GoObj open-defer protocol has no closure slots");
+
+  const auto &Bits = Deopts[*Begin + 3];
+  if (Bits.Type != MCContext::GoObjStackMapLocation::Direct)
+    report_fatal_error("GoObj open-defer bits is not a direct frame location");
+  const auto &Slots = Deopts[*Begin + 4];
+  if (Slots.Type != MCContext::GoObjStackMapLocation::Direct)
+    report_fatal_error(
+        "GoObj open-defer closure slots are not a direct frame location");
+  return GoObjOpenDeferRecord{Bits, Slots, SlotCount};
+}
+
+SmallVector<GoObjAllocaPtrMapRecord, 4>
+parseAllocaPtrMapRecords(const MCContext::GoObjStackMapEntry &Entry,
+                         uint32_t PointerSize) {
+  if (Entry.NumDeoptLocations > Entry.Locations.size())
+    report_fatal_error("GoObj statepoint deopt location count is invalid");
+  ArrayRef<MCContext::GoObjStackMapLocation> Deopts =
+      ArrayRef(Entry.Locations).take_front(Entry.NumDeoptLocations);
+
+  auto IsConstant = [](const auto &Location, int64_t Value) {
+    return Location.Type == MCContext::GoObjStackMapLocation::Constant &&
+           Location.Offset == Value;
+  };
+  bool HasProtocolMarker = llvm::any_of(Deopts, [&](const auto &Location) {
+    return IsConstant(Location, GoObj::AllocaPtrMapBeginMagic) ||
+           IsConstant(Location, GoObj::AllocaPtrMapEndMagic);
+  });
+  if (!HasProtocolMarker)
+    return {};
+  if (Deopts.size() < 3 ||
+      !IsConstant(Deopts[Deopts.size() - 2], GoObj::AllocaPtrMapEndMagic))
+    report_fatal_error("GoObj alloca ptrmap protocol is truncated");
+
+  uint64_t ProtocolLength = getNonnegativeAllocaPtrMapConstant(
+      Deopts.back(), "trailing protocol length");
+  if (ProtocolLength < 5 || ProtocolLength >= Deopts.size())
+    report_fatal_error("GoObj alloca ptrmap protocol length is invalid");
+  size_t ProtocolStart = Deopts.size() - ProtocolLength - 1;
+  if (!IsConstant(Deopts[ProtocolStart], GoObj::AllocaPtrMapBeginMagic) ||
+      !IsConstant(Deopts[ProtocolStart + ProtocolLength - 1],
+                  GoObj::AllocaPtrMapEndMagic))
+    report_fatal_error("GoObj alloca ptrmap protocol envelope is malformed");
+
+  size_t Cursor = ProtocolStart + 1;
+  size_t RecordsEnd = ProtocolStart + ProtocolLength - 1;
+  SmallVector<GoObjAllocaPtrMapRecord, 4> Records;
+  while (Cursor != RecordsEnd) {
+    if (RecordsEnd - Cursor < 2)
+      report_fatal_error("GoObj alloca ptrmap record is truncated");
+    const auto &Base = Deopts[Cursor];
+    if (Base.Type != MCContext::GoObjStackMapLocation::Direct)
+      report_fatal_error(
+          "GoObj alloca ptrmap base is not a direct frame location");
+    uint64_t EncodedByteSize = getNonnegativeAllocaPtrMapConstant(
+        Deopts[Cursor + 1], "encoded byte size");
+    uint64_t ByteSize = EncodedByteSize & ~uint64_t(1);
+    bool ContentsLive = EncodedByteSize & 1;
+    if (!ByteSize || !PointerSize || ByteSize % PointerSize != 0)
+      report_fatal_error("GoObj alloca ptrmap byte size is invalid");
+    uint64_t BitCount = ByteSize / PointerSize;
+    uint64_t WordCount = divideCeil(BitCount, 64u);
+    if (WordCount > RecordsEnd - Cursor - 2)
+      report_fatal_error("GoObj alloca ptrmap bitmap is truncated");
+
+    GoObjAllocaPtrMapRecord Record{Base, ByteSize, ContentsLive, {}};
+    Record.BitmapWords.reserve(WordCount);
+    for (uint64_t Word = 0; Word != WordCount; ++Word)
+      Record.BitmapWords.push_back(static_cast<uint64_t>(
+          getAllocaPtrMapConstant(Deopts[Cursor + 2 + Word], "bitmap word")));
+    Records.push_back(std::move(Record));
+    Cursor += 2 + WordCount;
+  }
+  return Records;
+}
+
+GoObjStatepointStackMaps
+makeStatepointStackMaps(const MCAssembler &Asm, const GoObjSymbol &Function,
+                        uint32_t StackSize, uint32_t ArgSize,
+                        uint32_t PCQuantum,
+                        ArrayRef<MCContext::GoObjStackMapEntry> StackMapEntries,
+                        ArrayRef<GoObjPCTabEntry> PCSPEntries) {
+  struct ResolvedEntry {
+    uint64_t CallsitePC;
+    const MCContext::GoObjStackMapEntry *Entry;
+  };
+
+  SmallVector<ResolvedEntry, 8> ResolvedEntries;
+  ResolvedEntries.reserve(StackMapEntries.size());
+  for (const MCContext::GoObjStackMapEntry &Entry : StackMapEntries) {
+    if (!Entry.CallsiteOffsetExpr)
+      report_fatal_error("GoObj statepoint has no callsite offset expression");
+    if (Entry.StackSize == UINT64_MAX)
+      report_fatal_error(
+          "GoObj statepoint stack maps do not support dynamic frames");
+    if (Entry.StackSize != StackSize)
+      report_fatal_error(
+          "GoObj statepoint stack size does not match function metadata");
+    int64_t CallsitePCValue;
+    if (!Entry.CallsiteOffsetExpr->evaluateAsAbsolute(CallsitePCValue, Asm) ||
+        CallsitePCValue < 0)
+      report_fatal_error("GoObj statepoint callsite offset is not absolute");
+    uint64_t CallsitePC = static_cast<uint64_t>(CallsitePCValue);
+    if (CallsitePC > Function.Size)
+      report_fatal_error(
+          "GoObj statepoint callsite is outside its function range");
+    if (CallsitePC % PCQuantum != 0)
+      report_fatal_error("GoObj statepoint callsite has invalid PC");
+    ResolvedEntries.push_back({CallsitePC, &Entry});
+  }
+  llvm::stable_sort(ResolvedEntries,
+                    [](const ResolvedEntry &LHS, const ResolvedEntry &RHS) {
+                      return LHS.CallsitePC < RHS.CallsitePC;
+                    });
+  uint32_t PointerSize = StackMapEntries.front().PointerSize;
+  if (!PointerSize)
+    report_fatal_error("GoObj statepoint has invalid pointer size");
+  if (PointerSize != Asm.getContext().getAsmInfo().getCodePointerSize())
+    report_fatal_error(
+        "GoObj statepoint pointer size does not match its target");
+  const Triple &TT = Asm.getContext().getTargetTriple();
+  bool HasFramePointer = Asm.getContext()
+                             .getGoObjSymbolHasFramePointer(Function.Symbol)
+                             .value_or(false);
+  GoObjGCFrameLayout FrameLayout =
+      getGoObjGCFrameLayout(TT, StackSize, PointerSize, HasFramePointer);
+  uint16_t StackPointerDwarfRegNum = getGoObjStackPointerDwarfReg(TT);
+  auto NormalizeFrameLocation = [&](MCContext::GoObjStackMapLocation Location) {
+    // X86 register allocation may keep a statepoint spill addressed from
+    // RBP. In a Go frame RBP is frame.varp, at SP+StackSize-PointerSize.
+    // Normalize it to the SP-relative coordinate system used by Go maps.
+    constexpr uint16_t X86FramePointerDwarfRegNum = 6;
+    if (TT.getArch() == Triple::x86_64 && HasFramePointer &&
+        Location.DwarfRegNum == X86FramePointerDwarfRegNum) {
+      Location.DwarfRegNum = StackPointerDwarfRegNum;
+      Location.Offset += FrameLayout.StackObjectVarpOffset;
+    }
+    return Location;
+  };
+  uint32_t NBits = checkedUint32(
+      FrameLayout.GCLocalsBitOffset +
+          divideCeil(static_cast<uint64_t>(FrameLayout.GCLocalsSize),
+                     PointerSize),
+      "GoObj locals stack map bit count");
+  if (ArgSize % PointerSize != 0)
+    report_fatal_error("GoObj argument area is not pointer-aligned");
+  uint32_t ArgsNBits = ArgSize / PointerSize;
+  size_t LocalsBytesPerBitmap = divideCeil(NBits, 8u);
+  size_t ArgsBytesPerBitmap = divideCeil(ArgsNBits, 8u);
+  uint64_t OrdinaryArgsStart =
+      static_cast<uint64_t>(StackSize) + FrameLayout.EntryArgsStart;
+  struct FunctionAllocaRecord {
+    GoObjAllocaPtrMapRecord Layout;
+    goobj::StackMapSlotKind Kind;
+    uint64_t SeenOrdinaryEntries = 0;
+    bool SawInactiveContents = false;
+  };
+  SmallVector<FunctionAllocaRecord, 4> FunctionAllocaRecords;
+  uint64_t OrdinaryEntryCount =
+      llvm::count_if(ResolvedEntries, [](const ResolvedEntry &Resolved) {
+        return Resolved.Entry->ID != GoObj::EntryArgsStackMapID;
+      });
+  std::optional<GoObjOpenDeferRecord> FunctionOpenDefer;
+  uint64_t OpenDeferEntryCount = 0;
+  for (const ResolvedEntry &Resolved : ResolvedEntries) {
+    std::optional<GoObjOpenDeferRecord> Record =
+        parseOpenDeferRecord(*Resolved.Entry);
+    if (Resolved.Entry->ID == GoObj::EntryArgsStackMapID) {
+      if (Record)
+        report_fatal_error("GoObj entry metadata contains open-defer state");
+      continue;
+    }
+    if (!Record)
+      continue;
+    ++OpenDeferEntryCount;
+    Record->Bits = NormalizeFrameLocation(Record->Bits);
+    Record->Slots = NormalizeFrameLocation(Record->Slots);
+    auto IsDirectSPAddress = [&](const auto &Location) {
+      return Location.Type == MCContext::GoObjStackMapLocation::Direct &&
+             Location.Size == PointerSize &&
+             Location.DwarfRegNum == StackPointerDwarfRegNum &&
+             Location.Offset >= 0;
+    };
+    if (!IsDirectSPAddress(Record->Bits) || !IsDirectSPAddress(Record->Slots))
+      report_fatal_error(
+          "GoObj open-defer state is not a pointer-sized SP location");
+    if (!FunctionOpenDefer)
+      FunctionOpenDefer = std::move(*Record);
+    else if (!sameOpenDeferRecord(*FunctionOpenDefer, *Record))
+      report_fatal_error(
+          "GoObj open-defer frame locations change between statepoints");
+  }
+  if (FunctionOpenDefer && OpenDeferEntryCount != OrdinaryEntryCount)
+    report_fatal_error(
+        "GoObj open-defer frame state is missing from an ordinary statepoint");
+
+  SmallString<0> OpenDeferData;
+  if (FunctionOpenDefer) {
+    int64_t VarpOffset =
+        static_cast<int64_t>(FrameLayout.StackObjectVarpOffset);
+    auto OffsetBelowVarp = [&](int64_t Offset, StringRef Description) {
+      if (Offset >= VarpOffset)
+        report_fatal_error(Twine("GoObj open-defer ") + Description +
+                           " is not below varp");
+      return static_cast<uint64_t>(VarpOffset - Offset);
+    };
+    int64_t FirstSlotOffset = FunctionOpenDefer->Slots.Offset;
+    if (FunctionOpenDefer->SlotCount == 0 ||
+        FunctionOpenDefer->SlotCount >
+            static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) /
+                PointerSize)
+      report_fatal_error(
+          "GoObj open-defer closure slots do not fit below varp");
+    int64_t SlotBytes =
+        static_cast<int64_t>(FunctionOpenDefer->SlotCount * PointerSize);
+    if (FirstSlotOffset > VarpOffset - SlotBytes)
+      report_fatal_error(
+          "GoObj open-defer closure slots do not fit below varp");
+    appendUvarint(OpenDeferData,
+                  OffsetBelowVarp(FunctionOpenDefer->Bits.Offset, "bits"));
+    appendUvarint(OpenDeferData,
+                  OffsetBelowVarp(FirstSlotOffset, "first slot"));
+  }
+
+  auto BuildPair = [&](const MCContext::GoObjStackMapEntry &Entry) {
+    bool IsEntryArgs = Entry.ID == GoObj::EntryArgsStackMapID;
+    GoObjStackMapPair Pair{SmallVector<uint8_t, 8>(ArgsBytesPerBitmap, 0),
+                           SmallVector<uint8_t, 8>(LocalsBytesPerBitmap, 0)};
+    SmallVector<std::pair<int64_t, int64_t>, 4> AllocaRanges;
+    DenseSet<uint32_t> AllocaArgsPointerBits;
+    DenseSet<uint32_t> AllocaLocalsPointerBits;
+    if (Entry.NumDeoptLocations > Entry.Locations.size())
+      report_fatal_error("GoObj statepoint deopt location count is invalid");
+    ArrayRef<MCContext::GoObjStackMapLocation> GCLiveLocations =
+        ArrayRef(Entry.Locations).drop_front(Entry.NumDeoptLocations);
+    for (const GoObjAllocaPtrMapRecord &Record :
+         parseAllocaPtrMapRecords(Entry, PointerSize)) {
+      if (IsEntryArgs)
+        report_fatal_error("GoObj entry metadata contains an alloca ptrmap");
+      MCContext::GoObjStackMapLocation RecordBase =
+          NormalizeFrameLocation(Record.Base);
+      if (RecordBase.Size != PointerSize ||
+          RecordBase.DwarfRegNum != StackPointerDwarfRegNum)
+        report_fatal_error(
+            "GoObj alloca ptrmap base is not a pointer-sized SP location");
+      uint64_t BitCount = Record.ByteSize / PointerSize;
+      if (Record.BitmapWords.size() != divideCeil(BitCount, 64u))
+        report_fatal_error("GoObj alloca ptrmap layout is inconsistent");
+      if (RecordBase.Offset < 0)
+        report_fatal_error("GoObj alloca ptrmap base offset is negative");
+      if (Record.ByteSize >
+          static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) -
+              static_cast<uint64_t>(RecordBase.Offset))
+        report_fatal_error("GoObj alloca ptrmap frame range overflows");
+      int64_t RangeStart = RecordBase.Offset;
+      int64_t RangeEnd = RangeStart + static_cast<int64_t>(Record.ByteSize);
+      for (const auto &[ExistingStart, ExistingEnd] : AllocaRanges) {
+        if (RangeStart == ExistingStart && RangeEnd == ExistingEnd)
+          report_fatal_error(
+              "GoObj alloca ptrmap contains a duplicate frame record");
+        if (RangeStart < ExistingEnd && ExistingStart < RangeEnd)
+          report_fatal_error(
+              "GoObj alloca ptrmap records overlap in one callsite");
+      }
+      AllocaRanges.push_back({RangeStart, RangeEnd});
+
+      bool HasDirectGCLive = llvm::any_of(
+          GCLiveLocations,
+          [&](const MCContext::GoObjStackMapLocation &Location) {
+            MCContext::GoObjStackMapLocation Normalized =
+                NormalizeFrameLocation(Location);
+            return Normalized.Type ==
+                       MCContext::GoObjStackMapLocation::Direct &&
+                   Normalized.Size == RecordBase.Size &&
+                   Normalized.DwarfRegNum == RecordBase.DwarfRegNum &&
+                   Normalized.Offset == RecordBase.Offset;
+          });
+      if (Record.ContentsLive && !HasDirectGCLive)
+        report_fatal_error(
+            "GoObj live alloca ptrmap has no direct gc-live base");
+
+      uint64_t PaddingBits = Record.BitmapWords.size() * 64 - BitCount;
+      if (PaddingBits && (Record.BitmapWords.back() >> (64 - PaddingBits)) != 0)
+        report_fatal_error(
+            "GoObj alloca ptrmap bitmap padding bits are nonzero");
+      std::optional<goobj::StackMapSlotKind> RecordKind =
+          goobj::classifyOrdinaryStackMapRange(
+              RangeStart, Record.ByteSize, PointerSize,
+              FrameLayout.GCLocalsStart, FrameLayout.GCLocalsSize,
+              FrameLayout.GCLocalsBitOffset, OrdinaryArgsStart, ArgSize);
+      if (!RecordKind)
+        report_fatal_error(
+            "GoObj alloca ptrmap range is not entirely in args or locals");
+      bool HasPointer = false;
+      for (uint64_t Bit = 0; Bit != BitCount; ++Bit) {
+        int64_t SlotOffset =
+            RangeStart + static_cast<int64_t>(Bit * PointerSize);
+        goobj::StackMapSlot Slot = goobj::classifyOrdinaryStackMapSlot(
+            SlotOffset, /*IsIndirect=*/true, PointerSize,
+            FrameLayout.GCLocalsStart, FrameLayout.GCLocalsSize,
+            FrameLayout.GCLocalsBitOffset, OrdinaryArgsStart, ArgSize);
+        assert(Slot.Kind == *RecordKind &&
+               "validated alloca range changed frame region");
+        if ((Record.BitmapWords[Bit / 64] & (uint64_t(1) << (Bit % 64))) == 0)
+          continue;
+        HasPointer = true;
+        if (Record.ContentsLive) {
+          DenseSet<uint32_t> &AllocaPointerBits =
+              Slot.Kind == goobj::StackMapSlotKind::Args
+                  ? AllocaArgsPointerBits
+                  : AllocaLocalsPointerBits;
+          if (!AllocaPointerBits.insert(Slot.Bit).second)
+            report_fatal_error(
+                "GoObj alloca ptrmap contains a duplicate pointer slot");
+          SmallVector<uint8_t, 8> &Bitmap =
+              Slot.Kind == goobj::StackMapSlotKind::Args ? Pair.Args
+                                                         : Pair.Locals;
+          Bitmap[Slot.Bit / 8] |= uint8_t(1u << (Slot.Bit % 8));
+        }
+      }
+      if (!HasPointer)
+        report_fatal_error("GoObj alloca ptrmap contains no pointer slots");
+
+      GoObjAllocaPtrMapRecord NormalizedRecord = Record;
+      NormalizedRecord.Base = RecordBase;
+      auto FunctionRecord = llvm::find_if(
+          FunctionAllocaRecords, [&](const FunctionAllocaRecord &Existing) {
+            return sameAllocaPtrMapLayout(Existing.Layout, NormalizedRecord);
+          });
+      if (FunctionRecord == FunctionAllocaRecords.end()) {
+        FunctionAllocaRecords.push_back(
+            {NormalizedRecord, *RecordKind, 1, !Record.ContentsLive});
+      } else {
+        if (FunctionRecord->Kind != *RecordKind)
+          report_fatal_error(
+              "GoObj alloca ptrmap frame region changes between statepoints");
+        ++FunctionRecord->SeenOrdinaryEntries;
+        FunctionRecord->SawInactiveContents |= !Record.ContentsLive;
+      }
+    }
+
+    for (const MCContext::GoObjStackMapLocation &RawLoc : GCLiveLocations) {
+      MCContext::GoObjStackMapLocation Loc = NormalizeFrameLocation(RawLoc);
+      // Statepoint lowering does not allocate a spill slot for a null GC
+      // pointer.  A path-sensitive constant fold can therefore leave a null
+      // base/derived pair in the stack map even when the original IR operand
+      // was not syntactically null.  Null needs neither scanning nor stack
+      // relocation, so omit it from the Go pointer maps.  Keep every other
+      // non-frame location fail-closed.
+      if (goobj::isNullGCLiveLocation(Loc))
+        continue;
+      switch (Loc.Type) {
+      case MCContext::GoObjStackMapLocation::Direct:
+      case MCContext::GoObjStackMapLocation::Indirect:
+        break;
+      case MCContext::GoObjStackMapLocation::Unprocessed:
+      case MCContext::GoObjStackMapLocation::Register:
+      case MCContext::GoObjStackMapLocation::Constant:
+      case MCContext::GoObjStackMapLocation::ConstantIndex:
+        report_fatal_error(
+            "GoObj statepoint GC pointer is not in a stack slot");
+      }
+      std::optional<SmallVector<int64_t, 4>> PointerWordOffsets =
+          goobj::expandStackMapPointerWords(
+              Loc.Offset, Loc.Size,
+              Loc.Type == MCContext::GoObjStackMapLocation::Indirect,
+              PointerSize);
+      if (!PointerWordOffsets || Loc.DwarfRegNum != StackPointerDwarfRegNum)
+        report_fatal_error(
+            Twine("GoObj statepoint in ") + Function.Name +
+            " contains an invalid pointer stack slot: size=" + Twine(Loc.Size) +
+            ", dwarf-reg=" + Twine(Loc.DwarfRegNum) +
+            ", offset=" + Twine(Loc.Offset));
+
+      for (int64_t WordOffset : *PointerWordOffsets) {
+        if (IsEntryArgs) {
+          std::optional<uint32_t> Bit = goobj::classifyEntryArgsStackMapSlot(
+              WordOffset, PointerSize, FrameLayout.EntryArgsStart, ArgSize);
+          if (Loc.Type != MCContext::GoObjStackMapLocation::Indirect || !Bit)
+            report_fatal_error(
+                "GoObj entry argument stack map contains an invalid argument "
+                "pointer slot");
+          Pair.Args[*Bit / 8] |= uint8_t(1u << (*Bit % 8));
+          continue;
+        }
+        goobj::StackMapSlot Slot = goobj::classifyOrdinaryStackMapSlot(
+            WordOffset, Loc.Type == MCContext::GoObjStackMapLocation::Indirect,
+            PointerSize, FrameLayout.GCLocalsStart, FrameLayout.GCLocalsSize,
+            FrameLayout.GCLocalsBitOffset, OrdinaryArgsStart, ArgSize);
+        switch (Slot.Kind) {
+        case goobj::StackMapSlotKind::Invalid:
+          report_fatal_error(
+              Twine("GoObj ordinary statepoint in ") + Function.Name +
+              " contains an invalid pointer stack slot: offset=" +
+              Twine(WordOffset) + ", indirect=" +
+              Twine(Loc.Type == MCContext::GoObjStackMapLocation::Indirect) +
+              ", locals-start=" + Twine(FrameLayout.GCLocalsStart) +
+              ", locals-size=" + Twine(FrameLayout.GCLocalsSize) +
+              ", args-start=" + Twine(OrdinaryArgsStart) +
+              ", args-size=" + Twine(ArgSize));
+        case goobj::StackMapSlotKind::Direct:
+          // Direct describes the pointer value SP+Offset, not a pointer stored
+          // at SP+Offset. Statepoint lowering rematerializes that address after
+          // stack movement; neither the locals nor args bitmap should scan the
+          // slot's contents.
+          break;
+        case goobj::StackMapSlotKind::Args:
+          if (AllocaArgsPointerBits.contains(Slot.Bit))
+            report_fatal_error(
+                "GoObj alloca ptrmap overlaps an ordinary GC root slot");
+          Pair.Args[Slot.Bit / 8] |= uint8_t(1u << (Slot.Bit % 8));
+          break;
+        case goobj::StackMapSlotKind::Locals:
+          if (AllocaLocalsPointerBits.contains(Slot.Bit))
+            report_fatal_error(
+                "GoObj alloca ptrmap overlaps an ordinary GC root slot");
+          Pair.Locals[Slot.Bit / 8] |= uint8_t(1u << (Slot.Bit % 8));
+          break;
+        }
+      }
+    }
+    return Pair;
+  };
+
+  const ResolvedEntry *EntryArgsEntry = nullptr;
+  for (const ResolvedEntry &Resolved : ResolvedEntries) {
+    if (Resolved.Entry->ID == GoObj::EntryArgsStackMapID) {
+      if (EntryArgsEntry)
+        report_fatal_error(
+            "GoObj function contains multiple entry argument stack maps");
+      EntryArgsEntry = &Resolved;
+      continue;
+    }
+  }
+  if (!EntryArgsEntry)
+    report_fatal_error("GoObj function has no entry argument stack map");
+  SmallVector<GoObjStackMapPair, 8> Pairs;
+  Pairs.push_back(BuildPair(*EntryArgsEntry->Entry));
+  SmallVector<GoObjPCTabEntry, 16> PCDataEntries;
+  // PCSP is derived from the Machine CFG. Whenever control flow returns to
+  // the entry stack depth, restore Go's entry value (-1). The runtime
+  // normalizes that value to ArgsPointerMaps bitmap 0. This covers the
+  // pre-frame morestack slow path without naming the helper or manufacturing
+  // a statepoint for its raw ABI0 call.
+  for (const GoObjPCTabEntry &Entry : PCSPEntries)
+    if (Entry.Value == 0 && Entry.PC < Function.Size)
+      PCDataEntries.push_back({Entry.PC, -1});
+  std::optional<uint64_t> PreviousCallsitePC;
+  for (const ResolvedEntry &Resolved : ResolvedEntries) {
+    if (Resolved.Entry->ID == GoObj::EntryArgsStackMapID)
+      continue;
+    if (PreviousCallsitePC && *PreviousCallsitePC == Resolved.CallsitePC)
+      report_fatal_error("GoObj statepoint callsites have duplicate PCs");
+    PreviousCallsitePC = Resolved.CallsitePC;
+    const MCContext::GoObjStackMapEntry &Entry = *Resolved.Entry;
+    if (Entry.PointerSize != PointerSize)
+      report_fatal_error(
+          "GoObj statepoint pointer size changes within a function");
+    GoObjStackMapPair Pair = BuildPair(Entry);
+    auto It = llvm::find(Pairs, Pair);
+    uint32_t MapIndex;
+    if (It == Pairs.end()) {
+      MapIndex = checkedUint32(Pairs.size(), "GoObj stack map index");
+      Pairs.push_back(std::move(Pair));
+    } else {
+      MapIndex = checkedUint32(It - Pairs.begin(), "GoObj stack map index");
+    }
+    if (MapIndex > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))
+      report_fatal_error("GoObj stack map index exceeds int32 limit");
+
+    // GoObj records statepoint callsites at the beginning of the CALL. The
+    // live-out map remains in effect until another statepoint or a CFG-derived
+    // return to the entry stack depth changes it.
+    PCDataEntries.push_back(
+        {Resolved.CallsitePC, static_cast<int32_t>(MapIndex)});
+  }
+
+  SmallVector<GoObjStatepointStackMaps::StackObject, 4> FunctionStackObjects;
+  for (const FunctionAllocaRecord &FunctionRecord : FunctionAllocaRecords) {
+    if (!FunctionRecord.SawInactiveContents)
+      continue;
+
+    // Only address-observable StackObjects have a function-wide layout.
+    // Live-only records contribute roots to an individual callsite, and stack
+    // coloring can reuse their storage for a different layout at another
+    // callsite. Once an inactive record requires a StackObject, its layout
+    // must remain stable and cannot overlap any other recorded layout.
+    const GoObjAllocaPtrMapRecord &Layout = FunctionRecord.Layout;
+    for (const FunctionAllocaRecord &Other : FunctionAllocaRecords) {
+      if (&Other == &FunctionRecord)
+        continue;
+      if (sameAllocaPtrMapBase(Layout, Other.Layout))
+        report_fatal_error(
+            Twine(
+                "GoObj alloca ptrmap layout changes between statepoints in ") +
+            Function.Symbol->getName());
+      int64_t Start = Layout.Base.Offset;
+      int64_t End = Start + static_cast<int64_t>(Layout.ByteSize);
+      int64_t OtherStart = Other.Layout.Base.Offset;
+      int64_t OtherEnd =
+          OtherStart + static_cast<int64_t>(Other.Layout.ByteSize);
+      if (Start < OtherEnd && OtherStart < End)
+        report_fatal_error(
+            "GoObj alloca ptrmap records overlap between statepoints");
+    }
+    if (FunctionRecord.SeenOrdinaryEntries != OrdinaryEntryCount)
+      report_fatal_error(
+          "GoObj stack object layout is missing from a function statepoint");
+
+    const GoObjAllocaPtrMapRecord &Record = FunctionRecord.Layout;
+    std::optional<int32_t> FrameOffset = goobj::getStackObjectFrameOffset(
+        FunctionRecord.Kind, Record.Base.Offset,
+        FrameLayout.StackObjectVarpOffset, OrdinaryArgsStart);
+    if (!FrameOffset)
+      report_fatal_error(
+          "GoObj stack object cannot be represented relative to argp or varp");
+    if (Record.ByteSize >
+        static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+      report_fatal_error("GoObj stack object size exceeds int32");
+    uint64_t HighestPointerBit = 0;
+    uint64_t BitCount = Record.ByteSize / PointerSize;
+    for (uint64_t Bit = 0; Bit != BitCount; ++Bit)
+      if (Record.BitmapWords[Bit / 64] & (uint64_t(1) << (Bit % 64)))
+        HighestPointerBit = Bit;
+    uint64_t PointerBytes = (HighestPointerBit + 1) * PointerSize;
+    if (PointerBytes > Record.ByteSize ||
+        PointerBytes >
+            static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+      report_fatal_error("GoObj stack object pointer bytes are invalid");
+    size_t BitmapBytes = divideCeil(PointerBytes / PointerSize, 8u);
+    size_t PaddedBitmapBytes = alignTo(BitmapBytes, PointerSize);
+    SmallVector<uint8_t, 8> Bitmap(PaddedBitmapBytes, 0);
+    for (uint64_t Bit = 0; Bit <= HighestPointerBit; ++Bit)
+      if (Record.BitmapWords[Bit / 64] & (uint64_t(1) << (Bit % 64)))
+        Bitmap[Bit / 8] |= uint8_t(1u << (Bit % 8));
+    FunctionStackObjects.push_back(
+        {*FrameOffset,
+         checkedUint32(Record.ByteSize, "GoObj stack object size"),
+         checkedUint32(PointerBytes, "GoObj stack object pointer bytes"),
+         std::move(Bitmap)});
+  }
+  llvm::sort(FunctionStackObjects, [](const auto &LHS, const auto &RHS) {
+    return LHS.FrameOffset < RHS.FrameOffset;
+  });
+
+  SmallVector<SmallVector<uint8_t, 8>, 8> ArgsBitmaps;
+  SmallVector<SmallVector<uint8_t, 8>, 8> LocalsBitmaps;
+  ArgsBitmaps.reserve(Pairs.size());
+  LocalsBitmaps.reserve(Pairs.size());
+  for (GoObjStackMapPair &Pair : Pairs) {
+    ArgsBitmaps.push_back(std::move(Pair.Args));
+    LocalsBitmaps.push_back(std::move(Pair.Locals));
+  }
+  SmallVector<GoObjPCTabEntry, 16> NormalizedPCDataEntries;
+  llvm::stable_sort(PCDataEntries, [](const auto &LHS, const auto &RHS) {
+    if (LHS.PC != RHS.PC)
+      return LHS.PC < RHS.PC;
+    return LHS.Value < RHS.Value;
+  });
+  for (const GoObjPCTabEntry &Entry : PCDataEntries) {
+    if (!NormalizedPCDataEntries.empty() &&
+        NormalizedPCDataEntries.back().PC == Entry.PC)
+      NormalizedPCDataEntries.back().Value = Entry.Value;
+    else
+      NormalizedPCDataEntries.push_back(Entry);
+  }
+  GoObjStatepointStackMaps Result;
+  Result.Args = makeStackMap(ArgsNBits, ArgsBitmaps);
+  Result.Locals = makeStackMap(NBits, LocalsBitmaps);
+  Result.PCData =
+      makePCTab(-1, NormalizedPCDataEntries, Function.Size, PCQuantum);
+  Result.OpenDefer = std::move(OpenDeferData);
+  Result.StackObjects = std::move(FunctionStackObjects);
+  return Result;
+}
+
+std::string getDwarfFilePath(const MCDwarfLineTable &Table, unsigned FileNum) {
+  const MCDwarfFile *File = nullptr;
+  const auto &Files = Table.getMCDwarfFiles();
+  if (FileNum < Files.size() && !Files[FileNum].Name.empty())
+    File = &Files[FileNum];
+  else if (FileNum == 0 && !Table.getRootFile().Name.empty())
+    File = &Table.getRootFile();
+  if (!File || File->Name.empty())
+    return "llvm-ir";
+
+  SmallString<256> Path(File->Name);
+  if (!sys::path::is_absolute(Path) && File->DirIndex != 0) {
+    const auto &Dirs = Table.getMCDwarfDirs();
+    if (File->DirIndex - 1 < Dirs.size() && !Dirs[File->DirIndex - 1].empty()) {
+      Path = Dirs[File->DirIndex - 1];
+      sys::path::append(Path, File->Name);
+    }
+  }
+  return std::string(Path);
+}
+
+uint32_t getOrAddFileIndex(StringMap<uint32_t> &FileIndexes,
+                           std::vector<std::string> &Files, StringRef Path) {
+  auto Insert = FileIndexes.insert(
+      {Path, checkedUint32(Files.size(), "GoObj file count")});
+  if (Insert.second)
+    Files.push_back(Path.str());
+  return Insert.first->second;
+}
+
+uint32_t recordFunctionFile(GoObjFuncDebugLines &Info,
+                            uint32_t ObjectFileIndex) {
+  if (!llvm::is_contained(Info.Files, ObjectFileIndex))
+    Info.Files.push_back(ObjectFileIndex);
+  // PCDATA_File indexes the CU-wide file block. FuncInfo.File only catalogs
+  // the subset referenced by this function.
+  return ObjectFileIndex;
+}
+
+uint32_t addDwarfCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
+                               StringRef Name, uint8_t Type, uint8_t Flag,
+                               GoObjDwarfCarrierData Contents) {
+  GoObjSymbol Sym;
+  Sym.Name = Name.str();
+  Sym.DefinedBlock = GoObj::DefinedSymbolBlock::Symdef;
+  Sym.ABI = GoObj::SymABI0;
+  Sym.Type = Type;
+  Sym.Flag = Flag;
+  Sym.Align = 1;
+  Sym.Size = Contents.Data.size();
+  Sym.Data = std::move(Contents.Data);
+  Sym.Relocations = std::move(Contents.Relocations);
+  uint32_t Index = checkedUint32(Symbols.size(), "symbol count");
+  Symbols.push_back(std::move(Sym));
+  return Index;
+}
+
+void appendDwarfPCLineDelta(SmallVectorImpl<char> &Data, uint64_t DeltaPC,
+                            int64_t DeltaLine) {
+  constexpr int64_t LineBase = -4;
+  constexpr int64_t LineRange = 10;
+  constexpr int64_t OpcodeBase = 11;
+  constexpr uint64_t PCRange = (255 - OpcodeBase) / LineRange;
+
+  int64_t Opcode;
+  if (DeltaLine < LineBase) {
+    Opcode = OpcodeBase + LineRange * std::min<uint64_t>(DeltaPC, PCRange);
+  } else if (DeltaLine < LineBase + LineRange) {
+    Opcode = OpcodeBase + (DeltaLine - LineBase) +
+             LineRange * std::min<uint64_t>(DeltaPC, PCRange);
+    if (DeltaPC >= PCRange && Opcode > 255)
+      Opcode -= LineRange;
+  } else if (DeltaPC <= PCRange) {
+    Opcode = OpcodeBase + (LineRange - 1) + LineRange * DeltaPC;
+    if (Opcode > 255)
+      Opcode = 255;
+  } else {
+    switch (DeltaPC - PCRange) {
+    case PCRange:
+    case (1ULL << 7) - 1:
+    case (1ULL << 16) - 1:
+    case (1ULL << 21) - 1:
+    case (1ULL << 28) - 1:
+    case (1ULL << 35) - 1:
+    case (1ULL << 42) - 1:
+    case (1ULL << 49) - 1:
+    case (1ULL << 56) - 1:
+    case (1ULL << 63) - 1:
+      Opcode = 255;
+      break;
+    default:
+      Opcode = OpcodeBase + LineRange * PCRange - 1;
+      break;
+    }
+  }
+  if (Opcode < OpcodeBase || Opcode > 255)
+    report_fatal_error("invalid DWARF line special opcode");
+
+  DeltaPC -= (Opcode - OpcodeBase) / LineRange;
+  DeltaLine -= (Opcode - OpcodeBase) % LineRange + LineBase;
+  if (DeltaPC != 0) {
+    if (DeltaPC <= PCRange) {
+      Opcode -= LineRange * (PCRange - DeltaPC);
+      if (Opcode < OpcodeBase)
+        report_fatal_error("invalid adjusted DWARF line special opcode");
+      Data.push_back(dwarf::DW_LNS_const_add_pc);
+    } else if ((1ULL << 14) <= DeltaPC && DeltaPC < (1ULL << 16)) {
+      Data.push_back(dwarf::DW_LNS_fixed_advance_pc);
+      size_t Offset = Data.size();
+      Data.resize(Offset + 2);
+      support::endian::write16le(Data.data() + Offset,
+                                 static_cast<uint16_t>(DeltaPC));
+    } else {
+      Data.push_back(dwarf::DW_LNS_advance_pc);
+      appendUvarint(Data, DeltaPC);
+    }
+  }
+  if (DeltaLine != 0) {
+    Data.push_back(dwarf::DW_LNS_advance_line);
+    appendDwarfSLEB128(Data, DeltaLine);
+  }
+  Data.push_back(static_cast<char>(Opcode));
+}
+
+GoObjDwarfCarrierData makeDwarfLines(const GoObjFuncDebugLines &Info,
+                                     uint64_t CodeSize, uint8_t PointerSize,
+                                     uint32_t TextSymbolIndex) {
+  GoObjDwarfCarrierData Result;
+  Result.Data.push_back(0);
+  appendUvarint(Result.Data, 1 + PointerSize);
+  Result.Data.push_back(dwarf::DW_LNE_set_address);
+  appendDwarfRelocation(Result.Data, Result.Relocations, PointerSize,
+                        GoObj::R_ADDR, 0, TextSymbolIndex);
+
+  int32_t File = Info.PCFile.empty() ? static_cast<int32_t>(Info.Files.front())
+                                     : Info.PCFile.front().Value;
+  int32_t Line =
+      Info.PCLine.empty() ? Info.StartLine : Info.PCLine.front().Value;
+  int32_t MachineFile = 0;
+  int32_t MachineLine = 1;
+  uint64_t MachinePC = 0;
+  size_t FI = 0;
+  size_t LI = 0;
+  bool First = true;
+
+  auto EmitRow = [&](uint64_t PC) {
+    bool Wrote = false;
+    int32_t DwarfFile = File + 1;
+    if (DwarfFile != MachineFile) {
+      Result.Data.push_back(dwarf::DW_LNS_set_file);
+      appendUvarint(Result.Data, DwarfFile);
+      MachineFile = DwarfFile;
+      Wrote = true;
+    }
+    if (First || Line != MachineLine || Wrote) {
+      appendDwarfPCLineDelta(Result.Data, PC - MachinePC,
+                             static_cast<int64_t>(Line) - MachineLine);
+      MachinePC = PC;
+      MachineLine = Line;
+      First = false;
+    }
+  };
+
+  EmitRow(0);
+  while (FI < Info.PCFile.size() || LI < Info.PCLine.size()) {
+    uint64_t PC = std::numeric_limits<uint64_t>::max();
+    if (FI < Info.PCFile.size())
+      PC = std::min(PC, Info.PCFile[FI].PC);
+    if (LI < Info.PCLine.size())
+      PC = std::min(PC, Info.PCLine[LI].PC);
+    while (FI < Info.PCFile.size() && Info.PCFile[FI].PC == PC)
+      File = Info.PCFile[FI++].Value;
+    while (LI < Info.PCLine.size() && Info.PCLine[LI].PC == PC)
+      Line = Info.PCLine[LI++].Value;
+    if (PC != 0)
+      EmitRow(PC);
+  }
+
+  Result.Data.push_back(dwarf::DW_LNS_advance_pc);
+  appendUvarint(Result.Data, CodeSize - MachinePC);
+  Result.Data.push_back(0);
+  appendUvarint(Result.Data, 1);
+  Result.Data.push_back(dwarf::DW_LNE_end_sequence);
+  return Result;
+}
+
+uint32_t addAuxCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
+                             GoObj::DefinedSymbolBlock Block,
+                             ArrayRef<char> Data) {
+  GoObjSymbol Sym;
+  Sym.DefinedBlock = Block;
+  // Match cmd/internal/obj's anonymous auxiliary symbols. These records are
+  // addressed by their GoObj indexes, not by name, and therefore use ABI0.
+  // Marking an unnamed symbol static makes the Go linker treat it as a
+  // file-local symbol; external linking then cannot omit it from the ELF
+  // symbol table and rejects its empty name.
+  Sym.ABI = GoObj::SymABI0;
+  Sym.Type = GoObj::SRODATA;
+  Sym.Align = 1;
+  Sym.Size = Data.size();
+  Sym.Data.append(Data.begin(), Data.end());
+  uint32_t Index = checkedUint32(Symbols.size(), "symbol count");
+  Symbols.push_back(std::move(Sym));
+  return Index;
+}
+
+std::array<uint8_t, GoObj::HashSize> makeGoObjContentHash(char SectionMarker,
+                                                          ArrayRef<char> Data) {
+  SHA256 Hasher;
+  const char Version = 1;
+  Hasher.update(StringRef(&Version, 1));
+
+  SmallString<9> Header;
+  raw_svector_ostream HeaderOS(Header);
+  support::endian::Writer HeaderWriter(HeaderOS, llvm::endianness::little);
+  HeaderWriter.write<uint64_t>(Data.size());
+  HeaderWriter.write<uint8_t>(SectionMarker);
+  Hasher.update(StringRef(Header.data(), Header.size()));
+
+  while (!Data.empty() && Data.back() == 0)
+    Data = Data.drop_back();
+  if (!Data.empty())
+    Hasher.update(StringRef(Data.data(), Data.size()));
+
+  std::array<uint8_t, 32> FullHash = Hasher.final();
+  std::array<uint8_t, GoObj::HashSize> Hash;
+  std::copy_n(FullHash.begin(), Hash.size(), Hash.begin());
+  return Hash;
+}
+
+std::string trimGoObjInlineHash(StringRef Name) {
+  // Match cmd/internal/obj.TrimInlineHash. The Go compiler inserts the
+  // base64 encoding of an 8-byte inline-call-stack hash between '#'
+  // delimiters. Content-addressable definitions and RefName omit it.
+  constexpr size_t InlineHashLength = 12;
+  size_t Begin = Name.find('#');
+  if (Begin == StringRef::npos || Name.size() < Begin + InlineHashLength + 2 ||
+      Name[Begin + InlineHashLength + 1] != '#')
+    return Name.str();
+  return (Name.take_front(Begin) +
+          Name.drop_front(Begin + InlineHashLength + 2))
+      .str();
+}
+
+std::array<uint8_t, GoObj::HashSize>
+makeGoObjContentHash(const GoObjSymbol &Symbol, ArrayRef<GoObjSymbol> Symbols) {
+  SHA256 Hasher;
+  const char Version = 1;
+  Hasher.update(StringRef(&Version, 1));
+
+  SmallString<16> Encoded;
+  raw_svector_ostream OS(Encoded);
+  support::endian::Writer W(OS, llvm::endianness::little);
+  W.write<uint64_t>(Symbol.Size);
+  W.write<uint8_t>('F');
+  Hasher.update(StringRef(Encoded.data(), Encoded.size()));
+  ArrayRef<char> Data(Symbol.Data);
+  while (!Data.empty() && Data.back() == 0)
+    Data = Data.drop_back();
+  if (!Data.empty())
+    Hasher.update(StringRef(Data.data(), Data.size()));
+
+  for (const GoObjSymbol::Relocation &Reloc : Symbol.Relocations) {
+    Encoded.clear();
+    W.write<uint32_t>(Reloc.Offset);
+    W.write<uint8_t>(Reloc.Size);
+    W.write<uint8_t>(checkedUint16(Reloc.Type, "content hash relocation type"));
+    W.write<uint64_t>(static_cast<uint64_t>(Reloc.Addend));
+    Hasher.update(StringRef(Encoded.data(), Encoded.size()));
+    if (!Reloc.TargetSymbolIndex || *Reloc.TargetSymbolIndex >= Symbols.size())
+      report_fatal_error(
+          "GoObj synthetic hashed relocation has no local target");
+    const GoObjSymbol &Target = Symbols[*Reloc.TargetSymbolIndex];
+    if (Target.DefinedBlock == GoObj::DefinedSymbolBlock::Hashed64def) {
+      if (Target.Data.size() != GoObj::Hash64Size)
+        report_fatal_error("GoObj short-hashed target has invalid size");
+      const char Kind = 0;
+      Hasher.update(StringRef(&Kind, 1));
+      Hasher.update(StringRef(Target.Data.data(), Target.Data.size()));
+    } else if (Target.DefinedBlock == GoObj::DefinedSymbolBlock::Hasheddef) {
+      if (!Target.ContentHash)
+        report_fatal_error("GoObj hashed target has no content hash");
+      const char Kind = 1;
+      Hasher.update(StringRef(&Kind, 1));
+      Hasher.update(ArrayRef<uint8_t>(*Target.ContentHash));
+    } else {
+      report_fatal_error(
+          "GoObj synthetic hashed relocation target is not content-addressed");
+    }
+  }
+
+  std::array<uint8_t, 32> FullHash = Hasher.final();
+  std::array<uint8_t, GoObj::HashSize> Hash;
+  std::copy_n(FullHash.begin(), Hash.size(), Hash.begin());
+  return Hash;
+}
+
+uint32_t getOrAddHashedAuxCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
+                                        StringMap<uint32_t> &CarrierIndexes,
+                                        char SectionMarker,
+                                        ArrayRef<char> Data) {
+  std::string Key;
+  Key.reserve(Data.size() + 1);
+  Key.push_back(SectionMarker);
+  if (!Data.empty())
+    Key.append(Data.data(), Data.size());
+  auto It = CarrierIndexes.find(Key);
+  if (It != CarrierIndexes.end())
+    return It->second;
+
+  GoObjSymbol Sym;
+  Sym.DefinedBlock = GoObj::DefinedSymbolBlock::Hasheddef;
+  Sym.ABI = GoObj::SymABI0;
+  Sym.Type = GoObj::SRODATA;
+  Sym.Align = 1;
+  Sym.Size = Data.size();
+  Sym.Data.append(Data.begin(), Data.end());
+  Sym.ContentHash = makeGoObjContentHash(SectionMarker, Data);
+  uint32_t Index = checkedUint32(Symbols.size(), "symbol count");
+  Symbols.push_back(std::move(Sym));
+  CarrierIndexes.insert({Key, Index});
+  return Index;
+}
+
+uint32_t getOrAddGCBitmapCarrierSymbol(std::vector<GoObjSymbol> &Symbols,
+                                       StringMap<uint32_t> &CarrierIndexes,
+                                       uint32_t PointerSize,
+                                       ArrayRef<uint8_t> Bitmap) {
+  if (Bitmap.empty() || Bitmap.size() % PointerSize != 0)
+    report_fatal_error("GoObj stack-object GC bitmap has invalid size");
+  StringRef Bytes(reinterpret_cast<const char *>(Bitmap.data()), Bitmap.size());
+  std::string Key = (Twine(PointerSize) + ":" + Bytes).str();
+  auto It = CarrierIndexes.find(Key);
+  if (It != CarrierIndexes.end())
+    return It->second;
+
+  GoObjSymbol Sym;
+  Sym.DefinedBlock = Bitmap.size() == GoObj::Hash64Size
+                         ? GoObj::DefinedSymbolBlock::Hashed64def
+                         : GoObj::DefinedSymbolBlock::Hasheddef;
+  // Match cmd/compile's reflectdata.GCSym identity. Besides making object
+  // inspection useful, the Go linker uses the runtime.gcbits prefix to group
+  // these content-addressed symbols into its dedicated GC-bitmap section.
+  Sym.Name = "runtime.gcbits." + toHex(Bitmap, /*LowerCase=*/true);
+  Sym.ABI = GoObj::SymABI0;
+  Sym.Type = GoObj::SRODATA;
+  Sym.Flag = GoObj::SymFlagDupok | GoObj::SymFlagLocal;
+  Sym.Align = PointerSize;
+  Sym.Size = Bitmap.size();
+  Sym.Data.append(Bytes.begin(), Bytes.end());
+  if (Sym.DefinedBlock == GoObj::DefinedSymbolBlock::Hasheddef)
+    Sym.ContentHash = makeGoObjContentHash(0, Sym.Data);
+  uint32_t Index = checkedUint32(Symbols.size(), "symbol count");
+  Symbols.push_back(std::move(Sym));
+  CarrierIndexes.insert({Key, Index});
+  return Index;
+}
+
+uint32_t addStackObjectCarrierSymbol(
+    std::vector<GoObjSymbol> &Symbols, StringMap<uint32_t> &BitmapIndexes,
+    uint32_t PointerSize,
+    ArrayRef<GoObjStatepointStackMaps::StackObject> StackObjects) {
+  if (StackObjects.empty())
+    report_fatal_error("cannot emit an empty GoObj stack-object carrier");
+  if (PointerSize != 4 && PointerSize != 8)
+    report_fatal_error("unsupported GoObj stack-object pointer size");
+
+  GoObjSymbol Sym;
+  Sym.DefinedBlock = GoObj::DefinedSymbolBlock::Hasheddef;
+  Sym.ABI = GoObj::SymABI0;
+  Sym.Type = GoObj::SRODATA;
+  Sym.Align = 4;
+  raw_svector_ostream OS(Sym.Data);
+  support::endian::Writer W(OS, llvm::endianness::little);
+  if (PointerSize == 8)
+    W.write<uint64_t>(StackObjects.size());
+  else
+    W.write<uint32_t>(
+        checkedUint32(StackObjects.size(), "GoObj stack-object count"));
+  for (const GoObjStatepointStackMaps::StackObject &Object : StackObjects) {
+    W.write<uint32_t>(static_cast<uint32_t>(Object.FrameOffset));
+    W.write<uint32_t>(Object.ByteSize);
+    W.write<uint32_t>(Object.PointerBytes);
+    uint32_t RelocOffset =
+        checkedUint32(Sym.Data.size(), "GoObj stack-object relocation");
+    W.write<uint32_t>(0);
+    uint32_t BitmapIndex = getOrAddGCBitmapCarrierSymbol(
+        Symbols, BitmapIndexes, PointerSize, Object.Bitmap);
+    GoObjSymbol::Relocation Reloc;
+    Reloc.Offset = RelocOffset;
+    Reloc.Size = 4;
+    Reloc.Type = GoObj::R_ADDROFF;
+    Reloc.TargetSymbolIndex = BitmapIndex;
+    Sym.Relocations.push_back(Reloc);
+  }
+  Sym.Size = Sym.Data.size();
+  Sym.ContentHash = makeGoObjContentHash(Sym, Symbols);
+  uint32_t Index = checkedUint32(Symbols.size(), "symbol count");
+  Symbols.push_back(std::move(Sym));
+  return Index;
+}
+
+int64_t getGoObjRelocAddend(const GoObjRelocationEntry &Reloc) {
+  int64_t Addend = Reloc.Addend;
+  // Most Go PC-relative relocations use the end of the field as their PC.
+  // R_TLS_IE is passed directly to the external ELF linker, so it retains
+  // the field-relative addend (for example, -4 for x86-64 GOTTPOFF).
+  if (Reloc.IsPCRel && Reloc.Type != GoObj::R_TLS_IE)
+    Addend += Reloc.Size;
+  return Addend;
+}
+
+uint32_t getGoObjFlags(const MCGoObjObjectWriterConfig &Config) {
+  uint32_t Flags = 0;
+  if (Config.IsShared)
+    Flags |= GoObj::ObjFlagShared;
+  if (Config.SourceKind == GoObj::SourceKind::Assembly)
+    Flags |= GoObj::ObjFlagFromAssembly;
+  if (Config.IsUnlinkable ||
+      (Config.SourceKind == GoObj::SourceKind::Compiler &&
+       Config.PackagePath.empty()))
+    Flags |= GoObj::ObjFlagUnlinkable;
+  if (Config.IsStd)
+    Flags |= GoObj::ObjFlagStd;
+  return Flags;
+}
+
+StringRef getGoOS(const Triple &TT) {
+  switch (TT.getOS()) {
+  case Triple::Linux:
+    return "linux";
+  case Triple::Darwin:
+  case Triple::MacOSX:
+    return "darwin";
+  case Triple::FreeBSD:
+    return "freebsd";
+  case Triple::NetBSD:
+    return "netbsd";
+  case Triple::OpenBSD:
+    return "openbsd";
+  case Triple::Win32:
+    return "windows";
+  default:
+    report_fatal_error("unsupported GoObj target OS");
+  }
+}
+
+StringRef getGoArch(const Triple &TT) {
+  switch (TT.getArch()) {
+  case Triple::x86:
+    return "386";
+  case Triple::x86_64:
+    return "amd64";
+  case Triple::arm:
+  case Triple::armeb:
+    return "arm";
+  case Triple::aarch64:
+  case Triple::aarch64_be:
+    return "arm64";
+  case Triple::ppc64:
+    return "ppc64";
+  case Triple::ppc64le:
+    return "ppc64le";
+  case Triple::riscv64:
+    return "riscv64";
+  default:
+    report_fatal_error("unsupported GoObj target architecture");
+  }
+}
+
+void writeGoObjectTextHeader(raw_ostream &OS, const Triple &TT,
+                             const MCGoObjObjectWriterConfig &Config,
+                             StringRef CgoPragmas) {
+  StringRef GOOS = Config.GOOS.empty() ? getGoOS(TT) : Config.GOOS;
+  StringRef GOARCH = Config.GOARCH.empty() ? getGoArch(TT) : Config.GOARCH;
+  OS << "go object " << GOOS << ' ' << GOARCH << ' ' << Config.Version;
+
+  if (!Config.GOARCHSettingKey.empty()) {
+    OS << ' ' << Config.GOARCHSettingKey << '=' << Config.GOARCHSettingValue;
+  } else {
+    switch (TT.getArch()) {
+    case Triple::x86:
+      OS << " GO386=sse2";
+      break;
+    case Triple::x86_64:
+      OS << " GOAMD64=v1";
+      break;
+    case Triple::arm:
+    case Triple::armeb:
+      OS << " GOARM=7";
+      break;
+    case Triple::aarch64:
+    case Triple::aarch64_be:
+      OS << " GOARM64=v8.0";
+      break;
+    case Triple::ppc64:
+    case Triple::ppc64le:
+      OS << " GOPPC64=power8";
+      break;
+    case Triple::riscv64:
+      OS << " GORISCV64=rva20u64";
+      break;
+    default:
+      break;
+    }
+  }
+
+  OS << " X:";
+  for (size_t I = 0, E = Config.Experiments.size(); I != E; ++I) {
+    if (I != 0)
+      OS << ',';
+    OS << Config.Experiments[I];
+  }
+  OS << '\n';
+
+  if (!Config.BuildID.empty())
+    OS << "build id \"" << Config.BuildID << "\"\n";
+  if (Config.IsMain)
+    OS << "main\n";
+
+  if (!CgoPragmas.empty()) {
+    if (Config.SourceKind == GoObj::SourceKind::Compiler)
+      OS << '\n';
+    OS << "\n$$\n\n$$\n\n";
+    OS << "\n$$  // cgo\n" << CgoPragmas << '\n';
+    OS << "\n$$\n\n";
+  }
+
+  if (Config.SourceKind == GoObj::SourceKind::Compiler)
+    OS << '\n';
+  OS << "!\n";
+}
+
+} // end anonymous namespace
+
+GoObjObjectWriter::GoObjObjectWriter(
+    std::unique_ptr<MCGoObjObjectTargetWriter> MOTW, raw_pwrite_stream &OS,
+    MCGoObjObjectWriterConfig Config)
+    : TargetObjectWriter(std::move(MOTW)), OS(OS), Config(std::move(Config)) {
+  if (this->Config.SourceKind == GoObj::SourceKind::Assembly)
+    this->Config.DefaultDefinedSymbolBlock =
+        GoObj::DefinedSymbolBlock::Nonpkgdef;
+}
+
+GoObjObjectWriter::~GoObjObjectWriter() = default;
+
+void GoObjObjectWriter::setAssembler(MCAssembler *Asm) {
+  MCObjectWriter::setAssembler(Asm);
+  TargetObjectWriter->setAssembler(Asm);
+}
+
+void GoObjObjectWriter::reset() {
+  MCObjectWriter::reset();
+  Relocations.clear();
+}
+
+bool GoObjObjectWriter::isSymbolRefDifferenceFullyResolvedImpl(
+    const MCSymbol &SymA, const MCFragment &FB, bool InSet,
+    bool IsPCRel) const {
+  if (IsPCRel && !SymA.isTemporary())
+    return false;
+  return MCObjectWriter::isSymbolRefDifferenceFullyResolvedImpl(SymA, FB, InSet,
+                                                                IsPCRel);
+}
+
+void GoObjObjectWriter::recordRelocation(const MCFragment &F,
+                                         const MCFixup &Fixup, MCValue Target,
+                                         uint64_t &FixedValue) {
+  const MCFixupKindInfo &Info =
+      Asm->getBackend().getFixupKindInfo(Fixup.getKind());
+  uint8_t RelocSize = TargetObjectWriter->getRelocSize(Fixup);
+  if (!RelocSize) {
+    assert(Info.TargetSize % 8 == 0 && "Target size must be byte-aligned");
+    RelocSize = Info.TargetSize / 8;
+  }
+  GoObjRelocationEntry Reloc{Target.getAddSym(),
+                             Target.getSubSym(),
+                             F.getParent(),
+                             Asm->getFragmentOffset(F) + Fixup.getOffset(),
+                             TargetObjectWriter->getRelocAddend(Target, Fixup),
+                             TargetObjectWriter->getRelocType(Target, Fixup),
+                             RelocSize,
+                             Fixup.isPCRel(),
+                             unsigned(Fixup.getKind())};
+  Relocations.push_back(Reloc);
+  FixedValue = 0;
+}
+
+uint64_t GoObjObjectWriter::writeObject() {
+  const uint64_t StartOffset = OS.tell();
+
+  StringRef ABI0Suffix = GoObj::ABI0SymbolSuffix;
+  StringRef BuiltinPrefix = GoObj::BuiltinSymbolSuffixPrefix;
+  StringRef LinknameSuffix = GoObj::LinknameSymbolSuffix;
+  StringRef FMVPrefix = GoObj::FMVSymbolSuffixPrefix;
+  struct GoObjSymbolIdentity {
+    StringRef Name;
+    std::optional<uint32_t> BuiltinIndex;
+    bool IsLinknameRef = false;
+    bool IsFMVImplementation = false;
+    bool IsABI0 = false;
+  };
+  auto GetSymbolIdentity = [&](const MCSymbol *Sym) {
+    if (!Sym)
+      return GoObjSymbolIdentity{};
+    StringRef Name = Sym->getName();
+    bool IsABI0 = Name.consume_back(ABI0Suffix);
+    if (IsABI0 && (Name.empty() || Name.ends_with(ABI0Suffix)))
+      report_fatal_error("invalid Go ABI0 symbol name");
+
+    bool IsFMVImplementation = false;
+    size_t FMVBegin = Name.rfind(FMVPrefix);
+    if (GoObj::getSymbolSuffix(Name).starts_with(FMVPrefix)) {
+      StringRef Base = Name.take_front(FMVBegin);
+      StringRef Tag = Name.drop_front(FMVBegin + FMVPrefix.size());
+      if (Base.empty() || GoObj::getSymbolSuffix(Base).starts_with(FMVPrefix) ||
+          !Tag.consume_back(">") || Tag.empty() ||
+          !llvm::all_of(Tag, [](char C) {
+            return isAlnum(C) || C == '.' || C == '_' || C == '-';
+          }))
+        report_fatal_error("invalid Go FMV implementation symbol name");
+      Name = Base;
+      IsFMVImplementation = true;
+    }
+
+    bool IsLinknameRef = Name.consume_back(LinknameSuffix);
+    if (Name.ends_with(LinknameSuffix))
+      report_fatal_error("invalid Go linkname symbol name");
+
+    std::optional<uint32_t> BuiltinIndex;
+    size_t BuiltinBegin = Name.rfind(BuiltinPrefix);
+    if (GoObj::getSymbolSuffix(Name).starts_with(BuiltinPrefix)) {
+      StringRef Base = Name.take_front(BuiltinBegin);
+      StringRef Index = Name.drop_front(BuiltinBegin + BuiltinPrefix.size());
+      if (Base.empty() ||
+          GoObj::getSymbolSuffix(Base).starts_with(BuiltinPrefix) ||
+          !Index.consume_back(">") || Index.empty())
+        report_fatal_error("invalid Go builtin symbol name");
+      uint32_t ParsedIndex = 0;
+      if (Index.getAsInteger(10, ParsedIndex))
+        report_fatal_error("invalid Go builtin symbol index");
+      Name = Base;
+      BuiltinIndex = ParsedIndex;
+    }
+    if (BuiltinIndex && IsLinknameRef)
+      report_fatal_error("conflicting Go builtin and linkname symbol identity");
+    if (IsFMVImplementation && (BuiltinIndex || IsLinknameRef))
+      report_fatal_error("conflicting Go FMV implementation symbol identity");
+    if ((BuiltinIndex || IsLinknameRef) &&
+        (Name.empty() || GoObj::hasReferenceSuffix(Name)))
+      report_fatal_error("invalid Go builtin symbol name");
+    if (GoObj::getSymbolSuffix(Name).starts_with(FMVPrefix))
+      report_fatal_error("invalid Go FMV implementation symbol name");
+    return GoObjSymbolIdentity{Name, BuiltinIndex, IsLinknameRef,
+                               IsFMVImplementation, IsABI0};
+  };
+  auto GetSymbolName = [&](const MCSymbol *Sym) -> StringRef {
+    return GetSymbolIdentity(Sym).Name;
+  };
+  auto GetSymbolABI = [&](const MCSymbol *Sym, bool IsFunction) {
+    GoObjSymbolIdentity Identity = GetSymbolIdentity(Sym);
+    if ((Identity.IsABI0 || Identity.IsFMVImplementation) && !IsFunction)
+      report_fatal_error(Identity.IsFMVImplementation
+                             ? "Go FMV suffix requires a function symbol"
+                             : "Go ABI0 suffix requires a function symbol");
+    if (Identity.IsFMVImplementation)
+      return GoObj::SymABIstatic;
+    if (Identity.IsABI0)
+      return GoObj::SymABI0;
+    return IsFunction ? GoObj::SymABIInternal : GoObj::SymABI0;
+  };
+
+  std::vector<GoObjSymbol> Symbols;
+  // The Go linker omits dot-prefixed package symbols from ELF/Mach-O symbol
+  // tables. LLVM constant pools and private globals normally use such names,
+  // but external relocations still need an output symbol to target. Give
+  // synthesized section carriers and private read-only globals deterministic,
+  // package-scoped static names
+  // matching the Go compiler's .stmp_ convention. The package hash avoids
+  // collisions when multiple GoObj files are passed to an external linker.
+  std::string StaticDataSymbolPrefix =
+      "goallc." +
+      toHex(SHA256::hash(arrayRefFromStringRef(Config.PackagePath)),
+            /*LowerCase=*/true) +
+      ".stmp_";
+  uint64_t StaticDataSymbolIndex = 0;
+  auto MakeStaticDataSymbolName = [&]() {
+    return (Twine(StaticDataSymbolPrefix) + Twine(StaticDataSymbolIndex++))
+        .str();
+  };
+  DenseSet<const MCSymbol *> SeenPrivateRelocationTargets;
+  SmallVector<const MCSymbol *, 8> PrivateRelocationTargets;
+  auto AddPrivateTarget = [&](const MCSymbol *Target) {
+    if (Target && Target->isTemporary() && Target->isInSection() &&
+        SeenPrivateRelocationTargets.insert(Target).second)
+      PrivateRelocationTargets.push_back(Target);
+  };
+  for (const GoObjRelocationEntry &Reloc : Relocations)
+    AddPrivateTarget(Reloc.Symbol);
+  // Go linker edges have no MC fixup, but their private targets need the same
+  // independent carriers as ordinary relocation targets.
+  for (const MCSymbol &Symbol : Asm->symbols()) {
+    if (const auto *Markers = Asm->getContext().getGoObjMarkerRelocs(&Symbol))
+      for (const auto &Marker : *Markers)
+        AddPrivateTarget(Marker.Target);
+    if (const auto *Targets = Asm->getContext().getGoObjKeepTargets(&Symbol))
+      for (const MCSymbol *Target : *Targets)
+        AddPrivateTarget(Target);
+    AddPrivateTarget(Asm->getContext().getGoObjGotypeTarget(&Symbol));
+  }
+
+  for (const MCSymbol &Symbol : Asm->symbols()) {
+    if (!Symbol.isCommon())
+      continue;
+    GoObjSymbolIdentity Identity = GetSymbolIdentity(&Symbol);
+    if (Identity.BuiltinIndex || Identity.IsLinknameRef)
+      report_fatal_error(
+          "Go builtin and linkname suffixes require an undefined symbol");
+    if (Identity.IsFMVImplementation)
+      report_fatal_error("Go FMV suffix requires a function symbol");
+    if (Identity.IsABI0)
+      report_fatal_error("Go ABI0 suffix requires a function symbol");
+    GoObjSymbol GoSym;
+    GoSym.Name = Identity.Name.str();
+    GoSym.Symbol = &Symbol;
+    GoSym.DefinedBlock = Asm->getContext().isGoObjSymbolNonPackage(&Symbol)
+                             ? GoObj::DefinedSymbolBlock::Nonpkgdef
+                             : Config.DefaultDefinedSymbolBlock;
+    GoSym.ABI = GoObj::SymABIstatic;
+    GoSym.Type = GoObj::SBSS;
+    GoSym.Size = Symbol.getCommonSize();
+    if (MaybeAlign Alignment = Symbol.getCommonAlignment())
+      GoSym.Align = checkedUint32(Alignment->value(), "common alignment");
+    Symbols.push_back(std::move(GoSym));
+  }
+
+  for (const MCSection &Section : *Asm) {
+    uint64_t SectionSize = Asm->getSectionAddressSize(Section);
+    SmallString<0> Contents;
+    if (!Section.isBssSection())
+      appendSectionContents(Contents, *Asm, Section);
+
+    struct SectionSymbol {
+      const MCSymbol *Symbol = nullptr;
+      uint64_t Offset = 0;
+    };
+    std::vector<SectionSymbol> SectionSymbols;
+    for (const MCSymbol &Symbol : Asm->symbols()) {
+      if (!Symbol.isInSection() || &Symbol.getSection() != &Section ||
+          &Symbol == Section.getBeginSymbol())
+        continue;
+      // Referenced read-only objects with known extents need independent
+      // carriers, including private globals and jump tables. A shared section
+      // carrier would couple their linker reachability through relocations.
+      if (Symbol.isTemporary() &&
+          (getGoObjSymbolType(&Section) != GoObj::SRODATA ||
+           !SeenPrivateRelocationTargets.contains(&Symbol) ||
+           !Asm->getContext().getGoObjSymbolSize(&Symbol)))
+        continue;
+      uint64_t Offset = Asm->getSymbolOffset(Symbol);
+      if (Offset > SectionSize)
+        report_fatal_error("GoObj symbol offset is outside its section");
+      SectionSymbols.push_back({&Symbol, Offset});
+    }
+
+    std::stable_sort(SectionSymbols.begin(), SectionSymbols.end(),
+                     [](const SectionSymbol &LHS, const SectionSymbol &RHS) {
+                       return LHS.Offset < RHS.Offset;
+                     });
+
+    bool HasReferencedPrivateSymbol =
+        llvm::any_of(PrivateRelocationTargets, [&](const MCSymbol *MCSym) {
+          return &MCSym->getSection() == &Section;
+        });
+    if (SectionSize == 0 && SectionSymbols.empty() &&
+        !HasReferencedPrivateSymbol)
+      continue;
+
+    auto AddSectionSymbol = [&](const MCSymbol *MCSym, StringRef Name,
+                                uint64_t Begin, uint64_t End) {
+      if (MCSym) {
+        GoObjSymbolIdentity Identity = GetSymbolIdentity(MCSym);
+        if (Identity.BuiltinIndex || Identity.IsLinknameRef)
+          report_fatal_error(
+              "Go builtin and linkname suffixes require an undefined symbol");
+      }
+      uint64_t Size = End - Begin;
+      ArrayRef<char> Data;
+      if (!Section.isBssSection() && Size != 0) {
+        if (End > Contents.size())
+          report_fatal_error("GoObj section data is smaller than its layout");
+        Data = ArrayRef<char>(Contents.data() + Begin, Size);
+      }
+      uint8_t Type = getGoObjSymbolType(&Section);
+      std::string StaticName;
+      uint16_t ABI;
+      if (MCSym && !MCSym->isTemporary()) {
+        ABI =
+            GetSymbolABI(MCSym, Asm->getContext().isGoObjFunctionSymbol(MCSym));
+      } else {
+        StaticName = MakeStaticDataSymbolName();
+        Name = StaticName;
+        ABI = GoObj::SymABIstatic;
+      }
+      uint8_t Flag = 0;
+      uint8_t Flag2 = 0;
+      uint32_t Align = 0;
+      if (MCSym) {
+        if (std::optional<std::pair<uint8_t, uint8_t>> Flags =
+                Asm->getContext().getGoObjSymbolFlags(MCSym)) {
+          Flag = Flags->first;
+          Flag2 = Flags->second;
+        }
+        StringRef NameAfterPackage = Name;
+        if (!Config.PackagePath.empty() &&
+            NameAfterPackage.consume_front(Config.PackagePath) &&
+            NameAfterPackage.starts_with("..dict"))
+          Flag2 |= GoObj::SymFlagDict;
+        Align = Asm->getContext().getGoObjSymbolAlignment(MCSym).value_or(0);
+      }
+      if (!MCSym || MCSym->isTemporary()) {
+        Flag |= GoObj::SymFlagLocal;
+      }
+      GoObj::DefinedSymbolBlock DefinedBlock =
+          MCSym && Asm->getContext().isGoObjSymbolNonPackage(MCSym)
+              ? GoObj::DefinedSymbolBlock::Nonpkgdef
+              : Config.DefaultDefinedSymbolBlock;
+      addDefinedSymbol(Symbols, MCSym, &Section, Begin, End, DefinedBlock, Name,
+                       Type, Flag, Flag2, ABI, Size, Align, Data);
+      if (MCSym && !MCSym->isTemporary()) {
+        StringRef Hash = Asm->getContext().getGoObjSymbolContentHash(MCSym);
+        bool ComputeContentHash =
+            Asm->getContext().isGoObjSymbolContentAddressable(MCSym);
+        if (ComputeContentHash && !Hash.empty())
+          report_fatal_error("GoObj symbol has both a content hash and a "
+                             "deferred hash marker");
+        if (ComputeContentHash) {
+          if (Type != GoObj::STEXT && Type != GoObj::STEXTFIPS)
+            report_fatal_error(
+                "deferred GoObj content hash belongs to a non-text symbol");
+          Symbols.back().DefinedBlock = GoObj::DefinedSymbolBlock::Hasheddef;
+          Symbols.back().Name = trimGoObjInlineHash(Symbols.back().Name);
+          Symbols.back().ComputeContentHash = true;
+        }
+        if (Hash.size() == GoObj::Hash64Size) {
+          Symbols.back().DefinedBlock = GoObj::DefinedSymbolBlock::Hashed64def;
+          Symbols.back().Name = trimGoObjInlineHash(Symbols.back().Name);
+          std::array<uint8_t, GoObj::Hash64Size> Value;
+          std::copy(Hash.bytes_begin(), Hash.bytes_end(), Value.begin());
+          Symbols.back().ContentHash64 = Value;
+        } else if (Hash.size() == GoObj::HashSize) {
+          Symbols.back().DefinedBlock = GoObj::DefinedSymbolBlock::Hasheddef;
+          Symbols.back().Name = trimGoObjInlineHash(Symbols.back().Name);
+          std::array<uint8_t, GoObj::HashSize> Value;
+          std::copy(Hash.bytes_begin(), Hash.bytes_end(), Value.begin());
+          Symbols.back().ContentHash = Value;
+        } else if (!Hash.empty()) {
+          report_fatal_error("invalid GoObj content-addressable hash size");
+        }
+      }
+    };
+
+    if (SectionSymbols.empty() && SectionSize != 0) {
+      AddSectionSymbol(nullptr, Section.getName(), 0, SectionSize);
+    } else if (!SectionSymbols.empty()) {
+      for (size_t I = 0, E = SectionSymbols.size(); I != E; ++I) {
+        uint64_t Begin = SectionSymbols[I].Offset;
+        uint64_t End = SectionSize;
+        for (size_t J = I + 1; J != E; ++J) {
+          if (SectionSymbols[J].Offset > Begin) {
+            End = SectionSymbols[J].Offset;
+            break;
+          }
+        }
+        if (const MCSymbol *ExactEnd =
+                Asm->getContext().getGoObjFunctionEnd(SectionSymbols[I].Symbol)) {
+          if (!ExactEnd->isInSection() || &ExactEnd->getSection() != &Section)
+            report_fatal_error("GoObj function end is invalid");
+          uint64_t ExactEndOffset = Asm->getSymbolOffset(*ExactEnd);
+          if (ExactEndOffset < Begin || ExactEndOffset > End)
+            report_fatal_error("GoObj function size overlaps another symbol");
+          End = ExactEndOffset;
+        } else if (std::optional<uint64_t> ExactSize =
+                       Asm->getContext().getGoObjSymbolSize(
+                           SectionSymbols[I].Symbol)) {
+          if (*ExactSize > SectionSize - Begin || Begin + *ExactSize > End)
+            report_fatal_error(
+                "GoObj global size overlaps the next section symbol");
+          End = Begin + *ExactSize;
+        }
+        AddSectionSymbol(SectionSymbols[I].Symbol,
+                         GetSymbolName(SectionSymbols[I].Symbol), Begin, End);
+      }
+    }
+  }
+
+  uint32_t PCQuantum = getGoObjPCQuantum(Asm->getContext().getTargetTriple());
+  std::vector<GoObjFuncDebugLines> FuncDebugLines(Symbols.size());
+  std::vector<std::string> FilePaths;
+  StringMap<uint32_t> FileIndexes;
+  StringMap<uint32_t> AuxCarrierIndexes;
+  StringMap<uint32_t> GCBitmapCarrierIndexes;
+  DenseMap<const MCSymbol *, uint32_t> ArgLiveInfoSymbols;
+  struct PendingFuncInfoPatch {
+    uint32_t CarrierSymbol = 0;
+    uint32_t FileCount = 0;
+    std::vector<GoObjInlineTreeNode> InlineTree;
+  };
+  std::vector<PendingFuncInfoPatch> PendingFuncInfoPatches;
+  DenseMap<const MCSymbol *, uint32_t> DwarfAbstractSymbols;
+  unsigned DwarfVersion = Asm->getContext().getGoObjDwarfVersion();
+  if (DwarfVersion != 0 && DwarfVersion != 4 && DwarfVersion != 5)
+    report_fatal_error("unsupported GoObj DWARF version");
+  auto GetFallbackFile = [&]() {
+    return getOrAddFileIndex(FileIndexes, FilePaths, "llvm-ir");
+  };
+
+  auto AppendDwarfGotypeReference = [&](GoObjDwarfCarrierData &Carrier,
+                                        const MCSymbol *Gotype) {
+    if (!Gotype)
+      report_fatal_error("GoObj DWARF type reference has no gotype symbol");
+    // Strip GoObj's storage-only identity suffixes before forming the linker
+    // DWARF symbol. R_USETYPE must retain the exact gotype identity (including
+    // a builtin index), while go:info.<type> is always the canonical name.
+    StringRef TypeName = GetSymbolName(Gotype);
+    if (!TypeName.consume_front("type:") || TypeName.empty())
+      report_fatal_error(Twine("invalid GoObj gotype symbol for DWARF: ") +
+                         Gotype->getName());
+    MCSymbol *InfoType = Asm->getContext().getOrCreateSymbol(
+        (Twine("go:info.") + TypeName).str());
+    appendDwarfRelocation(Carrier.Data, Carrier.Relocations, 4,
+                          GoObj::R_DWARFSECREF, 0, std::nullopt, InfoType);
+
+    // Match native dwarfgen's R_USETYPE reachability edge. The Go linker
+    // builds the canonical rich type DIE and resolves go:info.<type>.
+    GoObjSymbol::Relocation UseType;
+    UseType.Type = GoObj::R_USETYPE;
+    UseType.TargetSymbol = Gotype;
+    Carrier.Relocations.push_back(UseType);
+  };
+
+  auto AppendDwarfTypeReference = [&](GoObjDwarfCarrierData &Carrier,
+                                      StringRef TypeName) {
+    const MCSymbol *Gotype =
+        Asm->getContext().getOrCreateSymbol((Twine("type:") + TypeName).str());
+    AppendDwarfGotypeReference(Carrier, Gotype);
+  };
+
+  auto AppendDwarfParametricTypes =
+      [&](GoObjDwarfCarrierData &Carrier,
+          ArrayRef<MCContext::GoObjDebugVariable> Variables) {
+        DenseMap<uint16_t, uint32_t> Offsets;
+        for (const MCContext::GoObjDebugVariable &Var : Variables) {
+          if (Var.DictIndex == 0 || Offsets.contains(Var.DictIndex))
+            continue;
+          uint32_t Offset = checkedUint32(Carrier.Data.size(),
+                                          "DWARF dictionary type offset");
+          Offsets[Var.DictIndex] = Offset;
+          appendUvarint(Carrier.Data, 32); // DW_ABRV_DICT_INDEX.
+          appendCString(Carrier.Data,
+                        (Twine(".param") + Twine(Var.DictIndex - 1)).str());
+          AppendDwarfTypeReference(Carrier, Var.TypeName);
+          appendUvarint(Carrier.Data, Var.DictIndex - 1);
+        }
+        return Offsets;
+      };
+
+  auto AppendDwarfVariableTypeReference =
+      [&](GoObjDwarfCarrierData &Carrier,
+          const MCContext::GoObjDebugVariable &Var,
+          const DenseMap<uint16_t, uint32_t> &ParametricTypeOffsets,
+          uint32_t CarrierSymbol) {
+        if (Var.DictIndex == 0) {
+          AppendDwarfTypeReference(Carrier, Var.TypeName);
+          return;
+        }
+        auto It = ParametricTypeOffsets.find(Var.DictIndex);
+        if (It == ParametricTypeOffsets.end())
+          report_fatal_error("GoObj DWARF variable has no dictionary type");
+        appendDwarfRelocation(Carrier.Data, Carrier.Relocations, 4,
+                              GoObj::R_DWARFSECREF, It->second, CarrierSymbol);
+      };
+
+  auto GetOrAddDwarfAbstract = [&](const MCSymbol *Callee) {
+    if (!Callee)
+      report_fatal_error("GoObj DWARF abstract function has no callee");
+    if (auto It = DwarfAbstractSymbols.find(Callee);
+        It != DwarfAbstractSymbols.end())
+      return It->second;
+
+    const MCContext::GoObjFunctionDebugInfo *DebugInfo =
+        Asm->getContext().getGoObjFunctionDebugInfo(Callee);
+    StringRef Name = DebugInfo && !DebugInfo->Name.empty()
+                         ? StringRef(DebugInfo->Name)
+                         : GetSymbolName(Callee);
+    uint32_t Line =
+        DebugInfo && DebugInfo->StartLine != 0 ? DebugInfo->StartLine : 1;
+    GoObjDwarfCarrierData Carrier;
+    uint32_t CarrierIndex = checkedUint32(Symbols.size(), "symbol count");
+    appendUvarint(Carrier.Data, 5); // DW_ABRV_FUNCTION_ABSTRACT.
+    appendCString(Carrier.Data, Name);
+    Carrier.Data.push_back(1); // DW_INL_inlined.
+    appendUvarint(Carrier.Data, Line);
+    Carrier.Data.push_back(1); // External.
+    if (DebugInfo) {
+      DenseMap<uint16_t, uint32_t> ParametricTypeOffsets =
+          AppendDwarfParametricTypes(Carrier, DebugInfo->Variables);
+      for (const MCContext::GoObjDebugVariable &Var : DebugInfo->Variables) {
+        if (Var.ArgNo != 0) {
+          appendUvarint(Carrier.Data, 34); // Abstract formal parameter.
+          appendCString(Carrier.Data, Var.Name);
+          Carrier.Data.push_back(Var.IsReturn ? 1 : 0);
+        } else {
+          appendUvarint(Carrier.Data, 33); // Abstract local variable.
+          appendCString(Carrier.Data, Var.Name);
+          appendUvarint(Carrier.Data, Var.DeclLine);
+        }
+        AppendDwarfVariableTypeReference(Carrier, Var, ParametricTypeOffsets,
+                                         CarrierIndex);
+      }
+    }
+    Carrier.Data.push_back(0);
+
+    uint32_t Index = addDwarfCarrierSymbol(
+        Symbols, (Twine("go:info.") + Name + "$abstract").str(),
+        GoObj::SDWARFABSFCN, GoObj::SymFlagDupok, std::move(Carrier));
+    if (Index != CarrierIndex)
+      report_fatal_error("GoObj DWARF abstract carrier index changed");
+    DwarfAbstractSymbols[Callee] = Index;
+    return Index;
+  };
+
+  if (Config.SourceKind == GoObj::SourceKind::Compiler) {
+    auto GetInlineIndex =
+        [&](GoObjFuncDebugLines &Info,
+            ArrayRef<MCContext::GoObjDebugInlineFrame> Frames) {
+          int32_t Parent = -1;
+          for (const MCContext::GoObjDebugInlineFrame &Frame : Frames) {
+            int32_t Existing = -1;
+            for (uint32_t NodeIndex = 0,
+                          NodeEnd = checkedUint32(Info.InlineTree.size(),
+                                                  "GoObj inline tree size");
+                 NodeIndex != NodeEnd; ++NodeIndex) {
+              const GoObjInlineTreeNode &Node = Info.InlineTree[NodeIndex];
+              if (Node.SiteID != Frame.SiteID)
+                continue;
+              if (Node.Parent != Parent || Node.Callee != Frame.Callee ||
+                  Node.Line != static_cast<int32_t>(Frame.CallLine))
+                report_fatal_error("inconsistent GoObj inline site identity");
+              Existing = static_cast<int32_t>(NodeIndex);
+              break;
+            }
+            if (Existing >= 0) {
+              Parent = Existing;
+              continue;
+            }
+
+            uint32_t ObjectFileIndex =
+                getOrAddFileIndex(FileIndexes, FilePaths, Frame.CallFile);
+            recordFunctionFile(Info, ObjectFileIndex);
+            GoObjInlineTreeNode Node;
+            Node.Parent = Parent;
+            Node.File = ObjectFileIndex;
+            Node.Line = static_cast<int32_t>(Frame.CallLine);
+            Node.Callee = Frame.Callee;
+            Node.SiteID = Frame.SiteID;
+            Parent = static_cast<int32_t>(Info.InlineTree.size());
+            Info.InlineTree.push_back(std::move(Node));
+          }
+          return Parent;
+        };
+
+    // Preserve complete DILocation/inlinedAt chains separately from the
+    // flattened MC line table.
+    for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
+         I != E; ++I) {
+      GoObjSymbol &Sym = Symbols[I];
+      if (Sym.Type != GoObj::STEXT || Sym.Size == 0 || !Sym.Symbol)
+        continue;
+      const auto *DebugInfo =
+          Asm->getContext().getGoObjFunctionDebugInfo(Sym.Symbol);
+      if (!DebugInfo)
+        continue;
+
+      GoObjFuncDebugLines &Info = FuncDebugLines[I];
+      if (DebugInfo->StartLine != 0)
+        Info.StartLine = static_cast<int32_t>(DebugInfo->StartLine);
+      if (!DebugInfo->File.empty())
+        recordFunctionFile(
+            Info, getOrAddFileIndex(FileIndexes, FilePaths, DebugInfo->File));
+
+      for (const MCContext::GoObjDebugLocation &Location :
+           DebugInfo->Locations) {
+        if (!Location.Label || !Location.Label->isInSection() ||
+            &Location.Label->getSection() != Sym.Section)
+          report_fatal_error(
+              "GoObj debug location is outside its function section");
+        uint64_t LabelOffset = Asm->getSymbolOffset(*Location.Label);
+        if (LabelOffset < Sym.SectionBegin || LabelOffset >= Sym.SectionEnd)
+          report_fatal_error("GoObj debug location is outside its function");
+        uint64_t PC = LabelOffset - Sym.SectionBegin;
+        if (PC % PCQuantum != 0)
+          report_fatal_error("GoObj debug location is not PC-quantum aligned");
+
+        uint32_t FileIndex =
+            getOrAddFileIndex(FileIndexes, FilePaths,
+                              Location.File.empty() ? StringRef("llvm-ir")
+                                                    : StringRef(Location.File));
+        recordFunctionFile(Info, FileIndex);
+        Info.PCFile.push_back({PC, static_cast<int32_t>(FileIndex)});
+        Info.PCLine.push_back({PC, static_cast<int32_t>(Location.Line)});
+        Info.PCInline.push_back(
+            {PC, GetInlineIndex(Info, Location.InlineFrames)});
+
+        if (!Location.AnchorChildFrames.empty()) {
+          int32_t Child = GetInlineIndex(Info, Location.AnchorChildFrames);
+          if (Child < 0)
+            report_fatal_error("GoObj inline anchor has no child node");
+          if (PC > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+            report_fatal_error("GoObj inline ParentPC exceeds int32 range");
+          GoObjInlineTreeNode &Node = Info.InlineTree[Child];
+          if (Node.ParentPC >= 0 && Node.ParentPC != static_cast<int32_t>(PC))
+            report_fatal_error(
+                "duplicate GoObj inline anchor has conflicting PC");
+          Node.ParentPC = static_cast<int32_t>(PC);
+        }
+      }
+      for (const GoObjInlineTreeNode &Node : Info.InlineTree)
+        if (Node.ParentPC < 0)
+          report_fatal_error(
+              "GoObj inline tree node has no final-layout anchor");
+    }
+
+    for (const auto &[CUID, LineTable] :
+         Asm->getContext().getMCDwarfLineTables()) {
+      (void)CUID;
+      for (const auto &LineDivision :
+           LineTable.getMCLineSections().getMCLineEntries()) {
+        MCSection *Section = LineDivision.first;
+        for (const MCDwarfLineEntry &LineEntry : LineDivision.second) {
+          MCSymbol *Label = LineEntry.getLabel();
+          if (!Label || !Label->isInSection())
+            continue;
+          uint64_t LabelOffset = Asm->getSymbolOffset(*Label);
+          for (uint32_t I = 0,
+                        E = checkedUint32(Symbols.size(), "symbol count");
+               I != E; ++I) {
+            GoObjSymbol &Sym = Symbols[I];
+            if (LineEntry.getLine() == 0 || Sym.Type != GoObj::STEXT ||
+                Sym.Size == 0 || Sym.Section != Section ||
+                LabelOffset < Sym.SectionBegin || LabelOffset >= Sym.SectionEnd)
+              continue;
+
+            // The side table is authoritative when present; consuming both
+            // would make same-PC ordering depend on line-table lowering.
+            if (Sym.Symbol &&
+                Asm->getContext().getGoObjFunctionDebugInfo(Sym.Symbol))
+              break;
+
+            std::string Path =
+                getDwarfFilePath(LineTable, LineEntry.getFileNum());
+            uint32_t ObjectFileIndex =
+                getOrAddFileIndex(FileIndexes, FilePaths, Path);
+            GoObjFuncDebugLines &Info = FuncDebugLines[I];
+            uint32_t CUFileIndex = recordFunctionFile(Info, ObjectFileIndex);
+            uint64_t PC = LabelOffset - Sym.SectionBegin;
+            int32_t Line = static_cast<int32_t>(LineEntry.getLine());
+            Info.PCFile.push_back({PC, static_cast<int32_t>(CUFileIndex)});
+            Info.PCLine.push_back({PC, Line});
+            if (Info.PCLine.size() == 1)
+              Info.StartLine = Line;
+            break;
+          }
+        }
+      }
+    }
+
+    for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
+         I != E; ++I) {
+      if (Symbols[I].Type != GoObj::STEXT || Symbols[I].Size == 0 ||
+          !Symbols[I].Symbol)
+        continue;
+
+      uint32_t StackSize = Asm->getContext()
+                               .getGoObjSymbolStackSize(Symbols[I].Symbol)
+                               .value_or(0);
+      uint32_t ArgSize = Asm->getContext()
+                             .getGoObjSymbolArgSize(Symbols[I].Symbol)
+                             .value_or(0);
+      uint32_t PointerSize =
+          Asm->getContext().getAsmInfo().getCodePointerSize();
+      GoObjGCFrameLayout FrameLayout = getGoObjGCFrameLayout(
+          Asm->getContext().getTargetTriple(), StackSize, PointerSize,
+          Asm->getContext()
+              .getGoObjSymbolHasFramePointer(Symbols[I].Symbol)
+              .value_or(false));
+      uint64_t CodeSize = Symbols[I].Size;
+
+      SmallVector<GoObjPCTabEntry, 8> PCSPEntries;
+      if (const auto *Entries =
+              Asm->getContext().getGoObjSymbolPCSPEntries(Symbols[I].Symbol)) {
+        for (const MCContext::GoObjPCSPEntry &Entry : *Entries) {
+          if (!Entry.Label->isInSection())
+            continue;
+          uint64_t LabelOffset = Asm->getSymbolOffset(*Entry.Label);
+          if (LabelOffset < Symbols[I].SectionBegin)
+            continue;
+          uint64_t EventPC = LabelOffset - Symbols[I].SectionBegin;
+          if (EventPC <= CodeSize)
+            PCSPEntries.push_back({EventPC, Entry.Value});
+        }
+        llvm::stable_sort(PCSPEntries, [](const auto &LHS, const auto &RHS) {
+          return LHS.PC < RHS.PC;
+        });
+        // Empty blocks can place multiple state transitions at one PC. Keep
+        // the final transition, which describes the following emitted code.
+        SmallVector<GoObjPCTabEntry, 8> NormalizedPCSPEntries;
+        for (const GoObjPCTabEntry &Entry : PCSPEntries) {
+          if (!NormalizedPCSPEntries.empty() &&
+              NormalizedPCSPEntries.back().PC == Entry.PC)
+            NormalizedPCSPEntries.back().Value = Entry.Value;
+          else
+            NormalizedPCSPEntries.push_back(Entry);
+        }
+        PCSPEntries = std::move(NormalizedPCSPEntries);
+      }
+
+      SmallVector<GoObjPCTabEntry, 8> UnsafePointEntries;
+      if (const auto *Entries =
+              Asm->getContext().getGoObjSymbolUnsafePointEntries(
+                  Symbols[I].Symbol)) {
+        for (const MCContext::GoObjUnsafePointEntry &Entry : *Entries) {
+          if (!Entry.Label->isInSection())
+            report_fatal_error("GoObj unsafe-point label was not emitted");
+          if (&Entry.Label->getSection() != &Symbols[I].Symbol->getSection())
+            report_fatal_error(
+                "GoObj unsafe-point label is in a different section");
+          uint64_t LabelOffset = Asm->getSymbolOffset(*Entry.Label);
+          if (LabelOffset < Symbols[I].SectionBegin)
+            report_fatal_error(
+                "GoObj unsafe-point label precedes its function");
+          uint64_t EventPC = LabelOffset - Symbols[I].SectionBegin;
+          if (EventPC > CodeSize)
+            report_fatal_error(
+                "GoObj unsafe-point label is outside its function");
+          UnsafePointEntries.push_back({EventPC, Entry.Value});
+        }
+        llvm::stable_sort(
+            UnsafePointEntries,
+            [](const auto &LHS, const auto &RHS) { return LHS.PC < RHS.PC; });
+        SmallVector<GoObjPCTabEntry, 8> NormalizedUnsafePointEntries;
+        for (const GoObjPCTabEntry &Entry : UnsafePointEntries) {
+          if (!NormalizedUnsafePointEntries.empty() &&
+              NormalizedUnsafePointEntries.back().PC == Entry.PC)
+            NormalizedUnsafePointEntries.back().Value = Entry.Value;
+          else if (NormalizedUnsafePointEntries.empty() ||
+                   NormalizedUnsafePointEntries.back().Value != Entry.Value)
+            NormalizedUnsafePointEntries.push_back(Entry);
+        }
+        UnsafePointEntries = std::move(NormalizedUnsafePointEntries);
+      }
+
+      bool IsWholeFunctionAsyncUnsafe =
+          Asm->getContext().isGoObjSymbolAsyncUnsafe(Symbols[I].Symbol);
+      int32_t InitialUnsafePointValue = IsWholeFunctionAsyncUnsafe
+                                            ? GoObj::UnsafePointUnsafe
+                                            : GoObj::UnsafePointSafe;
+      if (!IsWholeFunctionAsyncUnsafe && !UnsafePointEntries.empty() &&
+          UnsafePointEntries.front().PC == 0) {
+        InitialUnsafePointValue = UnsafePointEntries.front().Value;
+        UnsafePointEntries.erase(UnsafePointEntries.begin());
+      }
+
+      GoObjFuncDebugLines &LineInfo = FuncDebugLines[I];
+      if (LineInfo.Files.empty())
+        recordFunctionFile(LineInfo, GetFallbackFile());
+      auto NormalizePCTab = [&](auto &Entries) {
+        llvm::stable_sort(Entries, [](const auto &LHS, const auto &RHS) {
+          return LHS.PC < RHS.PC;
+        });
+        using EntriesT = std::decay_t<decltype(Entries)>;
+        EntriesT Normalized;
+        for (const GoObjPCTabEntry &Entry : Entries) {
+          if (!Normalized.empty() && Normalized.back().PC == Entry.PC)
+            Normalized.back().Value = Entry.Value;
+          else
+            Normalized.push_back(Entry);
+        }
+        Entries = std::move(Normalized);
+      };
+      NormalizePCTab(LineInfo.PCFile);
+      NormalizePCTab(LineInfo.PCLine);
+      NormalizePCTab(LineInfo.PCInline);
+
+      const auto *FunctionDebugInfo =
+          Asm->getContext().getGoObjFunctionDebugInfo(Symbols[I].Symbol);
+      if (DwarfVersion != 0 && FunctionDebugInfo &&
+          !FunctionDebugInfo->Name.empty()) {
+        // Derive inline DIE ranges from the same final-layout transitions that
+        // feed PCDATA_InlTreeIndex. This keeps runtime traceback and debugger
+        // inline views on one source of truth after scheduling and relaxation.
+        std::vector<std::vector<GoObjDwarfRange>> InlineRanges(
+            LineInfo.InlineTree.size());
+        for (size_t Event = 0; Event < LineInfo.PCInline.size(); ++Event) {
+          uint64_t Begin = LineInfo.PCInline[Event].PC;
+          uint64_t End = Event + 1 < LineInfo.PCInline.size()
+                             ? LineInfo.PCInline[Event + 1].PC
+                             : CodeSize;
+          int32_t Node = LineInfo.PCInline[Event].Value;
+          if (Begin >= End || Node < 0)
+            continue;
+          if (static_cast<size_t>(Node) >= LineInfo.InlineTree.size())
+            report_fatal_error("GoObj DWARF inline index is invalid");
+          while (Node >= 0) {
+            auto &Ranges = InlineRanges[Node];
+            if (!Ranges.empty() && Ranges.back().End == Begin)
+              Ranges.back().End = End;
+            else
+              Ranges.push_back({Begin, End});
+            Node = LineInfo.InlineTree[Node].Parent;
+          }
+        }
+
+        std::vector<uint32_t> AbstractSymbols(LineInfo.InlineTree.size());
+        for (size_t Node = 0; Node < LineInfo.InlineTree.size(); ++Node) {
+          // Final-layout PCDATA keeps frontend inline nodes even when every
+          // instruction attributed to a node was folded into another source
+          // position. Such a node is still needed by FuncInfo/ParentPC, but
+          // DW_TAG_inlined_subroutine cannot describe an empty address range.
+          // Omit only its DWARF DIE; a child with a real range also contributes
+          // that range to every ancestor above, so an empty node cannot hide a
+          // non-empty subtree.
+          if (InlineRanges[Node].empty())
+            continue;
+          AbstractSymbols[Node] =
+              GetOrAddDwarfAbstract(LineInfo.InlineTree[Node].Callee);
+        }
+
+        GoObjDwarfCarrierData RangeCarrier;
+        std::vector<uint32_t> RangeOffsets(LineInfo.InlineTree.size());
+        for (size_t Node = 0; Node < InlineRanges.size(); ++Node) {
+          if (InlineRanges[Node].empty())
+            continue;
+          if (DwarfVersion == 4 && InlineRanges[Node].size() == 1)
+            continue;
+          RangeOffsets[Node] =
+              checkedUint32(RangeCarrier.Data.size(), "DWARF range offset");
+          if (DwarfVersion == 5) {
+            // DW_RLE_base_addressx, followed by DW_RLE_offset_pair entries.
+            RangeCarrier.Data.push_back(dwarf::DW_RLE_base_addressx);
+            appendDwarfRelocation(RangeCarrier.Data, RangeCarrier.Relocations,
+                                  4, GoObj::R_DWTXTADDR_U4, 0, I);
+            for (const GoObjDwarfRange &Range : InlineRanges[Node]) {
+              RangeCarrier.Data.push_back(dwarf::DW_RLE_offset_pair);
+              appendUvarint(RangeCarrier.Data, Range.Begin);
+              appendUvarint(RangeCarrier.Data, Range.End);
+            }
+            RangeCarrier.Data.push_back(dwarf::DW_RLE_end_of_list);
+          } else {
+            for (const GoObjDwarfRange &Range : InlineRanges[Node]) {
+              appendDwarfRelocation(RangeCarrier.Data, RangeCarrier.Relocations,
+                                    PointerSize, GoObj::R_ADDRCUOFF,
+                                    Range.Begin, I);
+              appendDwarfRelocation(RangeCarrier.Data, RangeCarrier.Relocations,
+                                    PointerSize, GoObj::R_ADDRCUOFF, Range.End,
+                                    I);
+            }
+            RangeCarrier.Data.resize(RangeCarrier.Data.size() + 2 * PointerSize,
+                                     0);
+          }
+        }
+        std::optional<uint32_t> DwarfRangeSym;
+        if (!RangeCarrier.Data.empty())
+          DwarfRangeSym = addDwarfCarrierSymbol(Symbols, "", GoObj::SDWARFRANGE,
+                                                0, std::move(RangeCarrier));
+
+        GoObjDwarfCarrierData LocationCarrier;
+        std::vector<std::optional<uint32_t>> LocationOffsets(
+            FunctionDebugInfo->Variables.size());
+        for (auto [VarIndex, Var] : enumerate(FunctionDebugInfo->Variables)) {
+          struct LocationRange {
+            uint64_t Begin, End;
+            std::vector<uint8_t> Expression;
+          };
+          SmallVector<LocationRange, 4> Ranges;
+          for (const auto &Loc : Var.Locations) {
+            auto Offset = [&](const MCSymbol *Label) {
+              if (!Label || !Label->isInSection() ||
+                  &Label->getSection() != Symbols[I].Section)
+                report_fatal_error(
+                    "GoObj variable location has invalid section");
+              uint64_t Value = Asm->getSymbolOffset(*Label);
+              if (Value < Symbols[I].SectionBegin ||
+                  Value > Symbols[I].SectionEnd)
+                report_fatal_error(
+                    "GoObj variable location is outside function");
+              return Value - Symbols[I].SectionBegin;
+            };
+            uint64_t Begin = Offset(Loc.Begin), End = Offset(Loc.End);
+            if (Begin >= End || Loc.Expression.empty())
+              continue;
+            if (!Ranges.empty() && Ranges.back().End == Begin &&
+                Ranges.back().Expression == Loc.Expression)
+              Ranges.back().End = End;
+            else
+              Ranges.push_back({Begin, End, Loc.Expression});
+          }
+          if (Ranges.empty())
+            continue;
+          LocationOffsets[VarIndex] = checkedUint32(LocationCarrier.Data.size(),
+                                                    "DWARF location offset");
+          if (DwarfVersion == 5) {
+            LocationCarrier.Data.push_back(dwarf::DW_LLE_base_addressx);
+            appendDwarfRelocation(LocationCarrier.Data,
+                                  LocationCarrier.Relocations, 4,
+                                  GoObj::R_DWTXTADDR_U4, 0, I);
+          }
+          for (const auto &Range : Ranges) {
+            if (DwarfVersion == 5) {
+              LocationCarrier.Data.push_back(dwarf::DW_LLE_offset_pair);
+              appendUvarint(LocationCarrier.Data, Range.Begin);
+              appendUvarint(LocationCarrier.Data, Range.End);
+              appendUvarint(LocationCarrier.Data, Range.Expression.size());
+            } else {
+              appendDwarfRelocation(LocationCarrier.Data,
+                                    LocationCarrier.Relocations, PointerSize,
+                                    GoObj::R_ADDRCUOFF, Range.Begin, I);
+              appendDwarfRelocation(LocationCarrier.Data,
+                                    LocationCarrier.Relocations, PointerSize,
+                                    GoObj::R_ADDRCUOFF, Range.End, I);
+              if (Range.Expression.size() > UINT16_MAX)
+                report_fatal_error("GoObj DWARF location expression too large");
+              LocationCarrier.Data.push_back(Range.Expression.size() & 0xff);
+              LocationCarrier.Data.push_back(Range.Expression.size() >> 8);
+            }
+            LocationCarrier.Data.append(Range.Expression.begin(),
+                                        Range.Expression.end());
+          }
+          if (DwarfVersion == 5)
+            LocationCarrier.Data.push_back(dwarf::DW_LLE_end_of_list);
+          else
+            LocationCarrier.Data.resize(
+                LocationCarrier.Data.size() + 2 * PointerSize, 0);
+        }
+        std::optional<uint32_t> DwarfLocationSym;
+        if (!LocationCarrier.Data.empty())
+          DwarfLocationSym = addDwarfCarrierSymbol(
+              Symbols, "", GoObj::SDWARFLOC, 0, std::move(LocationCarrier));
+
+        GoObjDwarfCarrierData InfoCarrier;
+        appendUvarint(InfoCarrier.Data, 3); // DW_ABRV_FUNCTION.
+        appendCString(InfoCarrier.Data, Symbols[I].Name);
+        if (DwarfVersion == 5) {
+          appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations, 4,
+                                GoObj::R_DWTXTADDR_U4, 0, I);
+          appendUvarint(InfoCarrier.Data, CodeSize);
+        } else {
+          appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations,
+                                PointerSize, GoObj::R_ADDR, 0, I);
+          appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations,
+                                PointerSize, GoObj::R_ADDR, CodeSize, I);
+        }
+        InfoCarrier.Data.push_back(1);
+        InfoCarrier.Data.push_back(dwarf::DW_OP_call_frame_cfa);
+        appendUint32LE(InfoCarrier.Data, LineInfo.Files.front() + 1);
+        appendUvarint(InfoCarrier.Data, LineInfo.StartLine);
+        InfoCarrier.Data.push_back((Symbols[I].Flag & GoObj::SymFlagLocal) ? 0
+                                                                           : 1);
+
+        uint32_t DwarfInfoIndex = checkedUint32(Symbols.size(), "symbol count");
+        DenseMap<uint16_t, uint32_t> ParametricTypeOffsets =
+            AppendDwarfParametricTypes(InfoCarrier,
+                                       FunctionDebugInfo->Variables);
+
+        for (auto [VarIndex, Var] : enumerate(FunctionDebugInfo->Variables)) {
+          // DW_ABRV_PUTVAR_START+6/+12 use a location list; +7/+13 use
+          // block1 (empty for unavailable variables).
+          bool HasLocation = LocationOffsets[VarIndex].has_value();
+          appendUvarint(InfoCarrier.Data,
+                        (Var.ArgNo != 0 ? 46 : 40) - unsigned(HasLocation));
+          appendCString(InfoCarrier.Data, Var.Name);
+          if (Var.ArgNo != 0)
+            InfoCarrier.Data.push_back(Var.IsReturn ? 1 : 0);
+          appendUvarint(InfoCarrier.Data, Var.DeclLine);
+          AppendDwarfVariableTypeReference(
+              InfoCarrier, Var, ParametricTypeOffsets, DwarfInfoIndex);
+          if (HasLocation)
+            appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations, 4,
+                                  GoObj::R_DWARFSECREF,
+                                  *LocationOffsets[VarIndex],
+                                  *DwarfLocationSym);
+          else
+            InfoCarrier.Data.push_back(0);
+        }
+
+        std::function<void(int32_t)> EmitInline = [&](int32_t Node) {
+          const auto &Ranges = InlineRanges[Node];
+          if (Ranges.empty())
+            return;
+          bool UseRanges = DwarfVersion == 5 || Ranges.size() > 1;
+          appendUvarint(InfoCarrier.Data, UseRanges ? 9 : 8);
+          appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations, 4,
+                                GoObj::R_DWARFSECREF, 0, AbstractSymbols[Node]);
+          if (UseRanges) {
+            if (!DwarfRangeSym)
+              report_fatal_error("GoObj DWARF inline ranges have no carrier");
+            appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations, 4,
+                                  GoObj::R_DWARFSECREF, RangeOffsets[Node],
+                                  *DwarfRangeSym);
+          } else {
+            appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations,
+                                  PointerSize, GoObj::R_ADDR, Ranges[0].Begin,
+                                  I);
+            appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations,
+                                  PointerSize, GoObj::R_ADDR, Ranges[0].End, I);
+          }
+          appendUint32LE(InfoCarrier.Data, LineInfo.InlineTree[Node].File + 1);
+          if (Asm->getContext().getTargetTriple().isOSDarwin())
+            appendUint32LE(
+                InfoCarrier.Data,
+                static_cast<uint32_t>(LineInfo.InlineTree[Node].Line));
+          else
+            appendUvarint(
+                InfoCarrier.Data,
+                static_cast<uint32_t>(LineInfo.InlineTree[Node].Line));
+          for (uint32_t Child = 0,
+                        End = checkedUint32(LineInfo.InlineTree.size(),
+                                            "GoObj inline tree size");
+               Child != End; ++Child)
+            if (LineInfo.InlineTree[Child].Parent == Node)
+              EmitInline(static_cast<int32_t>(Child));
+          InfoCarrier.Data.push_back(0);
+        };
+        for (uint32_t Node = 0, End = checkedUint32(LineInfo.InlineTree.size(),
+                                                    "GoObj inline tree size");
+             Node != End; ++Node)
+          if (LineInfo.InlineTree[Node].Parent < 0)
+            EmitInline(static_cast<int32_t>(Node));
+        InfoCarrier.Data.push_back(0);
+
+        uint32_t DwarfInfoSym = addDwarfCarrierSymbol(
+            Symbols, "", GoObj::SDWARFFCN, 0, std::move(InfoCarrier));
+        if (DwarfInfoSym != DwarfInfoIndex)
+          report_fatal_error("GoObj DWARF function carrier index changed");
+        uint32_t DwarfLinesSym = addDwarfCarrierSymbol(
+            Symbols, "", GoObj::SDWARFLINES, 0,
+            makeDwarfLines(LineInfo, CodeSize, PointerSize, I));
+        Symbols[I].Auxiliaries.emplace_back(GoObj::AuxDwarfInfo, DwarfInfoSym);
+        if (DwarfLocationSym)
+          Symbols[I].Auxiliaries.emplace_back(GoObj::AuxDwarfLoc,
+                                              *DwarfLocationSym);
+        if (DwarfRangeSym)
+          Symbols[I].Auxiliaries.emplace_back(GoObj::AuxDwarfRanges,
+                                              *DwarfRangeSym);
+        Symbols[I].Auxiliaries.emplace_back(GoObj::AuxDwarfLines,
+                                            DwarfLinesSym);
+      }
+
+      auto [FuncID, FuncFlag] =
+          Asm->getContext()
+              .getGoObjFunctionInfo(Symbols[I].Symbol)
+              .value_or(std::make_pair(uint8_t(0), uint8_t(0)));
+      uint32_t FuncInfoSym = addAuxCarrierSymbol(
+          Symbols, GoObj::DefinedSymbolBlock::Symdef,
+          makeFuncInfoData(ArgSize, FrameLayout.FuncInfoLocalsSize, FuncID,
+                           FuncFlag, LineInfo.Files, LineInfo.StartLine,
+                           LineInfo.InlineTree));
+      if (!LineInfo.InlineTree.empty())
+        PendingFuncInfoPatches.push_back(
+            {FuncInfoSym,
+             checkedUint32(LineInfo.Files.size(), "GoObj FuncInfo file count"),
+             std::vector<GoObjInlineTreeNode>(LineInfo.InlineTree.begin(),
+                                              LineInfo.InlineTree.end())});
+      uint32_t PcspSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'P',
+          PCSPEntries.empty()
+              ? makeConstantPCTab(static_cast<int32_t>(StackSize), CodeSize,
+                                  PCQuantum)
+              : makePCTab(0, PCSPEntries, CodeSize, PCQuantum));
+      int32_t InitialFile = LineInfo.hasLines()
+                                ? LineInfo.PCFile.front().Value
+                                : static_cast<int32_t>(LineInfo.Files.front());
+      int32_t InitialLine = LineInfo.hasLines() ? LineInfo.PCLine.front().Value
+                                                : LineInfo.StartLine;
+      uint32_t PcfileSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'P',
+          makePCTab(InitialFile, LineInfo.PCFile, CodeSize, PCQuantum));
+      uint32_t PclineSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'P',
+          makePCTab(InitialLine, LineInfo.PCLine, CodeSize, PCQuantum));
+      uint32_t PcinlineSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'P',
+          makePCTab(-1, LineInfo.PCInline, CodeSize, PCQuantum));
+      SmallString<0> ArgsMap = makeEmptyStackMap();
+      SmallString<0> LocalsMap = makeEmptyStackMap();
+      SmallString<0> StackMapIndex = makeConstantPCTab(-1, CodeSize, PCQuantum);
+      std::optional<uint32_t> StackObjectsSym;
+      std::optional<uint32_t> OpenDeferSym;
+      if (const auto *Entries = Asm->getContext().getGoObjSymbolStackMapEntries(
+              Symbols[I].Symbol)) {
+        if (!Entries->empty()) {
+          GoObjStatepointStackMaps Maps =
+              makeStatepointStackMaps(*Asm, Symbols[I], StackSize, ArgSize,
+                                      PCQuantum, *Entries, PCSPEntries);
+          ArgsMap = std::move(Maps.Args);
+          LocalsMap = std::move(Maps.Locals);
+          StackMapIndex = std::move(Maps.PCData);
+          if (!Maps.StackObjects.empty())
+            StackObjectsSym = addStackObjectCarrierSymbol(
+                Symbols, GCBitmapCarrierIndexes,
+                Asm->getContext().getAsmInfo().getCodePointerSize(),
+                Maps.StackObjects);
+          if (!Maps.OpenDefer.empty())
+            OpenDeferSym = getOrAddHashedAuxCarrierSymbol(
+                Symbols, AuxCarrierIndexes, 'F', Maps.OpenDefer);
+        }
+      }
+      uint32_t ArgsMapSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'F', ArgsMap);
+      uint32_t LocalsMapSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'F', LocalsMap);
+      uint32_t StackMapIndexSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'P', StackMapIndex);
+      uint32_t UnsafePointSym = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'P',
+          IsWholeFunctionAsyncUnsafe
+              ? makeConstantPCTab(InitialUnsafePointValue, CodeSize, PCQuantum)
+              : makePCTab(InitialUnsafePointValue, UnsafePointEntries, CodeSize,
+                          PCQuantum));
+      std::optional<uint32_t> ArgLiveIndexSym;
+      std::optional<uint32_t> AbsentInlineTreeIndexSym;
+      if (const MCContext::GoObjArgLiveInfo *LiveInfo =
+              Asm->getContext().getGoObjFunctionArgLiveInfo(
+                  Symbols[I].Symbol)) {
+        if (LiveInfo->NumSlots == 0 || LiveInfo->NumSlots > 10)
+          report_fatal_error("invalid GoObj argument liveness slot count");
+        unsigned BitmapBytes = divideCeil(LiveInfo->NumSlots, 8u);
+        SmallString<8> ArgLiveInfo;
+        ArgLiveInfo.push_back(static_cast<char>(LiveInfo->StartOffset));
+        ArgLiveInfo.append(BitmapBytes, 0);
+        DenseMap<uint16_t, int32_t> BitmapOffsets;
+        BitmapOffsets[0] = 1;
+        SmallVector<GoObjPCTabEntry, 8> ArgLiveEntries;
+        for (const MCContext::GoObjArgLiveEntry &Entry : LiveInfo->Entries) {
+          if (!Entry.Label || !Entry.Label->isInSection() ||
+              &Entry.Label->getSection() != &Symbols[I].Symbol->getSection())
+            report_fatal_error(
+                "GoObj argument liveness label is outside its function");
+          uint64_t LabelOffset = Asm->getSymbolOffset(*Entry.Label);
+          if (LabelOffset < Symbols[I].SectionBegin ||
+              LabelOffset > Symbols[I].SectionEnd)
+            report_fatal_error(
+                "GoObj argument liveness label is outside its function");
+          uint16_t ValidMask =
+              uint16_t((uint32_t(1) << LiveInfo->NumSlots) - 1);
+          if ((Entry.Bitmap & ~ValidMask) != 0)
+            report_fatal_error("invalid GoObj argument liveness bitmap");
+          auto [It, Inserted] = BitmapOffsets.try_emplace(
+              Entry.Bitmap, static_cast<int32_t>(ArgLiveInfo.size()));
+          if (Inserted)
+            for (unsigned Byte = 0; Byte != BitmapBytes; ++Byte)
+              ArgLiveInfo.push_back(
+                  static_cast<char>(Entry.Bitmap >> (Byte * 8)));
+          ArgLiveEntries.push_back(
+              {LabelOffset - Symbols[I].SectionBegin, It->second});
+        }
+        llvm::stable_sort(ArgLiveEntries,
+                          [](const auto &LHS, const auto &RHS) {
+                            return LHS.PC < RHS.PC;
+                          });
+        SmallVector<GoObjPCTabEntry, 8> NormalizedArgLiveEntries;
+        for (const GoObjPCTabEntry &Entry : ArgLiveEntries) {
+          if (!NormalizedArgLiveEntries.empty() &&
+              NormalizedArgLiveEntries.back().PC == Entry.PC)
+            NormalizedArgLiveEntries.back().Value = Entry.Value;
+          else
+            NormalizedArgLiveEntries.push_back(Entry);
+        }
+        ArgLiveInfoSymbols[Symbols[I].Symbol] = getOrAddHashedAuxCarrierSymbol(
+            Symbols, AuxCarrierIndexes, 'F', ArgLiveInfo);
+        ArgLiveIndexSym = getOrAddHashedAuxCarrierSymbol(
+            Symbols, AuxCarrierIndexes, 'P',
+            makePCTab(1, NormalizedArgLiveEntries, CodeSize, PCQuantum));
+        AbsentInlineTreeIndexSym = getOrAddHashedAuxCarrierSymbol(
+            Symbols, AuxCarrierIndexes, 'P',
+            makeConstantPCTab(-1, CodeSize, PCQuantum));
+      }
+
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncInfo, FuncInfoSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, ArgsMapSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, LocalsMapSym});
+      if (StackObjectsSym)
+        Symbols[I].Auxiliaries.push_back(
+            {GoObj::AuxFuncdata, *StackObjectsSym});
+      if (OpenDeferSym) {
+        if (!StackObjectsSym)
+          Symbols[I].Auxiliaries.emplace_back(GoObj::AuxFuncdata,
+                                              GoObjSymRef{});
+        // FUNCDATA_InlTree is unused by the current runtime, but funcdata is
+        // positional and open-coded defer information is slot 4.
+        Symbols[I].Auxiliaries.emplace_back(GoObj::AuxFuncdata, GoObjSymRef{});
+        Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, *OpenDeferSym});
+      }
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxPcsp, PcspSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxPcfile, PcfileSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxPcline, PclineSym});
+      if (!LineInfo.InlineTree.empty())
+        Symbols[I].Auxiliaries.push_back({GoObj::AuxPcinline, PcinlineSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, UnsafePointSym});
+      Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, StackMapIndexSym});
+      if (ArgLiveIndexSym) {
+        // PCDATA_ArgLiveIndex is slot 3. Slot 2 is reserved for inline stack
+        // unwinding metadata that LLVM does not currently synthesize.
+        Symbols[I].Auxiliaries.push_back(
+            {GoObj::AuxPcdata, *AbsentInlineTreeIndexSym});
+        Symbols[I].Auxiliaries.push_back({GoObj::AuxPcdata, *ArgLiveIndexSym});
+      }
+    }
+  }
+
+  if (DwarfVersion != 0) {
+    uint32_t PointerSize = Asm->getContext().getAsmInfo().getCodePointerSize();
+    StringRef PackageName = Asm->getContext().getGoObjDwarfPackageName();
+    if (!PackageName.empty() && !Config.PackagePath.empty()) {
+      GoObjDwarfCarrierData Carrier;
+      Carrier.Data.append(PackageName.begin(), PackageName.end());
+      addDwarfCarrierSymbol(
+          Symbols, (Twine("go:cuinfo.packagename.") + Config.PackagePath).str(),
+          GoObj::SDWARFCUINFO, GoObj::SymFlagDupok, std::move(Carrier));
+    }
+
+    SmallVector<MCContext::GoObjDebugGlobal, 8> Globals(
+        Asm->getContext().getGoObjDebugGlobals());
+    llvm::sort(Globals, [](const auto &LHS, const auto &RHS) {
+      if (LHS.Symbol->getName() != RHS.Symbol->getName())
+        return LHS.Symbol->getName() < RHS.Symbol->getName();
+      return LHS.Name < RHS.Name;
+    });
+    Globals.erase(llvm::unique(Globals,
+                               [](const auto &LHS, const auto &RHS) {
+                                 return LHS.Symbol == RHS.Symbol &&
+                                        LHS.Name == RHS.Name;
+                               }),
+                  Globals.end());
+    for (size_t First = 0; First != Globals.size();) {
+      size_t Last = First + 1;
+      while (Last != Globals.size() &&
+             Globals[Last].Symbol == Globals[First].Symbol)
+        ++Last;
+
+      std::optional<uint32_t> GlobalIndex;
+      for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
+           I != E; ++I) {
+        if (Symbols[I].Symbol == Globals[First].Symbol) {
+          GlobalIndex = I;
+          break;
+        }
+      }
+      if (!GlobalIndex) {
+        First = Last;
+        continue;
+      }
+
+      const MCSymbol *Gotype =
+          Asm->getContext().getGoObjGotypeTarget(Globals[First].Symbol);
+      if (!Gotype)
+        report_fatal_error(Twine("GoObj DWARF global ") +
+                           Globals[First].Symbol->getName() +
+                           " has no !goobj.gotype target");
+
+      GoObjDwarfCarrierData Carrier;
+      for (size_t I = First; I != Last; ++I) {
+        appendUvarint(Carrier.Data, 10); // DW_ABRV_VARIABLE.
+        appendCString(Carrier.Data, Globals[I].Name);
+        Carrier.Data.push_back(static_cast<char>(1 + PointerSize));
+        Carrier.Data.push_back(dwarf::DW_OP_addr);
+        appendDwarfRelocation(Carrier.Data, Carrier.Relocations, PointerSize,
+                              GoObj::R_ADDR, 0, *GlobalIndex);
+        AppendDwarfGotypeReference(Carrier, Gotype);
+        Carrier.Data.push_back(1); // External.
+      }
+      uint32_t DwarfInfo = addDwarfCarrierSymbol(Symbols, "", GoObj::SDWARFVAR,
+                                                 0, std::move(Carrier));
+      Symbols[*GlobalIndex].Auxiliaries.emplace_back(GoObj::AuxDwarfInfo,
+                                                     DwarfInfo);
+      First = Last;
+    }
+  }
+
+  // Preserve physical kinds while building function metadata, then apply the
+  // semantic kinds carried by explicit frontend sections. Read-only static
+  // symbols synthesized after IR lowering use the module-level fallback.
+  if (Config.SourceKind == GoObj::SourceKind::Compiler) {
+    for (GoObjSymbol &Symbol : Symbols) {
+      std::optional<uint8_t> ExplicitType;
+      ExplicitType = getGoObjExplicitSectionSymbolType(Symbol.Section);
+      if (!ExplicitType && Symbol.ABI == GoObj::SymABIstatic &&
+          Symbol.Type == GoObj::SRODATA)
+        ExplicitType = Asm->getContext().getGoObjStaticRODataType();
+      if (!ExplicitType)
+        continue;
+      Symbol.Type = *ExplicitType;
+    }
+  }
+
+  DenseMap<const MCSymbol *, uint32_t> DefinedSymbolIndexes;
+  for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
+       I != E; ++I) {
+    if (Symbols[I].Symbol)
+      DefinedSymbolIndexes[Symbols[I].Symbol] = I;
+  }
+
+  // Funcdata entries are positional. The frontend supplies the native Go
+  // traceback argument layout, and this writer owns the preceding synthesized
+  // stack-map slots, so join the two only after every MC definition has a
+  // stable symbol index. FUNCDATA_ArgInfo is slot 5.
+  constexpr unsigned ArgInfoFuncdataIndex = 5;
+  for (GoObjSymbol &Symbol : Symbols) {
+    if (!Symbol.Symbol)
+      continue;
+    const MCSymbol *ArgInfo =
+        Asm->getContext().getGoObjFunctionArgInfo(Symbol.Symbol);
+    if (!ArgInfo)
+      continue;
+    auto Target = DefinedSymbolIndexes.find(ArgInfo);
+    if (Target == DefinedSymbolIndexes.end())
+      report_fatal_error("GoObj function arginfo is not a defined symbol");
+
+    unsigned FuncdataCount = llvm::count_if(
+        Symbol.Auxiliaries, [](const GoObjSymbol::Auxiliary &Aux) {
+          return Aux.Type == GoObj::AuxFuncdata;
+        });
+    if (FuncdataCount > ArgInfoFuncdataIndex)
+      report_fatal_error("GoObj function already has an arginfo funcdata slot");
+    while (FuncdataCount++ < ArgInfoFuncdataIndex)
+      Symbol.Auxiliaries.emplace_back(GoObj::AuxFuncdata, GoObjSymRef{});
+    Symbol.Auxiliaries.emplace_back(GoObj::AuxFuncdata, Target->second);
+    auto ArgLiveInfo = ArgLiveInfoSymbols.find(Symbol.Symbol);
+    if (ArgLiveInfo != ArgLiveInfoSymbols.end())
+      Symbol.Auxiliaries.emplace_back(GoObj::AuxFuncdata, ArgLiveInfo->second);
+  }
+
+  std::vector<uint32_t> SymdefSymbols;
+  std::vector<uint32_t> Hashed64defSymbols;
+  std::vector<uint32_t> HasheddefSymbols;
+  std::vector<uint32_t> NonpkgdefSymbols;
+  for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
+       I != E; ++I) {
+    switch (Symbols[I].DefinedBlock) {
+    case GoObj::DefinedSymbolBlock::Symdef:
+      SymdefSymbols.push_back(I);
+      break;
+    case GoObj::DefinedSymbolBlock::Hashed64def:
+      Hashed64defSymbols.push_back(I);
+      break;
+    case GoObj::DefinedSymbolBlock::Hasheddef:
+      HasheddefSymbols.push_back(I);
+      break;
+    case GoObj::DefinedSymbolBlock::Nonpkgdef:
+      NonpkgdefSymbols.push_back(I);
+      break;
+    }
+  }
+
+  // Package export data refers to definitions by the indices assigned by the
+  // Go frontend. Machine layout may reorder definitions, and optimization can
+  // remove compiler-only auxiliary definitions, so rebuild the package block
+  // around the explicit indices instead of exposing MC layout order. Empty
+  // slots preserve indices for definitions that LLVM does not emit; LLVM-owned
+  // auxiliary definitions follow the frontend-owned range.
+  DenseMap<uint32_t, uint32_t> IndexedSymdefs;
+  std::vector<uint32_t> UnindexedSymdefs;
+  std::optional<uint32_t> MaxSymdefIndex;
+  for (uint32_t I : SymdefSymbols) {
+    std::optional<uint32_t> Index =
+        Symbols[I].Symbol
+            ? Asm->getContext().getGoObjPackageSymbolIndex(Symbols[I].Symbol)
+            : std::nullopt;
+    if (!Index) {
+      UnindexedSymdefs.push_back(I);
+      continue;
+    }
+    if (*Index == UINT32_MAX)
+      report_fatal_error("GoObj package symbol index is too large");
+    if (!IndexedSymdefs.try_emplace(*Index, I).second)
+      report_fatal_error("duplicate GoObj package symbol index");
+    MaxSymdefIndex = std::max(MaxSymdefIndex.value_or(0), *Index);
+  }
+  if (MaxSymdefIndex) {
+    std::vector<uint32_t> OrderedSymdefs;
+    OrderedSymdefs.reserve(static_cast<size_t>(*MaxSymdefIndex) + 1 +
+                           UnindexedSymdefs.size());
+    for (uint32_t Index = 0; Index <= *MaxSymdefIndex; ++Index) {
+      auto It = IndexedSymdefs.find(Index);
+      if (It != IndexedSymdefs.end()) {
+        OrderedSymdefs.push_back(It->second);
+        continue;
+      }
+      GoObjSymbol Placeholder;
+      Placeholder.DefinedBlock = GoObj::DefinedSymbolBlock::Symdef;
+      Placeholder.Type = GoObj::SRODATA;
+      Symbols.push_back(std::move(Placeholder));
+      OrderedSymdefs.push_back(
+          checkedUint32(Symbols.size() - 1, "symbol count"));
+    }
+    OrderedSymdefs.insert(OrderedSymdefs.end(), UnindexedSymdefs.begin(),
+                          UnindexedSymdefs.end());
+    SymdefSymbols = std::move(OrderedSymdefs);
+  }
+
+  std::vector<uint32_t> DefinedSymbolOrder;
+  DefinedSymbolOrder.reserve(Symbols.size());
+  DefinedSymbolOrder.insert(DefinedSymbolOrder.end(), SymdefSymbols.begin(),
+                            SymdefSymbols.end());
+  DefinedSymbolOrder.insert(DefinedSymbolOrder.end(),
+                            Hashed64defSymbols.begin(),
+                            Hashed64defSymbols.end());
+  DefinedSymbolOrder.insert(DefinedSymbolOrder.end(), HasheddefSymbols.begin(),
+                            HasheddefSymbols.end());
+  DefinedSymbolOrder.insert(DefinedSymbolOrder.end(), NonpkgdefSymbols.begin(),
+                            NonpkgdefSymbols.end());
+
+  std::vector<GoObjSymRef> DefinedSymRefs(Symbols.size());
+  auto SetDefinedSymRefs = [&](ArrayRef<uint32_t> SymbolIndexes,
+                               uint32_t PkgIdx) {
+    for (uint32_t I = 0, E = checkedUint32(SymbolIndexes.size(),
+                                           "defined symbol block size");
+         I != E; ++I)
+      DefinedSymRefs[SymbolIndexes[I]] = {PkgIdx, I};
+  };
+  SetDefinedSymRefs(SymdefSymbols, GoObj::PkgIdxSelf);
+  SetDefinedSymRefs(Hashed64defSymbols, GoObj::PkgIdxHashed64);
+  SetDefinedSymRefs(HasheddefSymbols, GoObj::PkgIdxHashed);
+  SetDefinedSymRefs(NonpkgdefSymbols, GoObj::PkgIdxNone);
+
+  // LLVM keeps suffixed builtin declarations separate from canonical
+  // definitions so their function types may differ.  GoObj, however, uses a
+  // same-object definition when its canonical name and ABI match.
+  StringMap<uint32_t> DefinedSymbolIdentityIndexes;
+  for (uint32_t I : DefinedSymbolOrder) {
+    const GoObjSymbol &Symbol = Symbols[I];
+    if (Symbol.Name.empty())
+      continue;
+    DefinedSymbolIdentityIndexes.try_emplace(
+        (Twine(Symbol.Name) + "#" + Twine(Symbol.ABI)).str(), I);
+  }
+  auto FindDefinedSymRef = [&](StringRef Name,
+                               uint16_t ABI) -> std::optional<GoObjSymRef> {
+    auto It =
+        DefinedSymbolIdentityIndexes.find((Name + "#" + Twine(ABI)).str());
+    if (It == DefinedSymbolIdentityIndexes.end())
+      return std::nullopt;
+    return DefinedSymRefs[It->second];
+  };
+
+  for (GoObjSymbol &Symbol : Symbols) {
+    for (GoObjSymbol::Relocation &Reloc : Symbol.Relocations) {
+      if (!Reloc.TargetSymbolIndex)
+        continue;
+      if (*Reloc.TargetSymbolIndex >= DefinedSymRefs.size())
+        report_fatal_error(
+            "GoObj synthetic relocation target index is invalid");
+      GoObjSymRef Ref = DefinedSymRefs[*Reloc.TargetSymbolIndex];
+      Reloc.PkgIdx = Ref.PkgIdx;
+      Reloc.SymIdx = Ref.SymIdx;
+    }
+  }
+
+  GoObjSymbolRangeIndex SymbolRanges;
+  for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
+       I != E; ++I) {
+    const GoObjSymbol &Sym = Symbols[I];
+    SymbolRanges.add(Sym.Section, Sym.SectionBegin, Sym.SectionEnd, I);
+  }
+  SymbolRanges.build();
+  auto FindContainingSymbol = [&](const MCSection *Section, uint64_t Offset) {
+    return SymbolRanges.find(Section, Offset);
+  };
+
+  std::vector<GoObjSymbol> NonPkgRefs;
+  StringMap<uint32_t> NonPkgRefIndexes;
+  auto GetNonPkgRefSymIdx = [&](const MCSymbol *Sym, bool IsFunction) {
+    GoObjSymbolIdentity Identity = GetSymbolIdentity(Sym);
+    StringRef Name = Identity.Name;
+    if (Name.empty())
+      report_fatal_error("GoObj relocation target has an empty name");
+
+    uint16_t ABI = GetSymbolABI(Sym, IsFunction);
+    std::string Key = (Name + "#" + Twine(ABI)).str();
+    auto It = NonPkgRefIndexes.find(Key);
+    if (It != NonPkgRefIndexes.end()) {
+      if (Identity.IsLinknameRef)
+        NonPkgRefs[It->second - NonpkgdefSymbols.size()].Flag2 |=
+            GoObj::SymFlagLinkname;
+      return It->second;
+    }
+
+    uint32_t SymIdx = checkedUint32(NonpkgdefSymbols.size() + NonPkgRefs.size(),
+                                    "non-package reference index");
+    NonPkgRefIndexes[Key] = SymIdx;
+
+    GoObjSymbol Ref;
+    Ref.Name = Name.str();
+    Ref.ABI = ABI;
+    if (Identity.IsLinknameRef)
+      Ref.Flag2 |= GoObj::SymFlagLinkname;
+    NonPkgRefs.push_back(std::move(Ref));
+    return SymIdx;
+  };
+
+  std::vector<std::string> PackagePrefixes(1, "");
+  StringMap<uint32_t> PackageIndexes;
+  PackageIndexes[""] = GoObj::PkgIdxInvalid;
+  auto GetPackageIndex = [&](StringRef Prefix) {
+    if (Prefix.empty())
+      report_fatal_error("GoObj imported reference has an empty package");
+    auto It = PackageIndexes.find(Prefix);
+    if (It != PackageIndexes.end())
+      return It->second;
+    uint32_t Index =
+        checkedUint32(PackagePrefixes.size(), "package index count");
+    PackagePrefixes.push_back(Prefix.str());
+    PackageIndexes[Prefix] = Index;
+    return Index;
+  };
+
+  struct IndexedRef {
+    GoObjSymRef Ref;
+    std::string Name;
+    uint8_t Flags2 = 0;
+  };
+  std::vector<IndexedRef> IndexedRefs;
+  DenseMap<uint64_t, uint32_t> IndexedRefIndexes;
+  auto RecordIndexedRef = [&](GoObjSymRef Ref, StringRef Name, uint8_t Flags2) {
+    uint64_t Key = (static_cast<uint64_t>(Ref.PkgIdx) << 32) | Ref.SymIdx;
+    auto It = IndexedRefIndexes.find(Key);
+    if (It != IndexedRefIndexes.end()) {
+      const IndexedRef &Existing = IndexedRefs[It->second];
+      if (Existing.Name != Name || Existing.Flags2 != Flags2)
+        report_fatal_error("conflicting GoObj indexed symbol reference");
+      return;
+    }
+    IndexedRefIndexes[Key] =
+        checkedUint32(IndexedRefs.size(), "indexed reference count");
+    IndexedRefs.push_back({Ref, Name.str(), Flags2});
+  };
+
+  auto GetTargetSymRef = [&](const MCSymbol *Target, unsigned RelocType,
+                             int64_t &Addend) {
+    if (!Target)
+      report_fatal_error("GoObj relocation without a target symbol");
+
+    if (auto It = DefinedSymbolIndexes.find(Target);
+        It != DefinedSymbolIndexes.end())
+      return DefinedSymRefs[It->second];
+
+    if (Target->isInSection()) {
+      uint64_t TargetOffset = Asm->getSymbolOffset(*Target);
+      if (std::optional<uint32_t> SymIdx =
+              FindContainingSymbol(&Target->getSection(), TargetOffset)) {
+        Addend +=
+            static_cast<int64_t>(TargetOffset - Symbols[*SymIdx].SectionBegin);
+        return DefinedSymRefs[*SymIdx];
+      }
+    }
+
+    if (Target->isUndefined()) {
+      GoObjSymbolIdentity Identity = GetSymbolIdentity(Target);
+      if (Identity.IsFMVImplementation)
+        report_fatal_error("Go FMV suffix requires a defined function symbol");
+      if (const MCContext::GoObjImportedSymbolRef *Metadata =
+              Asm->getContext().getGoObjImportedSymbolRef(Target)) {
+        if (Identity.BuiltinIndex || Identity.IsLinknameRef)
+          report_fatal_error("conflicting GoObj symbol reference identity");
+        GoObjSymRef Ref{GetPackageIndex(Metadata->PackagePrefix),
+                        Metadata->SymIdx};
+        RecordIndexedRef(Ref, trimGoObjInlineHash(Identity.Name),
+                         Metadata->Flags2);
+        return Ref;
+      }
+      bool IsFunction;
+      switch (RelocType) {
+      case GoObj::R_CALL:
+      case GoObj::R_CALLARM:
+      case GoObj::R_CALLARM64:
+      case GoObj::R_CALLPOWER:
+      case GoObj::R_CALLMIPS:
+        IsFunction = true;
+        break;
+      default:
+        IsFunction = Asm->getContext().isGoObjFunctionSymbol(Target);
+        break;
+      }
+      if (Identity.BuiltinIndex && !Identity.IsLinknameRef) {
+        if (std::optional<GoObjSymRef> Ref = FindDefinedSymRef(
+                Identity.Name, GetSymbolABI(Target, IsFunction)))
+          return *Ref;
+        return GoObjSymRef{GoObj::PkgIdxBuiltin, *Identity.BuiltinIndex};
+      }
+      return GoObjSymRef{GoObj::PkgIdxNone,
+                         GetNonPkgRefSymIdx(Target, IsFunction)};
+    }
+
+    report_fatal_error(
+        Twine("unsupported GoObj relocation target symbol: name=") +
+        Target->getName() +
+        " temporary=" + Twine(static_cast<unsigned>(Target->isTemporary())) +
+        " variable=" + Twine(static_cast<unsigned>(Target->isVariable())) +
+        " absolute=" + Twine(static_cast<unsigned>(Target->isAbsolute())) +
+        " in-section=" + Twine(static_cast<unsigned>(Target->isInSection())) +
+        " undefined=" + Twine(static_cast<unsigned>(Target->isUndefined())));
+  };
+
+  SmallVector<GoObjRelocationEntry> MergedRelocations;
+  for (const GoObjRelocationEntry &Reloc : Relocations) {
+    bool SameSource = false;
+    if (!MergedRelocations.empty()) {
+      std::optional<uint32_t> PreviousSource = FindContainingSymbol(
+          MergedRelocations.back().Section, MergedRelocations.back().Offset);
+      std::optional<uint32_t> CurrentSource =
+          FindContainingSymbol(Reloc.Section, Reloc.Offset);
+      SameSource =
+          PreviousSource && CurrentSource && *PreviousSource == *CurrentSource;
+    }
+    if (!SameSource ||
+        !TargetObjectWriter->mergeRelocations(MergedRelocations.back(), Reloc))
+      MergedRelocations.push_back(Reloc);
+  }
+
+  for (const GoObjRelocationEntry &Reloc : MergedRelocations) {
+    std::optional<uint32_t> SourceSymIdx =
+        FindContainingSymbol(Reloc.Section, Reloc.Offset);
+    if (!SourceSymIdx)
+      report_fatal_error("GoObj relocation offset is outside all symbols");
+
+    GoObjSymbol &Source = Symbols[*SourceSymIdx];
+    uint64_t LocalOffset = Reloc.Offset - Source.SectionBegin;
+    if (LocalOffset >
+        static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+      report_fatal_error("GoObj relocation offset exceeds int32 range");
+    if (Source.DefinedBlock == GoObj::DefinedSymbolBlock::Hasheddef &&
+        Source.Symbol && Source.Symbol->isTemporary())
+      report_fatal_error(
+          "GoObj private constants with relocations are not supported");
+
+    int64_t Addend = getGoObjRelocAddend(Reloc);
+    uint16_t RelocType = checkedUint16(Reloc.Type, "relocation type");
+    if (const MCSymbol *Base = Reloc.Subtractor) {
+      // Like ELF, express A-B as a PC-relative relocation when B moves
+      // with the relocation site. Go links symbols independently, so being
+      // in the same MC section is not sufficient: B must be in Source.
+      if (Reloc.IsPCRel || RelocType != GoObj::R_ADDR ||
+          !Base->isInSection() || &Base->getSection() != Reloc.Section ||
+          FindContainingSymbol(Reloc.Section, Asm->getSymbolOffset(*Base)) !=
+              SourceSymIdx)
+        report_fatal_error("GoObj relocation subtractor must belong to the "
+                           "source symbol of an absolute relocation");
+      // Go's R_PCREL uses the end of the relocated field as its PC.
+      Addend += static_cast<int64_t>(Reloc.Offset) + Reloc.Size -
+                static_cast<int64_t>(Asm->getSymbolOffset(*Base));
+      RelocType = GoObj::R_PCREL;
+    }
+    if (Source.Symbol) {
+      if (const auto *Overrides =
+              Asm->getContext().getGoObjRelocOverrides(Source.Symbol)) {
+        auto It = std::lower_bound(
+            Overrides->begin(), Overrides->end(),
+            static_cast<uint32_t>(LocalOffset),
+            [](const MCContext::GoObjRelocOverride &Override, uint32_t Offset) {
+              return Override.Offset < Offset;
+            });
+        if (It != Overrides->end() && It->Offset == LocalOffset)
+          RelocType = It->Type;
+      }
+      if (const auto *WeakRelocs =
+              Asm->getContext().getGoObjWeakRelocs(Source.Symbol);
+          WeakRelocs &&
+          std::binary_search(WeakRelocs->begin(), WeakRelocs->end(),
+                             static_cast<uint32_t>(LocalOffset)))
+        RelocType |= GoObj::R_WEAK;
+    }
+
+    // Weakness belongs to a particular caller/callee edge, not to the callee
+    // symbol. Address references and calls from other functions stay strong.
+    switch (RelocType) {
+    case GoObj::R_CALL:
+    case GoObj::R_CALLARM:
+    case GoObj::R_CALLARM64:
+    case GoObj::R_CALLPOWER:
+    case GoObj::R_CALLMIPS:
+      if (Asm->getContext().isGoObjWeakCall(Source.Symbol, Reloc.Symbol))
+        RelocType |= GoObj::R_WEAK;
+      break;
+    default:
+      break;
+    }
+
+    // Native x86 Go objects intentionally leave the TLS relocation target
+    // empty. The linker resolves R_TLS_LE and R_TLS_IE against its
+    // synthetic runtime.tlsg symbol and supplies that symbol itself when it
+    // translates the relocation for external ELF linking.
+    const Triple::ArchType Arch = Asm->getContext().getTargetTriple().getArch();
+    const unsigned TLSRelocType = RelocType & ~GoObj::R_WEAK;
+    const bool IsX86TLS = (Arch == Triple::x86 || Arch == Triple::x86_64) &&
+                         (TLSRelocType == GoObj::R_TLS_LE ||
+                          TLSRelocType == GoObj::R_TLS_IE);
+    GoObjSymRef TargetSymRef =
+        IsX86TLS ? GoObjSymRef{}
+                 : GetTargetSymRef(Reloc.Symbol, Reloc.Type, Addend);
+
+    Source.Relocations.push_back(
+        {static_cast<uint32_t>(LocalOffset), Reloc.Size, RelocType, Addend,
+         TargetSymRef.PkgIdx, TargetSymRef.SymIdx, std::nullopt});
+  }
+
+  // DWARF carriers are synthesized after MC layout, so their type references
+  // have no ordinary MC fixup. Resolve those named symbols through the same
+  // defined/imported/non-package identity machinery as every other GoObj
+  // relocation.
+  for (GoObjSymbol &Source : Symbols) {
+    for (GoObjSymbol::Relocation &Reloc : Source.Relocations) {
+      if (!Reloc.TargetSymbol)
+        continue;
+      if (Reloc.TargetSymbolIndex)
+        report_fatal_error(
+            "GoObj synthetic relocation has two target identities");
+      int64_t Addend = Reloc.Addend;
+      GoObjSymRef Ref = GetTargetSymRef(Reloc.TargetSymbol, Reloc.Type, Addend);
+      Reloc.Addend = Addend;
+      Reloc.PkgIdx = Ref.PkgIdx;
+      Reloc.SymIdx = Ref.SymIdx;
+      Reloc.TargetSymbol = nullptr;
+    }
+  }
+
+  // R_KEEP has no bytes or MC fixup. It is a Go linker reachability edge
+  // carried separately from normal LLVM relocations by !goobj.keep.
+  for (GoObjSymbol &Source : Symbols) {
+    if (!Source.Symbol)
+      continue;
+    const auto *Targets = Asm->getContext().getGoObjKeepTargets(Source.Symbol);
+    if (!Targets)
+      continue;
+    for (const MCSymbol *Target : *Targets) {
+      int64_t Addend = 0;
+      GoObjSymRef TargetSymRef = GetTargetSymRef(Target, GoObj::R_KEEP, Addend);
+      Source.Relocations.push_back({0, 0, GoObj::R_KEEP, Addend,
+                                    TargetSymRef.PkgIdx, TargetSymRef.SymIdx,
+                                    std::nullopt});
+    }
+  }
+
+  for (GoObjSymbol &Source : Symbols) {
+    if (!Source.Symbol)
+      continue;
+    const auto *Labels =
+        Asm->getContext().getGoObjSymbolIndirectCallLabels(Source.Symbol);
+    if (!Labels)
+      continue;
+    if ((Source.Type != GoObj::STEXT && Source.Type != GoObj::STEXTFIPS) ||
+        !Source.Symbol->isInSection())
+      report_fatal_error(
+          "GoObj indirect-call labels belong to a non-text symbol");
+    for (const MCSymbol *Label : *Labels) {
+      if (!Label || !Label->isInSection())
+        report_fatal_error("GoObj indirect-call label was not emitted");
+      if (&Label->getSection() != &Source.Symbol->getSection())
+        report_fatal_error(
+            "GoObj indirect-call label is in a different section");
+      uint64_t LabelOffset = Asm->getSymbolOffset(*Label);
+      if (LabelOffset < Source.SectionBegin || LabelOffset >= Source.SectionEnd)
+        report_fatal_error("GoObj indirect-call label is outside its function");
+      uint32_t Offset = checkedUint32(LabelOffset - Source.SectionBegin,
+                                      "GoObj indirect-call offset");
+      Source.Relocations.push_back({Offset, 0, GoObj::R_CALLIND, 0,
+                                    GoObj::PkgIdxInvalid, 0, std::nullopt});
+    }
+  }
+
+  for (GoObjSymbol &Source : Symbols) {
+    if (!Source.Symbol)
+      continue;
+    const auto *Markers = Asm->getContext().getGoObjMarkerRelocs(Source.Symbol);
+    if (!Markers)
+      continue;
+    for (const MCContext::GoObjMarkerReloc &Marker : *Markers) {
+      int64_t Addend = Marker.Addend;
+      GoObjSymRef TargetSymRef =
+          GetTargetSymRef(Marker.Target, Marker.Type, Addend);
+      Source.Relocations.push_back({0, 0, Marker.Type, Addend,
+                                    TargetSymRef.PkgIdx, TargetSymRef.SymIdx,
+                                    std::nullopt});
+    }
+  }
+
+  for (GoObjSymbol &Source : Symbols) {
+    if (!Source.Symbol)
+      continue;
+    const MCSymbol *Target =
+        Asm->getContext().getGoObjGotypeTarget(Source.Symbol);
+    if (!Target)
+      continue;
+    int64_t Addend = 0;
+    GoObjSymRef TargetSymRef =
+        GetTargetSymRef(Target, GoObj::R_USETYPE, Addend);
+    if (Addend != 0)
+      report_fatal_error("GoObj gotype auxiliary target has an addend");
+    Source.Auxiliaries.emplace_back(GoObj::AuxGotype, TargetSymRef);
+  }
+
+  // FuncInfo stores inline callees as final Go SymRefs rather than
+  // relocations, so patch them after package and symbol numbering is known.
+  for (const PendingFuncInfoPatch &Patch : PendingFuncInfoPatches) {
+    if (Patch.CarrierSymbol >= Symbols.size())
+      report_fatal_error("GoObj FuncInfo patch references an invalid carrier");
+    GoObjSymbol &Carrier = Symbols[Patch.CarrierSymbol];
+    uint64_t InlineTreeOffset = 24 + static_cast<uint64_t>(Patch.FileCount) * 4;
+    uint64_t RequiredSize =
+        InlineTreeOffset + static_cast<uint64_t>(Patch.InlineTree.size()) * 24;
+    if (Carrier.Data.size() != RequiredSize)
+      report_fatal_error("GoObj FuncInfo inline tree has an invalid size");
+
+    for (uint32_t I = 0, E = checkedUint32(Patch.InlineTree.size(),
+                                           "GoObj inline tree size");
+         I != E; ++I) {
+      const GoObjInlineTreeNode &Node = Patch.InlineTree[I];
+      if (!Node.Callee)
+        report_fatal_error("GoObj inline tree node has no callee symbol");
+      int64_t Addend = 0;
+      GoObjSymRef Ref = GetTargetSymRef(Node.Callee, GoObj::R_CALL, Addend);
+      if (Addend != 0)
+        report_fatal_error("GoObj inline callee symbol has an addend");
+      uint64_t NodeOffset = InlineTreeOffset + static_cast<uint64_t>(I) * 24;
+      support::endian::write32le(Carrier.Data.data() + NodeOffset + 12,
+                                 Ref.PkgIdx);
+      support::endian::write32le(Carrier.Data.data() + NodeOffset + 16,
+                                 Ref.SymIdx);
+    }
+  }
+
+  for (GoObjSymbol &Symbol : Symbols) {
+    llvm::stable_sort(Symbol.Relocations,
+                      [](const GoObjSymbol::Relocation &LHS,
+                         const GoObjSymbol::Relocation &RHS) {
+                        return LHS.Offset < RHS.Offset;
+                      });
+  }
+
+  // Match cmd/internal/obj.(*writer).contentHash for text symbols. Their
+  // identity depends on final machine bytes and resolved GoObj SymRefs, so it
+  // must be computed here rather than in the Go frontend.
+  using FullContentHash = std::array<uint8_t, 32>;
+  auto MakeContentHash =
+      [&](uint32_t SymbolIndex,
+          const std::function<void(SHA256 &, uint32_t)> &HashDeferredTarget)
+      -> FullContentHash {
+    const GoObjSymbol &Symbol = Symbols[SymbolIndex];
+    SHA256 Hasher;
+    const char Version = 1;
+    Hasher.update(StringRef(&Version, 1));
+
+    char Header[9];
+    support::endian::write64le(Header, Symbol.Size);
+    if (Symbol.Type == GoObj::STEXT)
+      Header[8] = 't';
+    else if (Symbol.Type == GoObj::STEXTFIPS)
+      Header[8] = 'f';
+    else
+      report_fatal_error("deferred GoObj content hash is not text");
+    Hasher.update(StringRef(Header, sizeof(Header)));
+    Hasher.update(trimGoObjInlineHash(Symbol.Name));
+
+    ArrayRef<char> Data(Symbol.Data);
+    while (!Data.empty() && Data.back() == 0)
+      Data = Data.drop_back();
+    if (!Data.empty())
+      Hasher.update(StringRef(Data.data(), Data.size()));
+
+    GoObjSymRef Self = DefinedSymRefs[SymbolIndex];
+    for (const GoObjSymbol::Relocation &Reloc : Symbol.Relocations) {
+      char Encoded[14];
+      support::endian::write32le(Encoded, Reloc.Offset);
+      Encoded[4] = static_cast<char>(Reloc.Size);
+      Encoded[5] = static_cast<char>(Reloc.Type);
+      support::endian::write64le(Encoded + 6,
+                                 static_cast<uint64_t>(Reloc.Addend));
+      Hasher.update(StringRef(Encoded, sizeof(Encoded)));
+
+      GoObjSymRef Target{Reloc.PkgIdx, Reloc.SymIdx};
+      if (Target.PkgIdx == GoObj::PkgIdxInvalid) {
+        Hasher.update("nil symbol");
+        continue;
+      }
+      if (Target.PkgIdx == Self.PkgIdx && Target.SymIdx == Self.SymIdx) {
+        Hasher.update("self symbol");
+        continue;
+      }
+
+      char Kind;
+      char Index[4];
+      switch (Target.PkgIdx) {
+      case GoObj::PkgIdxHashed64: {
+        Kind = 0;
+        Hasher.update(StringRef(&Kind, 1));
+        if (Target.SymIdx >= Hashed64defSymbols.size())
+          report_fatal_error("invalid GoObj short-hashed reference");
+        const GoObjSymbol &TargetSymbol =
+            Symbols[Hashed64defSymbols[Target.SymIdx]];
+        if (TargetSymbol.ContentHash64)
+          Hasher.update(ArrayRef<uint8_t>(*TargetSymbol.ContentHash64));
+        else if (TargetSymbol.Data.size() == GoObj::Hash64Size)
+          Hasher.update(
+              StringRef(TargetSymbol.Data.data(), TargetSymbol.Data.size()));
+        else
+          report_fatal_error("GoObj short-hashed target has invalid data");
+        break;
+      }
+      case GoObj::PkgIdxHashed: {
+        Kind = 1;
+        Hasher.update(StringRef(&Kind, 1));
+        if (Target.SymIdx >= HasheddefSymbols.size())
+          report_fatal_error("invalid GoObj hashed reference");
+        uint32_t TargetIndex = HasheddefSymbols[Target.SymIdx];
+        if (Symbols[TargetIndex].ContentHash)
+          Hasher.update(ArrayRef<uint8_t>(*Symbols[TargetIndex].ContentHash));
+        else
+          HashDeferredTarget(Hasher, TargetIndex);
+        break;
+      }
+      case GoObj::PkgIdxNone: {
+        Kind = 2;
+        Hasher.update(StringRef(&Kind, 1));
+        if (Target.SymIdx < NonpkgdefSymbols.size()) {
+          Hasher.update(Symbols[NonpkgdefSymbols[Target.SymIdx]].Name);
+        } else {
+          uint32_t RefIndex = Target.SymIdx - NonpkgdefSymbols.size();
+          if (RefIndex >= NonPkgRefs.size())
+            report_fatal_error("invalid GoObj non-package reference");
+          Hasher.update(NonPkgRefs[RefIndex].Name);
+        }
+        break;
+      }
+      case GoObj::PkgIdxBuiltin:
+        Kind = 3;
+        Hasher.update(StringRef(&Kind, 1));
+        support::endian::write32le(Index, Target.SymIdx);
+        Hasher.update(StringRef(Index, sizeof(Index)));
+        break;
+      case GoObj::PkgIdxSelf:
+        Hasher.update(Config.PackagePath);
+        support::endian::write32le(Index, Target.SymIdx);
+        Hasher.update(StringRef(Index, sizeof(Index)));
+        break;
+      default:
+        if (Target.PkgIdx >= PackagePrefixes.size())
+          report_fatal_error("invalid GoObj imported package reference");
+        Hasher.update(PackagePrefixes[Target.PkgIdx]);
+        support::endian::write32le(Index, Target.SymIdx);
+        Hasher.update(StringRef(Index, sizeof(Index)));
+        break;
+      }
+    }
+
+    return Hasher.final();
+  };
+
+  // LLVM may expose direct references between content-addressable closures
+  // that native lowering keeps indirect. Find strongly connected components
+  // before hashing so those real cycles have an order-independent identity.
+  std::vector<int32_t> DFSIndex(Symbols.size(), -1);
+  std::vector<int32_t> LowLink(Symbols.size(), -1);
+  std::vector<int32_t> ComponentOf(Symbols.size(), -1);
+  std::vector<uint8_t> OnStack(Symbols.size());
+  SmallVector<uint32_t, 16> DFSStack;
+  std::vector<SmallVector<uint32_t, 4>> Components;
+  int32_t NextDFSIndex = 0;
+  std::function<void(uint32_t)> FindComponent = [&](uint32_t SymbolIndex) {
+    DFSIndex[SymbolIndex] = NextDFSIndex;
+    LowLink[SymbolIndex] = NextDFSIndex++;
+    DFSStack.push_back(SymbolIndex);
+    OnStack[SymbolIndex] = 1;
+
+    for (const GoObjSymbol::Relocation &Reloc :
+         Symbols[SymbolIndex].Relocations) {
+      if (Reloc.PkgIdx != GoObj::PkgIdxHashed)
+        continue;
+      if (Reloc.SymIdx >= HasheddefSymbols.size())
+        report_fatal_error("invalid GoObj hashed reference");
+      uint32_t TargetIndex = HasheddefSymbols[Reloc.SymIdx];
+      if (TargetIndex == SymbolIndex ||
+          !Symbols[TargetIndex].ComputeContentHash)
+        continue;
+      if (DFSIndex[TargetIndex] == -1) {
+        FindComponent(TargetIndex);
+        LowLink[SymbolIndex] =
+            std::min(LowLink[SymbolIndex], LowLink[TargetIndex]);
+      } else if (OnStack[TargetIndex]) {
+        LowLink[SymbolIndex] =
+            std::min(LowLink[SymbolIndex], DFSIndex[TargetIndex]);
+      }
+    }
+
+    if (LowLink[SymbolIndex] != DFSIndex[SymbolIndex])
+      return;
+    uint32_t Component =
+        checkedUint32(Components.size(), "content hash component count");
+    Components.emplace_back();
+    for (;;) {
+      uint32_t Member = DFSStack.pop_back_val();
+      OnStack[Member] = 0;
+      ComponentOf[Member] = Component;
+      Components.back().push_back(Member);
+      if (Member == SymbolIndex)
+        break;
+    }
+  };
+  for (uint32_t SymbolIndex : HasheddefSymbols)
+    if (Symbols[SymbolIndex].ComputeContentHash && DFSIndex[SymbolIndex] == -1)
+      FindComponent(SymbolIndex);
+
+  std::vector<uint8_t> ContentHashState(Symbols.size());
+  std::vector<uint8_t> ComponentHashState(Components.size());
+  std::vector<std::optional<FullContentHash>> CyclicMemberHashes(
+      Symbols.size());
+  std::function<void(uint32_t)> ComputeContentHash;
+  std::function<void(uint32_t)> ComputeCyclicComponent;
+
+  ComputeCyclicComponent = [&](uint32_t Component) {
+    if (ComponentHashState[Component] == 2)
+      return;
+    if (ComponentHashState[Component] == 1)
+      report_fatal_error("recursive GoObj content hash component dependency");
+    ComponentHashState[Component] = 1;
+
+    const SmallVector<uint32_t, 4> &Members = Components[Component];
+    std::vector<FullContentHash> SortedMemberHashes;
+    SortedMemberHashes.reserve(Members.size());
+    for (uint32_t Member : Members) {
+      FullContentHash LocalHash =
+          MakeContentHash(Member, [&](SHA256 &Hasher, uint32_t TargetIndex) {
+            if (ComponentOf[TargetIndex] != static_cast<int32_t>(Component)) {
+              ComputeContentHash(TargetIndex);
+              Hasher.update(
+                  ArrayRef<uint8_t>(*Symbols[TargetIndex].ContentHash));
+              return;
+            }
+
+            // A local member hash substitutes the canonical target identity
+            // for an intra-component hash. The component digest below brings
+            // every member's final bytes and relocations back into scope.
+            Hasher.update("goobj cycle member v1");
+            const GoObjSymbol &Target = Symbols[TargetIndex];
+            StringRef TargetName = Target.Name;
+            char Identity[6];
+            support::endian::write32le(
+                Identity,
+                checkedUint32(TargetName.size(), "GoObj symbol name"));
+            support::endian::write16le(Identity + 4, Target.ABI);
+            Hasher.update(StringRef(Identity, sizeof(Identity)));
+            Hasher.update(TargetName);
+          });
+      CyclicMemberHashes[Member] = LocalHash;
+      SortedMemberHashes.push_back(LocalHash);
+    }
+
+    llvm::sort(SortedMemberHashes);
+    SHA256 ComponentHasher;
+    const char Version = 1;
+    ComponentHasher.update(StringRef(&Version, 1));
+    ComponentHasher.update("goobj content hash cycle v1");
+    char Count[4];
+    support::endian::write32le(
+        Count, checkedUint32(Members.size(), "content hash component size"));
+    ComponentHasher.update(StringRef(Count, sizeof(Count)));
+    for (const FullContentHash &MemberHash : SortedMemberHashes)
+      ComponentHasher.update(ArrayRef<uint8_t>(MemberHash));
+    FullContentHash ComponentHash = ComponentHasher.final();
+
+    for (uint32_t Member : Members) {
+      FullContentHash FullHash =
+          MakeContentHash(Member, [&](SHA256 &Hasher, uint32_t TargetIndex) {
+            if (ComponentOf[TargetIndex] != static_cast<int32_t>(Component)) {
+              ComputeContentHash(TargetIndex);
+              Hasher.update(
+                  ArrayRef<uint8_t>(*Symbols[TargetIndex].ContentHash));
+              return;
+            }
+            Hasher.update("goobj cycle target v1");
+            Hasher.update(ArrayRef<uint8_t>(ComponentHash));
+            if (!CyclicMemberHashes[TargetIndex])
+              report_fatal_error(
+                  "GoObj cyclic target has no local content hash");
+            Hasher.update(ArrayRef<uint8_t>(*CyclicMemberHashes[TargetIndex]));
+          });
+      std::array<uint8_t, GoObj::HashSize> Hash;
+      std::copy_n(FullHash.begin(), Hash.size(), Hash.begin());
+      Symbols[Member].ContentHash = Hash;
+      ContentHashState[Member] = 2;
+    }
+    ComponentHashState[Component] = 2;
+  };
+
+  ComputeContentHash = [&](uint32_t SymbolIndex) {
+    if (SymbolIndex >= Symbols.size())
+      report_fatal_error("GoObj content hash references an invalid symbol");
+    GoObjSymbol &Symbol = Symbols[SymbolIndex];
+    if (Symbol.ContentHash) {
+      ContentHashState[SymbolIndex] = 2;
+      return;
+    }
+    if (!Symbol.ComputeContentHash)
+      report_fatal_error("GoObj hashed definition has no content hash source");
+    if (ContentHashState[SymbolIndex] == 2)
+      return;
+    int32_t Component = ComponentOf[SymbolIndex];
+    if (Component < 0)
+      report_fatal_error("GoObj deferred content hash has no component");
+    if (Components[Component].size() > 1) {
+      ComputeCyclicComponent(static_cast<uint32_t>(Component));
+      return;
+    }
+    if (ContentHashState[SymbolIndex] == 1)
+      report_fatal_error("recursive acyclic GoObj content hash dependency");
+    ContentHashState[SymbolIndex] = 1;
+    FullContentHash FullHash =
+        MakeContentHash(SymbolIndex, [&](SHA256 &Hasher, uint32_t TargetIndex) {
+          ComputeContentHash(TargetIndex);
+          Hasher.update(ArrayRef<uint8_t>(*Symbols[TargetIndex].ContentHash));
+        });
+    std::array<uint8_t, GoObj::HashSize> Hash;
+    std::copy_n(FullHash.begin(), Hash.size(), Hash.begin());
+    Symbol.ContentHash = Hash;
+    ContentHashState[SymbolIndex] = 2;
+  };
+  for (uint32_t SymbolIndex : HasheddefSymbols)
+    if (Symbols[SymbolIndex].ComputeContentHash)
+      ComputeContentHash(SymbolIndex);
+
+  SmallString<0> Body;
+  raw_svector_ostream BodyOS(Body);
+  support::endian::Writer W(BodyOS, llvm::endianness::little);
+  StringMap<uint32_t> StringOffsets;
+
+  auto CurrentOffset = [&]() {
+    return checkedUint32(GoObj::HeaderSize + BodyOS.tell(), "object offset");
+  };
+
+  auto AddString = [&](StringRef S) {
+    if (StringOffsets.contains(S))
+      return;
+    StringOffsets[S] = CurrentOffset();
+    BodyOS.write(S.data(), S.size());
+  };
+
+  auto WriteStringRef = [&](StringRef S) {
+    auto It = StringOffsets.find(S);
+    assert(It != StringOffsets.end() && "string must be interned first");
+    W.write<uint32_t>(checkedUint32(S.size(), "string length"));
+    W.write<uint32_t>(It->second);
+  };
+
+  auto WriteSymbolRecord = [&](const GoObjSymbol &Symbol) {
+    WriteStringRef(Symbol.Name);
+    W.write<uint16_t>(Symbol.ABI);
+    W.write<uint8_t>(Symbol.Type);
+    W.write<uint8_t>(Symbol.Flag);
+    W.write<uint8_t>(Symbol.Flag2);
+    W.write<uint32_t>(checkedUint32(Symbol.Size, "symbol size"));
+    W.write<uint32_t>(Symbol.Align);
+  };
+
+  AddString("");
+  for (const MCContext::GoObjImport &Import :
+       Asm->getContext().getGoObjImports())
+    AddString(Import.PackagePath);
+  for (StringRef Prefix : PackagePrefixes)
+    AddString(Prefix);
+  for (StringRef File : FilePaths)
+    AddString(File);
+  for (const GoObjSymbol &Symbol : Symbols)
+    AddString(Symbol.Name);
+  for (const GoObjSymbol &Symbol : NonPkgRefs)
+    AddString(Symbol.Name);
+  for (const IndexedRef &Ref : IndexedRefs)
+    AddString(Ref.Name);
+
+  std::array<uint32_t, GoObj::NBlk> Offsets = {};
+  auto MarkBlock = [&](GoObj::Block Block) {
+    Offsets[Block] = CurrentOffset();
+  };
+  auto WriteSymbolBlock = [&](ArrayRef<uint32_t> SymbolIndexes) {
+    for (uint32_t Index : SymbolIndexes)
+      WriteSymbolRecord(Symbols[Index]);
+  };
+
+  MarkBlock(GoObj::BlkAutolib);
+  for (const MCContext::GoObjImport &Import :
+       Asm->getContext().getGoObjImports()) {
+    WriteStringRef(Import.PackagePath);
+    for (uint8_t Byte : Import.Fingerprint)
+      W.write<uint8_t>(Byte);
+  }
+
+  MarkBlock(GoObj::BlkPkgIdx);
+  for (StringRef Prefix : PackagePrefixes)
+    WriteStringRef(Prefix);
+
+  MarkBlock(GoObj::BlkFile);
+  for (StringRef File : FilePaths)
+    WriteStringRef(File);
+
+  MarkBlock(GoObj::BlkSymdef);
+  WriteSymbolBlock(SymdefSymbols);
+
+  MarkBlock(GoObj::BlkHashed64def);
+  WriteSymbolBlock(Hashed64defSymbols);
+
+  MarkBlock(GoObj::BlkHasheddef);
+  WriteSymbolBlock(HasheddefSymbols);
+
+  MarkBlock(GoObj::BlkNonpkgdef);
+  WriteSymbolBlock(NonpkgdefSymbols);
+
+  MarkBlock(GoObj::BlkNonpkgref);
+  for (const GoObjSymbol &Symbol : NonPkgRefs)
+    WriteSymbolRecord(Symbol);
+
+  MarkBlock(GoObj::BlkRefFlags);
+  for (const IndexedRef &Ref : IndexedRefs) {
+    if (Ref.Flags2 == 0)
+      continue;
+    W.write<uint32_t>(Ref.Ref.PkgIdx);
+    W.write<uint32_t>(Ref.Ref.SymIdx);
+    W.write<uint8_t>(0);
+    W.write<uint8_t>(Ref.Flags2);
+  }
+
+  MarkBlock(GoObj::BlkHash64);
+  for (uint32_t Index : Hashed64defSymbols) {
+    const GoObjSymbol &Symbol = Symbols[Index];
+    if (Symbol.ContentHash64) {
+      BodyOS.write(reinterpret_cast<const char *>(Symbol.ContentHash64->data()),
+                   Symbol.ContentHash64->size());
+    } else {
+      if (Symbol.Data.size() != GoObj::Hash64Size)
+        report_fatal_error("GoObj short-hashed definition has invalid data");
+      BodyOS.write(Symbol.Data.data(), Symbol.Data.size());
+    }
+  }
+  MarkBlock(GoObj::BlkHash);
+  for (uint32_t Index : HasheddefSymbols) {
+    const GoObjSymbol &Symbol = Symbols[Index];
+    if (!Symbol.ContentHash)
+      report_fatal_error("GoObj hashed definition has no content hash");
+    for (uint8_t Byte : *Symbol.ContentHash)
+      W.write<uint8_t>(Byte);
+  }
+
+  MarkBlock(GoObj::BlkRelocIdx);
+  uint32_t RelocCount = 0;
+  for (uint32_t Index : DefinedSymbolOrder) {
+    const GoObjSymbol &Symbol = Symbols[Index];
+    W.write<uint32_t>(RelocCount);
+    RelocCount +=
+        checkedUint32(Symbol.Relocations.size(), "symbol relocation count");
+  }
+  W.write<uint32_t>(RelocCount);
+
+  MarkBlock(GoObj::BlkAuxIdx);
+  uint32_t AuxCount = 0;
+  for (uint32_t Index : DefinedSymbolOrder) {
+    const GoObjSymbol &Symbol = Symbols[Index];
+    W.write<uint32_t>(AuxCount);
+    AuxCount += checkedUint32(Symbol.Auxiliaries.size(), "symbol aux count");
+  }
+  W.write<uint32_t>(AuxCount);
+
+  MarkBlock(GoObj::BlkDataIdx);
+  uint32_t DataOffset = 0;
+  for (uint32_t Index : DefinedSymbolOrder) {
+    const GoObjSymbol &Symbol = Symbols[Index];
+    W.write<uint32_t>(DataOffset);
+    DataOffset += checkedUint32(Symbol.Data.size(), "symbol data size");
+  }
+  W.write<uint32_t>(DataOffset);
+
+  MarkBlock(GoObj::BlkReloc);
+  for (uint32_t Index : DefinedSymbolOrder) {
+    const GoObjSymbol &Symbol = Symbols[Index];
+    for (const GoObjSymbol::Relocation &Reloc : Symbol.Relocations) {
+      W.write<uint32_t>(Reloc.Offset);
+      W.write<uint8_t>(Reloc.Size);
+      W.write<uint16_t>(Reloc.Type);
+      W.write<uint64_t>(static_cast<uint64_t>(Reloc.Addend));
+      W.write<uint32_t>(Reloc.PkgIdx);
+      W.write<uint32_t>(Reloc.SymIdx);
+    }
+  }
+
+  MarkBlock(GoObj::BlkAux);
+  for (uint32_t Index : DefinedSymbolOrder) {
+    const GoObjSymbol &Symbol = Symbols[Index];
+    for (const GoObjSymbol::Auxiliary &Aux : Symbol.Auxiliaries) {
+      GoObjSymRef Ref;
+      if (Aux.DirectTarget) {
+        Ref = *Aux.DirectTarget;
+      } else {
+        if (Aux.TargetSymbolIndex >= DefinedSymRefs.size())
+          report_fatal_error("GoObj auxiliary target symbol index is invalid");
+        Ref = DefinedSymRefs[Aux.TargetSymbolIndex];
+      }
+      W.write<uint8_t>(Aux.Type);
+      W.write<uint32_t>(Ref.PkgIdx);
+      W.write<uint32_t>(Ref.SymIdx);
+    }
+  }
+
+  MarkBlock(GoObj::BlkData);
+  for (uint32_t Index : DefinedSymbolOrder) {
+    const GoObjSymbol &Symbol = Symbols[Index];
+    BodyOS.write(Symbol.Data.data(), Symbol.Data.size());
+  }
+
+  MarkBlock(GoObj::BlkRefName);
+  for (const IndexedRef &Ref : IndexedRefs) {
+    W.write<uint32_t>(Ref.Ref.PkgIdx);
+    W.write<uint32_t>(Ref.Ref.SymIdx);
+    WriteStringRef(Ref.Name);
+  }
+
+  MarkBlock(GoObj::BlkEnd);
+
+  SmallString<GoObj::HeaderSize> Header;
+  raw_svector_ostream HeaderOS(Header);
+  support::endian::Writer HeaderW(HeaderOS, llvm::endianness::little);
+  HeaderOS.write(GoObj::Magic, GoObj::MagicSize);
+  for (uint8_t Byte : Config.Fingerprint)
+    HeaderW.write<uint8_t>(Byte);
+  HeaderW.write<uint32_t>(getGoObjFlags(Config));
+
+  for (uint32_t I = 0; I != GoObj::NBlk; ++I)
+    HeaderW.write<uint32_t>(Offsets[I]);
+
+  assert(Header.size() == GoObj::HeaderSize && "unexpected GoObj header size");
+  writeGoObjectTextHeader(OS, Asm->getContext().getTargetTriple(), Config,
+                          Asm->getContext().getGoObjCgoPragmas());
+  OS.write(Header.data(), Header.size());
+  OS.write(Body.data(), Body.size());
+
+  return OS.tell() - StartOffset;
+}
+
+std::unique_ptr<MCObjectWriter>
+llvm::createGoObjObjectWriter(std::unique_ptr<MCGoObjObjectTargetWriter> MOTW,
+                              raw_pwrite_stream &OS) {
+  return std::make_unique<GoObjObjectWriter>(std::move(MOTW), OS);
+}
+
+std::unique_ptr<MCObjectWriter>
+llvm::createGoObjObjectWriter(std::unique_ptr<MCGoObjObjectTargetWriter> MOTW,
+                              raw_pwrite_stream &OS,
+                              MCGoObjObjectWriterConfig Config) {
+  return std::make_unique<GoObjObjectWriter>(std::move(MOTW), OS,
+                                             std::move(Config));
+}

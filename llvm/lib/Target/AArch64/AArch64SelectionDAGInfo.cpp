@@ -12,6 +12,7 @@
 
 #include "AArch64SelectionDAGInfo.h"
 #include "AArch64MachineFunctionInfo.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 
 #define GET_SDNODE_DESC
 #include "AArch64GenSDNodeInfo.inc"
@@ -27,40 +28,105 @@ static cl::opt<bool>
                                 "to lower to librt functions"),
                        cl::init(true));
 
+static cl::opt<bool> UseMOPS("aarch64-use-mops", cl::Hidden,
+                             cl::desc("Enable AArch64 MOPS instructions "
+                                      "for memcpy/memset/memmove"),
+                             cl::init(true));
+
+static SDValue emitGoInlineMemcpyLoop(SelectionDAG &DAG, const SDLoc &DL,
+                                      SDValue Chain, SDValue Dst, SDValue Src,
+                                      SDValue Size, Align DstAlign,
+                                      Align SrcAlign, bool IsVolatile,
+                                      bool AlwaysInline,
+                                      MachinePointerInfo DstPtrInfo,
+                                      MachinePointerInfo SrcPtrInfo) {
+  auto *ConstantSize = dyn_cast<ConstantSDNode>(Size);
+  if (!AlwaysInline || IsVolatile || !ConstantSize ||
+      Dst.getValueType() != MVT::i64 || Src.getValueType() != MVT::i64 ||
+      Size.getValueType() != MVT::i64)
+    return SDValue();
+
+  MachineFunction &MF = DAG.getMachineFunction();
+  if (!goabi::isGoCallingConv(MF.getFunction().getCallingConv()))
+    return SDValue();
+
+  uint64_t CopySize = ConstantSize->getZExtValue();
+  const AArch64Subtarget &STI =
+      MF.getSubtarget<AArch64Subtarget>();
+
+  // Ordinary AArch64 memory permits unaligned accesses. Strict-alignment
+  // targets instead use the widest access supported by both pointers.
+  uint64_t AccessSize = 16;
+  if (STI.requiresStrictAlign()) {
+    uint64_t MinAlign = std::min(DstAlign.value(), SrcAlign.value());
+    AccessSize = MinAlign >= 8 ? 8 : MinAlign >= 4 ? 4 : MinAlign >= 2 ? 2 : 1;
+  }
+
+  // Match Go's arm64 backend by copying 64 bytes per iteration when ordinary
+  // unaligned accesses are available. Strict-alignment targets use four legal
+  // accesses per iteration to improve throughput without making the loop body
+  // excessively large for byte-aligned copies.
+  uint64_t LoopStride = AccessSize == 16 ? 64 : 4 * AccessSize;
+  uint64_t LoopSize = CopySize - CopySize % LoopStride;
+  if (LoopSize < 256)
+    return SDValue();
+
+  Align LoopDstAlign = std::min(DstAlign, Align(AccessSize));
+  Align LoopSrcAlign = std::min(SrcAlign, Align(AccessSize));
+  auto *DstOp =
+      MF.getMachineMemOperand(DstPtrInfo, MachineMemOperand::MOStore,
+                              LocationSize::precise(LoopSize), LoopDstAlign);
+  auto *SrcOp =
+      MF.getMachineMemOperand(SrcPtrInfo, MachineMemOperand::MOLoad,
+                              LocationSize::precise(LoopSize), LoopSrcAlign);
+
+  SDValue Ops[] = {
+      Dst, Src, DAG.getConstant(LoopSize, DL, MVT::i64),
+      DAG.getTargetConstant(AccessSize, DL, MVT::i64),
+      DAG.getTargetConstant(LoopSize / LoopStride, DL, MVT::i64), Chain};
+  const EVT ResultTys[] = {MVT::i64, MVT::i64, MVT::Other};
+  MachineSDNode *Loop =
+      DAG.getMachineNode(AArch64::GoInlineMemcpyLoopPseudo, DL, ResultTys, Ops);
+  DAG.setNodeMemRefs(Loop, {DstOp, SrcOp});
+
+  uint64_t TailSize = CopySize - LoopSize;
+  SDValue LoopChain(Loop, 2);
+  if (!TailSize)
+    return LoopChain;
+
+  return DAG.getMemcpy(
+      LoopChain, DL, SDValue(Loop, 0), SDValue(Loop, 1),
+      DAG.getConstant(TailSize, DL, MVT::i64),
+      commonAlignment(DstAlign, LoopSize), commonAlignment(SrcAlign, LoopSize),
+      IsVolatile, AlwaysInline,
+      /*CI=*/nullptr, std::nullopt, DstPtrInfo.getWithOffset(LoopSize),
+      SrcPtrInfo.getWithOffset(LoopSize));
+}
+
 AArch64SelectionDAGInfo::AArch64SelectionDAGInfo()
     : SelectionDAGGenTargetInfo(AArch64GenSDNodeInfo) {}
 
 void AArch64SelectionDAGInfo::verifyTargetNode(const SelectionDAG &DAG,
                                                const SDNode *N) const {
+  switch (N->getOpcode()) {
+  case AArch64ISD::WrapperLarge:
+    // operand #0 must have type i32, but has type i64
+    return;
+  }
+
   SelectionDAGGenTargetInfo::verifyTargetNode(DAG, N);
 
 #ifndef NDEBUG
   // Some additional checks not yet implemented by verifyTargetNode.
-  constexpr MVT FlagsVT = MVT::i32;
   switch (N->getOpcode()) {
-  case AArch64ISD::SUBS:
-    assert(N->getValueType(1) == FlagsVT);
-    break;
-  case AArch64ISD::ADC:
-  case AArch64ISD::SBC:
-    assert(N->getOperand(2).getValueType() == FlagsVT);
-    break;
-  case AArch64ISD::ADCS:
-  case AArch64ISD::SBCS:
-    assert(N->getValueType(1) == FlagsVT);
-    assert(N->getOperand(2).getValueType() == FlagsVT);
-    break;
-  case AArch64ISD::CSEL:
-  case AArch64ISD::CSINC:
-  case AArch64ISD::BRCOND:
-    assert(N->getOperand(3).getValueType() == FlagsVT);
+  case AArch64ISD::CTTZ_ELTS:
+    assert(N->getOperand(0).getValueType() == N->getOperand(1).getValueType() &&
+           "Expected the general-predicate and mask to have matching types");
     break;
   case AArch64ISD::SADDWT:
   case AArch64ISD::SADDWB:
   case AArch64ISD::UADDWT:
   case AArch64ISD::UADDWB: {
-    assert(N->getNumValues() == 1 && "Expected one result!");
-    assert(N->getNumOperands() == 2 && "Expected two operands!");
     EVT VT = N->getValueType(0);
     EVT Op0VT = N->getOperand(0).getValueType();
     EVT Op1VT = N->getOperand(1).getValueType();
@@ -80,8 +146,6 @@ void AArch64SelectionDAGInfo::verifyTargetNode(const SelectionDAG &DAG,
   case AArch64ISD::SUNPKHI:
   case AArch64ISD::UUNPKLO:
   case AArch64ISD::UUNPKHI: {
-    assert(N->getNumValues() == 1 && "Expected one result!");
-    assert(N->getNumOperands() == 1 && "Expected one operand!");
     EVT VT = N->getValueType(0);
     EVT OpVT = N->getOperand(0).getValueType();
     assert(OpVT.isVector() && VT.isVector() && OpVT.isInteger() &&
@@ -98,8 +162,6 @@ void AArch64SelectionDAGInfo::verifyTargetNode(const SelectionDAG &DAG,
   case AArch64ISD::UZP2:
   case AArch64ISD::ZIP1:
   case AArch64ISD::ZIP2: {
-    assert(N->getNumValues() == 1 && "Expected one result!");
-    assert(N->getNumOperands() == 2 && "Expected two operands!");
     EVT VT = N->getValueType(0);
     EVT Op0VT = N->getOperand(0).getValueType();
     EVT Op1VT = N->getOperand(1).getValueType();
@@ -109,11 +171,8 @@ void AArch64SelectionDAGInfo::verifyTargetNode(const SelectionDAG &DAG,
     break;
   }
   case AArch64ISD::RSHRNB_I: {
-    assert(N->getNumValues() == 1 && "Expected one result!");
-    assert(N->getNumOperands() == 2 && "Expected two operands!");
     EVT VT = N->getValueType(0);
     EVT Op0VT = N->getOperand(0).getValueType();
-    EVT Op1VT = N->getOperand(1).getValueType();
     assert(VT.isVector() && VT.isInteger() &&
            "Expected integer vector result type!");
     assert(Op0VT.isVector() && Op0VT.isInteger() &&
@@ -122,8 +181,8 @@ void AArch64SelectionDAGInfo::verifyTargetNode(const SelectionDAG &DAG,
            "Expected vectors of equal size!");
     assert(VT.getVectorElementCount() == Op0VT.getVectorElementCount() * 2 &&
            "Expected input vector with half the lanes of its result!");
-    assert(Op1VT == MVT::i32 && isa<ConstantSDNode>(N->getOperand(1)) &&
-           "Expected second operand to be a constant i32!");
+    assert(isa<ConstantSDNode>(N->getOperand(1)) &&
+           "Expected second operand to be a constant!");
     break;
   }
   }
@@ -133,15 +192,15 @@ void AArch64SelectionDAGInfo::verifyTargetNode(const SelectionDAG &DAG,
 SDValue AArch64SelectionDAGInfo::EmitMOPS(unsigned Opcode, SelectionDAG &DAG,
                                           const SDLoc &DL, SDValue Chain,
                                           SDValue Dst, SDValue SrcOrValue,
-                                          SDValue Size, Align Alignment,
-                                          bool isVolatile,
+                                          SDValue Size, Align DstAlign,
+                                          Align SrcAlign, bool isVolatile,
                                           MachinePointerInfo DstPtrInfo,
                                           MachinePointerInfo SrcPtrInfo) const {
 
   // Get the constant size of the copy/set.
-  uint64_t ConstSize = 0;
+  LocationSize MemSize = LocationSize::afterPointer();
   if (auto *C = dyn_cast<ConstantSDNode>(Size))
-    ConstSize = C->getZExtValue();
+    MemSize = LocationSize::precise(C->getZExtValue());
 
   const bool IsSet = Opcode == AArch64::MOPSMemorySetPseudo ||
                      Opcode == AArch64::MOPSMemorySetTaggingPseudo;
@@ -152,7 +211,7 @@ SDValue AArch64SelectionDAGInfo::EmitMOPS(unsigned Opcode, SelectionDAG &DAG,
       isVolatile ? MachineMemOperand::MOVolatile : MachineMemOperand::MONone;
   auto DstFlags = MachineMemOperand::MOStore | Vol;
   auto *DstOp =
-      MF.getMachineMemOperand(DstPtrInfo, DstFlags, ConstSize, Alignment);
+      MF.getMachineMemOperand(DstPtrInfo, DstFlags, MemSize, DstAlign);
 
   if (IsSet) {
     // Extend value to i64, if required.
@@ -170,36 +229,44 @@ SDValue AArch64SelectionDAGInfo::EmitMOPS(unsigned Opcode, SelectionDAG &DAG,
 
     auto SrcFlags = MachineMemOperand::MOLoad | Vol;
     auto *SrcOp =
-        MF.getMachineMemOperand(SrcPtrInfo, SrcFlags, ConstSize, Alignment);
+        MF.getMachineMemOperand(SrcPtrInfo, SrcFlags, MemSize, SrcAlign);
     DAG.setNodeMemRefs(Node, {DstOp, SrcOp});
     return SDValue(Node, 3);
   }
 }
 
 SDValue AArch64SelectionDAGInfo::EmitStreamingCompatibleMemLibCall(
-    SelectionDAG &DAG, const SDLoc &DL, SDValue Chain, SDValue Dst, SDValue Src,
+    SelectionDAG &DAG, const SDLoc &DL, SDValue Chain, SDValue Op0, SDValue Op1,
     SDValue Size, RTLIB::Libcall LC) const {
   const AArch64Subtarget &STI =
       DAG.getMachineFunction().getSubtarget<AArch64Subtarget>();
   const AArch64TargetLowering *TLI = STI.getTargetLowering();
   TargetLowering::ArgListTy Args;
-  Args.emplace_back(Dst, PointerType::getUnqual(*DAG.getContext()));
+  Args.emplace_back(Op0, PointerType::getUnqual(*DAG.getContext()));
 
+  bool UsesResult = false;
   RTLIB::Libcall NewLC;
   switch (LC) {
   case RTLIB::MEMCPY: {
     NewLC = RTLIB::SC_MEMCPY;
-    Args.emplace_back(Src, PointerType::getUnqual(*DAG.getContext()));
+    Args.emplace_back(Op1, PointerType::getUnqual(*DAG.getContext()));
     break;
   }
   case RTLIB::MEMMOVE: {
     NewLC = RTLIB::SC_MEMMOVE;
-    Args.emplace_back(Src, PointerType::getUnqual(*DAG.getContext()));
+    Args.emplace_back(Op1, PointerType::getUnqual(*DAG.getContext()));
     break;
   }
   case RTLIB::MEMSET: {
     NewLC = RTLIB::SC_MEMSET;
-    Args.emplace_back(DAG.getZExtOrTrunc(Src, DL, MVT::i32),
+    Args.emplace_back(DAG.getZExtOrTrunc(Op1, DL, MVT::i32),
+                      Type::getInt32Ty(*DAG.getContext()));
+    break;
+  }
+  case RTLIB::MEMCHR: {
+    UsesResult = true;
+    NewLC = RTLIB::SC_MEMCHR;
+    Args.emplace_back(DAG.getZExtOrTrunc(Op1, DL, MVT::i32),
                       Type::getInt32Ty(*DAG.getContext()));
     break;
   }
@@ -207,27 +274,41 @@ SDValue AArch64SelectionDAGInfo::EmitStreamingCompatibleMemLibCall(
     return SDValue();
   }
 
+  RTLIB::LibcallImpl NewLCImpl = DAG.getLibcalls().getLibcallImpl(NewLC);
+  if (NewLCImpl == RTLIB::Unsupported)
+    return SDValue();
+
   EVT PointerVT = TLI->getPointerTy(DAG.getDataLayout());
-  SDValue Symbol = DAG.getExternalSymbol(TLI->getLibcallName(NewLC), PointerVT);
+  SDValue Symbol = DAG.getExternalSymbol(NewLCImpl, PointerVT);
   Args.emplace_back(Size, DAG.getDataLayout().getIntPtrType(*DAG.getContext()));
 
   TargetLowering::CallLoweringInfo CLI(DAG);
   PointerType *RetTy = PointerType::getUnqual(*DAG.getContext());
   CLI.setDebugLoc(DL).setChain(Chain).setLibCallee(
-      TLI->getLibcallCallingConv(NewLC), RetTy, Symbol, std::move(Args));
-  return TLI->LowerCallTo(CLI).second;
+      DAG.getLibcalls().getLibcallImplCallingConv(NewLCImpl), RetTy, Symbol,
+      std::move(Args));
+
+  auto [Result, ChainOut] = TLI->LowerCallTo(CLI);
+  return UsesResult ? DAG.getMergeValues({Result, ChainOut}, DL) : ChainOut;
 }
 
 SDValue AArch64SelectionDAGInfo::EmitTargetCodeForMemcpy(
     SelectionDAG &DAG, const SDLoc &DL, SDValue Chain, SDValue Dst, SDValue Src,
-    SDValue Size, Align Alignment, bool isVolatile, bool AlwaysInline,
-    MachinePointerInfo DstPtrInfo, MachinePointerInfo SrcPtrInfo) const {
+    SDValue Size, Align DstAlign, Align SrcAlign, bool isVolatile,
+    bool AlwaysInline, MachinePointerInfo DstPtrInfo,
+    MachinePointerInfo SrcPtrInfo) const {
   const AArch64Subtarget &STI =
       DAG.getMachineFunction().getSubtarget<AArch64Subtarget>();
 
-  if (STI.hasMOPS())
+  if (UseMOPS && STI.hasMOPS())
     return EmitMOPS(AArch64::MOPSMemoryCopyPseudo, DAG, DL, Chain, Dst, Src,
-                    Size, Alignment, isVolatile, DstPtrInfo, SrcPtrInfo);
+                    Size, DstAlign, SrcAlign, isVolatile, DstPtrInfo,
+                    SrcPtrInfo);
+
+  if (SDValue Loop = emitGoInlineMemcpyLoop(
+          DAG, DL, Chain, Dst, Src, Size, DstAlign, SrcAlign, isVolatile,
+          AlwaysInline, DstPtrInfo, SrcPtrInfo))
+    return Loop;
 
   auto *AFI = DAG.getMachineFunction().getInfo<AArch64FunctionInfo>();
   SMEAttrs Attrs = AFI->getSMEFnAttrs();
@@ -244,9 +325,9 @@ SDValue AArch64SelectionDAGInfo::EmitTargetCodeForMemset(
   const AArch64Subtarget &STI =
       DAG.getMachineFunction().getSubtarget<AArch64Subtarget>();
 
-  if (STI.hasMOPS())
+  if (UseMOPS && STI.hasMOPS())
     return EmitMOPS(AArch64::MOPSMemorySetPseudo, DAG, dl, Chain, Dst, Src,
-                    Size, Alignment, isVolatile, DstPtrInfo,
+                    Size, Alignment, Alignment, isVolatile, DstPtrInfo,
                     MachinePointerInfo{});
 
   auto *AFI = DAG.getMachineFunction().getInfo<AArch64FunctionInfo>();
@@ -259,14 +340,15 @@ SDValue AArch64SelectionDAGInfo::EmitTargetCodeForMemset(
 
 SDValue AArch64SelectionDAGInfo::EmitTargetCodeForMemmove(
     SelectionDAG &DAG, const SDLoc &dl, SDValue Chain, SDValue Dst, SDValue Src,
-    SDValue Size, Align Alignment, bool isVolatile,
+    SDValue Size, Align DstAlign, Align SrcAlign, bool isVolatile,
     MachinePointerInfo DstPtrInfo, MachinePointerInfo SrcPtrInfo) const {
   const AArch64Subtarget &STI =
       DAG.getMachineFunction().getSubtarget<AArch64Subtarget>();
 
-  if (STI.hasMOPS())
+  if (UseMOPS && STI.hasMOPS())
     return EmitMOPS(AArch64::MOPSMemoryMovePseudo, DAG, dl, Chain, Dst, Src,
-                    Size, Alignment, isVolatile, DstPtrInfo, SrcPtrInfo);
+                    Size, DstAlign, SrcAlign, isVolatile, DstPtrInfo,
+                    SrcPtrInfo);
 
   auto *AFI = DAG.getMachineFunction().getInfo<AArch64FunctionInfo>();
   SMEAttrs Attrs = AFI->getSMEFnAttrs();
@@ -274,6 +356,19 @@ SDValue AArch64SelectionDAGInfo::EmitTargetCodeForMemmove(
     return EmitStreamingCompatibleMemLibCall(DAG, dl, Chain, Dst, Src, Size,
                                              RTLIB::MEMMOVE);
   return SDValue();
+}
+
+std::pair<SDValue, SDValue> AArch64SelectionDAGInfo::EmitTargetCodeForMemchr(
+    SelectionDAG &DAG, const SDLoc &dl, SDValue Chain, SDValue Src,
+    SDValue Char, SDValue Length, MachinePointerInfo SrcPtrInfo) const {
+  auto *AFI = DAG.getMachineFunction().getInfo<AArch64FunctionInfo>();
+  SMEAttrs Attrs = AFI->getSMEFnAttrs();
+  if (LowerToSMERoutines && !Attrs.hasNonStreamingInterfaceAndBody()) {
+    SDValue Result = EmitStreamingCompatibleMemLibCall(
+        DAG, dl, Chain, Src, Char, Length, RTLIB::MEMCHR);
+    return std::make_pair(Result.getValue(0), Result.getValue(1));
+  }
+  return std::make_pair(SDValue(), SDValue());
 }
 
 static const int kSetTagLoopThreshold = 176;

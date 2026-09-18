@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace llvm {
@@ -308,7 +309,7 @@ public:
 
   using LocationVec = SmallVector<Location, 8>;
   using LiveOutVec = SmallVector<LiveOutReg, 8>;
-  using ConstantPool = MapVector<uint64_t, uint64_t>;
+  using ConstantPool = MapVector<int64_t, int64_t>;
 
   struct FunctionInfo {
     uint64_t StackSize = 0;
@@ -355,6 +356,11 @@ public:
 
   /// Get function info.
   FnInfoMap &getFnInfos() { return FnInfos; }
+
+  /// Resolve an inline or constant-pool stackmap location to its signed value.
+  /// Returns std::nullopt for non-constant locations or an invalid pool index.
+  LLVM_ABI std::optional<int64_t>
+  getConstantValue(const Location &Loc) const;
 
 private:
   static const char *WSMP;

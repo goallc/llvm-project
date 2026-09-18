@@ -11,13 +11,16 @@
 //===----------------------------------------------------------------------===//
 
 #include "X86SelectionDAGInfo.h"
-#include "X86ISelLowering.h"
 #include "X86InstrInfo.h"
 #include "X86RegisterInfo.h"
 #include "X86Subtarget.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/CodeGen/TargetLowering.h"
+
+#define GET_SDNODE_DESC
+#include "X86GenSDNodeInfo.inc"
 
 using namespace llvm;
 
@@ -27,14 +30,67 @@ static cl::opt<bool>
     UseFSRMForMemcpy("x86-use-fsrm-for-memcpy", cl::Hidden, cl::init(false),
                      cl::desc("Use fast short rep mov in memcpy lowering"));
 
-bool X86SelectionDAGInfo::isTargetMemoryOpcode(unsigned Opcode) const {
-  return Opcode >= X86ISD::FIRST_MEMORY_OPCODE &&
-         Opcode <= X86ISD::LAST_MEMORY_OPCODE;
+X86SelectionDAGInfo::X86SelectionDAGInfo()
+    : SelectionDAGGenTargetInfo(X86GenSDNodeInfo) {}
+
+const char *X86SelectionDAGInfo::getTargetNodeName(unsigned Opcode) const {
+#define NODE_NAME_CASE(NODE)                                                   \
+  case X86ISD::NODE:                                                           \
+    return "X86ISD::" #NODE;
+
+  // These nodes don't have corresponding entries in *.td files yet.
+  switch (static_cast<X86ISD::NodeType>(Opcode)) {
+    NODE_NAME_CASE(POP_FROM_X87_REG)
+    NODE_NAME_CASE(GlobalBaseReg)
+    NODE_NAME_CASE(LCMPXCHG16_SAVE_RBX_DAG)
+    NODE_NAME_CASE(PCMPESTR)
+    NODE_NAME_CASE(PCMPISTR)
+    NODE_NAME_CASE(MGATHER)
+    NODE_NAME_CASE(MSCATTER)
+    NODE_NAME_CASE(AESENCWIDE128KL)
+    NODE_NAME_CASE(AESDECWIDE128KL)
+    NODE_NAME_CASE(AESENCWIDE256KL)
+    NODE_NAME_CASE(AESDECWIDE256KL)
+  }
+#undef NODE_NAME_CASE
+
+  return SelectionDAGGenTargetInfo::getTargetNodeName(Opcode);
 }
 
-bool X86SelectionDAGInfo::isTargetStrictFPOpcode(unsigned Opcode) const {
-  return Opcode >= X86ISD::FIRST_STRICTFP_OPCODE &&
-         Opcode <= X86ISD::LAST_STRICTFP_OPCODE;
+bool X86SelectionDAGInfo::isTargetMemoryOpcode(unsigned Opcode) const {
+  // These nodes don't have corresponding entries in *.td files yet.
+  if (Opcode >= X86ISD::FIRST_MEMORY_OPCODE &&
+      Opcode <= X86ISD::LAST_MEMORY_OPCODE)
+    return true;
+
+  return SelectionDAGGenTargetInfo::isTargetMemoryOpcode(Opcode);
+}
+
+void X86SelectionDAGInfo::verifyTargetNode(const SelectionDAG &DAG,
+                                           const SDNode *N) const {
+  switch (N->getOpcode()) {
+  default:
+    break;
+  case X86ISD::VP2INTERSECT:
+    // invalid number of results; expected 1, got 2
+  case X86ISD::FSETCCM_SAE:
+    // invalid number of operands; expected 3, got 4
+  case X86ISD::CVTTP2SI_SAE:
+  case X86ISD::CVTTP2UI_SAE:
+  case X86ISD::CVTTP2IBS_SAE:
+    // invalid number of operands; expected 1, got 2
+  case X86ISD::CMPMM_SAE:
+    // invalid number of operands; expected 4, got 5
+  case X86ISD::CALL:
+  case X86ISD::NT_BRIND:
+    // operand #1 must have type i32 (iPTR), but has type i64
+  case X86ISD::INSERTQI:
+  case X86ISD::EXTRQI:
+    // result #0 must have type v2i64, but has type v16i8/v8i16
+    return;
+  }
+
+  SelectionDAGGenTargetInfo::verifyTargetNode(DAG, N);
 }
 
 /// Returns the best type to use with repmovs/repstos depending on alignment.
@@ -125,6 +181,7 @@ static SDValue emitConstantSizeRepstos(SelectionDAG &DAG,
                                        SDValue Dst, SDValue Val, uint64_t Size,
                                        EVT SizeVT, Align Alignment,
                                        bool isVolatile, bool AlwaysInline,
+                                       bool ForceRepstos,
                                        MachinePointerInfo DstPtrInfo) {
   /// In case we optimize for size, we use repstosb even if it's less efficient
   /// so we can save the loads/stores of the leftover.
@@ -147,13 +204,13 @@ static SDValue emitConstantSizeRepstos(SelectionDAG &DAG,
     return emitRepstosB(Subtarget, DAG, dl, Chain, Dst, Val, Size);
   }
 
-  if (Size > Subtarget.getMaxInlineSizeThreshold())
+  if (!ForceRepstos && Size > Subtarget.getMaxInlineSizeThreshold())
     return SDValue();
 
   // If not DWORD aligned or size is more than the threshold, call the library.
   // The libc version is likely to be faster for these cases. It can use the
   // address value and run time information about the CPU.
-  if (Alignment < Align(4))
+  if (!ForceRepstos && Alignment < Align(4))
     return SDValue();
 
   MVT BlockType = MVT::i8;
@@ -209,8 +266,18 @@ SDValue X86SelectionDAGInfo::EmitTargetCodeForMemset(
     SelectionDAG &DAG, const SDLoc &dl, SDValue Chain, SDValue Dst, SDValue Val,
     SDValue Size, Align Alignment, bool isVolatile, bool AlwaysInline,
     MachinePointerInfo DstPtrInfo) const {
+  const X86Subtarget &Subtarget =
+      DAG.getMachineFunction().getSubtarget<X86Subtarget>();
+  const bool IsGo = goabi::isGoCallingConv(
+      DAG.getMachineFunction().getFunction().getCallingConv());
+
   // If to a segment-relative address space, use the default lowering.
   if (DstPtrInfo.getAddrSpace() >= 256)
+    return SDValue();
+
+  // REP STOS uses EDI on x86-32. Fall back if the user reserved EDI, so the
+  // generic expander can avoid emitting REP STOS.
+  if (!Subtarget.is64Bit() && Subtarget.isRegisterReservedByUser(X86::EDI))
     return SDValue();
 
   // If the base register might conflict with our physical registers, bail out.
@@ -220,14 +287,21 @@ SDValue X86SelectionDAGInfo::EmitTargetCodeForMemset(
     return SDValue();
 
   ConstantSDNode *ConstantSize = dyn_cast<ConstantSDNode>(Size);
-  if (!ConstantSize)
+  if (!ConstantSize && !IsGo)
     return SDValue();
 
-  const X86Subtarget &Subtarget =
-      DAG.getMachineFunction().getSubtarget<X86Subtarget>();
+  // Go binaries do not provide the C ABI memset symbol. Optimization can
+  // introduce an ordinary llvm.memset even when the frontend emitted only
+  // inline memory operations. The Go SSA write-barrier pass has already
+  // handled pointer-containing heap destinations, so code generation only
+  // needs to perform the raw byte writes without introducing a C ABI call.
+  if (!ConstantSize)
+    return emitRepstos(Subtarget, DAG, dl, Chain, Dst, Val, Size, MVT::i8);
+
   return emitConstantSizeRepstos(
       DAG, Subtarget, dl, Chain, Dst, Val, ConstantSize->getZExtValue(),
-      Size.getValueType(), Alignment, isVolatile, AlwaysInline, DstPtrInfo);
+      Size.getValueType(), Alignment, isVolatile, AlwaysInline, IsGo,
+      DstPtrInfo);
 }
 
 /// Emit a single REP MOVS{B,W,D,Q} instruction.
@@ -313,7 +387,7 @@ static SDValue emitConstantSizeRepmov(
       Chain, dl,
       DAG.getNode(ISD::ADD, dl, DstVT, Dst, DAG.getConstant(Offset, dl, DstVT)),
       DAG.getNode(ISD::ADD, dl, SrcVT, Src, DAG.getConstant(Offset, dl, SrcVT)),
-      DAG.getConstant(BytesLeft, dl, SizeVT), Alignment, isVolatile,
+      DAG.getConstant(BytesLeft, dl, SizeVT), Alignment, Alignment, isVolatile,
       /*AlwaysInline*/ true, /*CI=*/nullptr, std::nullopt,
       DstPtrInfo.getWithOffset(Offset), SrcPtrInfo.getWithOffset(Offset)));
   return DAG.getNode(ISD::TokenFactor, dl, MVT::Other, Results);
@@ -321,10 +395,19 @@ static SDValue emitConstantSizeRepmov(
 
 SDValue X86SelectionDAGInfo::EmitTargetCodeForMemcpy(
     SelectionDAG &DAG, const SDLoc &dl, SDValue Chain, SDValue Dst, SDValue Src,
-    SDValue Size, Align Alignment, bool isVolatile, bool AlwaysInline,
-    MachinePointerInfo DstPtrInfo, MachinePointerInfo SrcPtrInfo) const {
+    SDValue Size, Align DstAlign, Align SrcAlign, bool isVolatile,
+    bool AlwaysInline, MachinePointerInfo DstPtrInfo,
+    MachinePointerInfo SrcPtrInfo) const {
+  const X86Subtarget &Subtarget =
+      DAG.getMachineFunction().getSubtarget<X86Subtarget>();
+
   // If to a segment-relative address space, use the default lowering.
   if (DstPtrInfo.getAddrSpace() >= 256 || SrcPtrInfo.getAddrSpace() >= 256)
+    return SDValue();
+
+  // REP MOVS uses EDI/ESI on x86-32. fall back only when EDI is
+  // reserved so the generic expander can avoid emitting REP MOVS.
+  if (!Subtarget.is64Bit() && Subtarget.isRegisterReservedByUser(X86::EDI))
     return SDValue();
 
   // If the base registers conflict with our physical registers, use the default
@@ -334,19 +417,18 @@ SDValue X86SelectionDAGInfo::EmitTargetCodeForMemcpy(
   if (isBaseRegConflictPossible(DAG, ClobberSet))
     return SDValue();
 
-  const X86Subtarget &Subtarget =
-      DAG.getMachineFunction().getSubtarget<X86Subtarget>();
-
   // If enabled and available, use fast short rep mov.
   if (UseFSRMForMemcpy && Subtarget.hasFSRM())
     return emitRepmovs(Subtarget, DAG, dl, Chain, Dst, Src, Size, MVT::i8);
 
-  /// Handle constant sizes
-  if (ConstantSDNode *ConstantSize = dyn_cast<ConstantSDNode>(Size))
+  // Handle constant sizes
+  if (ConstantSDNode *ConstantSize = dyn_cast<ConstantSDNode>(Size)) {
+    Align Alignment = std::min(DstAlign, SrcAlign);
     return emitConstantSizeRepmov(DAG, Subtarget, dl, Chain, Dst, Src,
                                   ConstantSize->getZExtValue(),
                                   Size.getValueType(), Alignment, isVolatile,
                                   AlwaysInline, DstPtrInfo, SrcPtrInfo);
+  }
 
   return SDValue();
 }

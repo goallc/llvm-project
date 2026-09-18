@@ -13,8 +13,11 @@
 
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/Analysis/UniformityAnalysis.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/Analysis.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
@@ -24,17 +27,20 @@
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
-#include "llvm/CodeGen/WasmEHFuncInfo.h"
 #include "llvm/CodeGen/WinEHFuncInfo.h"
+#include "llvm/IR/CFG.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Statepoint.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetMachine.h"
 #include <algorithm>
 using namespace llvm;
 
@@ -81,6 +87,186 @@ static ISD::NodeType getPreferredExtendForValue(const Instruction *I) {
     ExtendKind = ISD::SIGN_EXTEND;
 
   return ExtendKind;
+}
+
+/// Return true if a statepoint can execute after I. A backedge to I's block is
+/// intentionally scanned from the beginning, since values from the previous
+/// iteration may then be live at an earlier statepoint in the next iteration.
+static bool hasReachableStatepointAfter(const Instruction *I) {
+  for (const Instruction &After :
+       make_range(std::next(I->getIterator()), I->getParent()->end()))
+    if (isa<GCStatepointInst>(After))
+      return true;
+
+  SmallVector<const BasicBlock *, 8> Worklist(successors(I->getParent()));
+  SmallPtrSet<const BasicBlock *, 8> Seen;
+  while (!Worklist.empty()) {
+    const BasicBlock *BB = Worklist.pop_back_val();
+    if (!Seen.insert(BB).second)
+      continue;
+    for (const Instruction &Inst : *BB)
+      if (isa<GCStatepointInst>(Inst))
+        return true;
+    llvm::append_range(Worklist, successors(BB));
+  }
+  return false;
+}
+
+static void findGoByValCallCarriers(FunctionLoweringInfo &FuncInfo) {
+  if (FuncInfo.MF->getTarget().getOptLevel() == CodeGenOptLevel::None ||
+      !FuncInfo.MF->getTarget().getTargetTriple().isOSBinFormatGoObj() ||
+      !goabi::isGoCallingConv(FuncInfo.Fn->getCallingConv()))
+    return;
+
+  for (const auto &[AI, FI] : FuncInfo.StaticAllocaMap) {
+    (void)FI;
+    if (isSingleByValCallCarrier(*AI, FuncInfo.MF->getDataLayout(),
+                                 /*AllowGCLiveUses=*/true))
+      FuncInfo.GoByValCallCarriers.insert(AI);
+  }
+}
+
+/// Find small scalar projections of a pure goret carrier. This deliberately
+/// recognizes only the straight-line shape produced by Go aggregate result
+/// reconstruction. In particular, a pointer projection is rejected if any
+/// statepoint can execute later: introducing such a value after statepoint
+/// liveness has been computed would otherwise leave it untracked.
+static void findGoRetValueProjections(FunctionLoweringInfo &FuncInfo) {
+  const DataLayout &DL = FuncInfo.MF->getDataLayout();
+  const bool AllowGCLiveUses =
+      FuncInfo.MF->getTarget().getTargetTriple().isOSBinFormatGoObj() &&
+      goabi::isGoCallingConv(FuncInfo.Fn->getCallingConv());
+
+  for (const auto &[AI, FI] : FuncInfo.StaticAllocaMap) {
+    (void)FI;
+    const CallBase *DefiningCall = nullptr;
+    Type *GoRetType = nullptr;
+    unsigned NumGoRetUses = 0;
+    SmallVector<const LoadInst *, 4> Loads;
+    SmallVector<const Value *, 8> Worklist(1, AI);
+    SmallPtrSet<const Value *, 8> Seen;
+    bool Valid = true;
+
+    while (Valid && !Worklist.empty()) {
+      const Value *Pointer = Worklist.pop_back_val();
+      if (!Seen.insert(Pointer).second)
+        continue;
+
+      for (const Use &U : Pointer->uses()) {
+        const User *Usr = U.getUser();
+        if (const auto *GEP = dyn_cast<GetElementPtrInst>(Usr)) {
+          Worklist.push_back(GEP);
+          continue;
+        }
+        if (const auto *BC = dyn_cast<BitCastInst>(Usr)) {
+          Worklist.push_back(BC);
+          continue;
+        }
+        if (const auto *LI = dyn_cast<LoadInst>(Usr)) {
+          if (LI->getPointerOperand() != Pointer || !LI->isSimple() ||
+              !(LI->getType()->isPointerTy() || LI->getType()->isIntegerTy() ||
+                LI->getType()->isFloatingPointTy())) {
+            Valid = false;
+            break;
+          }
+          Loads.push_back(LI);
+          continue;
+        }
+        if (const auto *II = dyn_cast<IntrinsicInst>(Usr)) {
+          if ((II->getIntrinsicID() == Intrinsic::lifetime_start ||
+               II->getIntrinsicID() == Intrinsic::lifetime_end) &&
+              II->getArgOperand(0) == Pointer)
+            continue;
+        }
+        if (const auto *CB = dyn_cast<CallBase>(Usr)) {
+          if (AllowGCLiveUses && Pointer == AI && isa<GCStatepointInst>(CB) &&
+              CB->isOperandBundleOfType(LLVMContext::OB_gc_live,
+                                        U.getOperandNo()))
+            continue;
+          if (Pointer == AI && isa<GCStatepointInst>(CB) &&
+              CB->isArgOperand(&U)) {
+            unsigned ArgNo = CB->getArgOperandNo(&U);
+            if (CB->paramHasAttr(ArgNo, Attribute::GoRet) &&
+                (!DefiningCall || DefiningCall == CB)) {
+              DefiningCall = CB;
+              GoRetType = CB->getParamGoRetType(ArgNo);
+              ++NumGoRetUses;
+              continue;
+            }
+          }
+        }
+        Valid = false;
+        break;
+      }
+    }
+
+    if (!Valid || !DefiningCall || NumGoRetUses != 1 || !GoRetType ||
+        Loads.empty() || Loads.size() > 8)
+      continue;
+
+    std::optional<TypeSize> CarrierSize = AI->getAllocationSize(DL);
+    TypeSize GoRetSize = DL.getTypeAllocSize(GoRetType);
+    if (!CarrierSize || CarrierSize->isScalable() || GoRetSize.isScalable() ||
+        *CarrierSize != GoRetSize)
+      continue;
+
+    SmallVector<FunctionLoweringInfo::GoRetValueProjection, 4> Projections;
+    SmallSet<int64_t, 8> SeenOffsets;
+    const BasicBlock *ProjectionBB = Loads.front()->getParent();
+    const BasicBlock *CallBB = DefiningCall->getParent();
+    if (ProjectionBB != CallBB) {
+      const auto *Branch = dyn_cast<UncondBrInst>(CallBB->getTerminator());
+      if (!Branch || Branch->getSuccessor(0) != ProjectionBB ||
+          ProjectionBB->getSinglePredecessor() != CallBB)
+        Valid = false;
+    }
+    for (const LoadInst *LI : Loads) {
+      if (!Valid || LI->getParent() != ProjectionBB ||
+          (ProjectionBB == CallBB && !DefiningCall->comesBefore(LI))) {
+        Valid = false;
+        break;
+      }
+
+      int64_t Offset = 0;
+      const Value *Base =
+          GetPointerBaseWithConstantOffset(LI->getPointerOperand(), Offset, DL);
+      TypeSize LoadSize = DL.getTypeStoreSize(LI->getType());
+      if (Base != AI || Offset < 0 || LoadSize.isScalable() ||
+          LoadSize.getFixedValue() > 16 ||
+          static_cast<uint64_t>(Offset) + LoadSize.getFixedValue() >
+              CarrierSize->getFixedValue() ||
+          !SeenOffsets.insert(Offset).second) {
+        Valid = false;
+        break;
+      }
+
+      EVT VT = FuncInfo.TLI->getValueType(DL, LI->getType());
+      // Target call lowering copies each projection through one virtual
+      // register without running the ordinary getCopyToParts legalization.
+      // Keep promoted scalar types (for example i8 on AArch64) on the memory
+      // path; otherwise CopyToReg would introduce an illegal type after the
+      // statepoint DAG has already been built.
+      if (!VT.isSimple() || !FuncInfo.TLI->isTypeLegal(VT) ||
+          FuncInfo.TLI->getNumRegisters(AI->getContext(), VT) != 1) {
+        Valid = false;
+        break;
+      }
+
+      if (LI->getType()->isPointerTy() && hasReachableStatepointAfter(LI)) {
+        Valid = false;
+        break;
+      }
+
+      Projections.push_back({LI, static_cast<uint64_t>(Offset), Register()});
+    }
+
+    if (!Valid)
+      continue;
+
+    for (auto &Projection : Projections)
+      Projection.Reg = FuncInfo.CreateRegs(Projection.Load);
+    FuncInfo.GoRetValueProjections.try_emplace(AI, std::move(Projections));
+  }
 }
 
 void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
@@ -133,7 +319,6 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
   for (const BasicBlock &BB : *Fn) {
     for (const Instruction &I : BB) {
       if (const AllocaInst *AI = dyn_cast<AllocaInst>(&I)) {
-        Type *Ty = AI->getAllocatedType();
         Align Alignment = AI->getAlign();
 
         // Static allocas can be folded into the initial stack frame
@@ -141,12 +326,11 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
         // do this if there is an extra alignment requirement.
         if (AI->isStaticAlloca() &&
             (TFI->isStackRealignable() || (Alignment <= StackAlign))) {
-          const ConstantInt *CUI = cast<ConstantInt>(AI->getArraySize());
-          uint64_t TySize =
-              MF->getDataLayout().getTypeAllocSize(Ty).getKnownMinValue();
-
-          TySize *= CUI->getZExtValue();   // Get total allocated size.
-          if (TySize == 0) TySize = 1; // Don't create zero-sized stack objects.
+          TypeSize AllocaSize = AI->getAllocationSize(MF->getDataLayout())
+                                    .value_or(TypeSize::getZero());
+          uint64_t TySize = AllocaSize.getKnownMinValue();
+          if (TySize == 0)
+            TySize = 1; // Don't create zero-sized stack objects.
           int FrameIndex = INT_MAX;
           auto Iter = CatchObjects.find(AI);
           if (Iter != CatchObjects.end() && TLI->needsFixedCatchObjects()) {
@@ -161,7 +345,7 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
           // Scalable vectors and structures that contain scalable vectors may
           // need a special StackID to distinguish them from other (fixed size)
           // stack objects.
-          if (Ty->isScalableTy())
+          if (AllocaSize.isScalable())
             MF->getFrameInfo().setStackID(FrameIndex,
                                           TFI->getStackIDForScalableVectors());
 
@@ -242,6 +426,13 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
     }
   }
 
+  findGoByValCallCarriers(*this);
+  // Result projection is an optional copy-elision optimization. Keep the
+  // explicit result home in unoptimized code, just as for byval carriers.
+  if (DAG->getOptLevel() != CodeGenOptLevel::None) {
+    findGoRetValueProjections(*this);
+  }
+
   // Create an initial MachineBasicBlock for each LLVM BasicBlock in F.  This
   // also creates the initial PHI MachineInstrs, though none of the input
   // operands are populated.
@@ -277,8 +468,14 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
     // Transfer the address-taken flag. This is necessary because there could
     // be multiple MachineBasicBlocks corresponding to one BasicBlock, and only
     // the first one should be marked.
-    if (BB.hasAddressTaken())
-      MBB->setAddressTakenIRBlock(const_cast<BasicBlock *>(&BB));
+    // Only mark the block if the BlockAddress actually has users. The
+    // hasAddressTaken flag may be stale if the BlockAddress was optimized away
+    // but the constant still exists in the uniquing table.
+    if (BB.hasAddressTaken()) {
+      if (BlockAddress *BA = BlockAddress::lookup(&BB))
+        if (!BA->hasZeroLiveUses())
+          MBB->setAddressTakenIRBlock(const_cast<BasicBlock *>(&BB));
+    }
 
     // Mark landing pad blocks.
     if (BB.isEHPad())
@@ -327,28 +524,35 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
       UME.Handler = getMBB(cast<const BasicBlock *>(UME.Handler));
     for (ClrEHUnwindMapEntry &CME : EHInfo.ClrEHUnwindMap)
       CME.Handler = getMBB(cast<const BasicBlock *>(CME.Handler));
-  } else if (Personality == EHPersonality::Wasm_CXX) {
-    WasmEHFuncInfo &EHInfo = *MF->getWasmEHFuncInfo();
-    calculateWasmEHInfo(&fn, EHInfo);
-
-    // Map all BB references in the Wasm EH data to MBBs.
-    DenseMap<BBOrMBB, BBOrMBB> SrcToUnwindDest;
-    for (auto &KV : EHInfo.SrcToUnwindDest) {
-      const auto *Src = cast<const BasicBlock *>(KV.first);
-      const auto *Dest = cast<const BasicBlock *>(KV.second);
-      SrcToUnwindDest[getMBB(Src)] = getMBB(Dest);
-    }
-    EHInfo.SrcToUnwindDest = std::move(SrcToUnwindDest);
-    DenseMap<BBOrMBB, SmallPtrSet<BBOrMBB, 4>> UnwindDestToSrcs;
-    for (auto &KV : EHInfo.UnwindDestToSrcs) {
-      const auto *Dest = cast<const BasicBlock *>(KV.first);
-      MachineBasicBlock *DestMBB = getMBB(Dest);
-      auto &Srcs = UnwindDestToSrcs[DestMBB];
-      for (const auto P : KV.second)
-        Srcs.insert(getMBB(cast<const BasicBlock *>(P)));
-    }
-    EHInfo.UnwindDestToSrcs = std::move(UnwindDestToSrcs);
   }
+}
+
+void FunctionLoweringInfo::invalidateDebugFrameIndex(int FI) {
+  EliminatedDebugFrameIndices.insert(FI);
+
+  // Declarations describe storage for the whole function. Once that storage
+  // is eliminated, only independent SSA value descriptions remain valid.
+  llvm::erase_if(MF->getVariableDbgInfo(),
+                 [FI](const MachineFunction::VariableDbgInfo &VI) {
+                   return VI.inStackSlot() && VI.getStackSlot() == FI;
+                 });
+}
+
+void FunctionLoweringInfo::finalizeDebugFrameIndices() {
+  if (EliminatedDebugFrameIndices.empty())
+    return;
+  for (MachineBasicBlock &MBB : *MF)
+    for (MachineInstr &MI : MBB)
+      if (MI.isDebugValue())
+        for (MachineOperand &Op : MI.debug_operands())
+          if (Op.isFI() &&
+              EliminatedDebugFrameIndices.contains(Op.getIndex())) {
+            Op.ChangeToRegister(0, false);
+            if (MI.isNonListDebugValue())
+              MI.getDebugExpressionOp().setMetadata(
+                  DIExpression::convertToUndefExpression(
+                      MI.getDebugExpression()));
+          }
 }
 
 /// clear - Clear out all the function-specific state. This returns this
@@ -359,11 +563,16 @@ void FunctionLoweringInfo::clear() {
   ValueMap.clear();
   VirtReg2Value.clear();
   StaticAllocaMap.clear();
+  GoByValCallCarriers.clear();
+  EliminatedDebugFrameIndices.clear();
+  GoRetValueProjections.clear();
+  ActiveGoRetValueProjections.clear();
   LiveOutRegInfo.clear();
   VisitedBBs.clear();
   ArgDbgValues.clear();
   DescribedArgs.clear();
   ByValArgFrameIndexMap.clear();
+  ArgumentValueHomeMap.clear();
   RegFixups.clear();
   RegsWithFixups.clear();
   StatepointStackSlots.clear();
@@ -402,7 +611,7 @@ Register FunctionLoweringInfo::CreateRegs(Type *Ty, bool isDivergent) {
 }
 
 Register FunctionLoweringInfo::CreateRegs(const Value *V) {
-  return CreateRegs(V->getType(), UA && UA->isDivergent(V) &&
+  return CreateRegs(V->getType(), UA && UA->isDivergentAtDef(V) &&
                                       !TLI->requiresUniformRegister(*MF, V));
 }
 
@@ -442,7 +651,7 @@ FunctionLoweringInfo::GetLiveOutRegInfo(Register Reg, unsigned BitWidth) {
 /// register based on the LiveOutInfo of its operands.
 void FunctionLoweringInfo::ComputePHILiveOutRegInfo(const PHINode *PN) {
   Type *Ty = PN->getType();
-  if (!Ty->isIntegerTy() || Ty->isVectorTy())
+  if (!Ty->isIntegerTy())
     return;
 
   SmallVector<EVT, 1> ValueVTs;
@@ -451,7 +660,9 @@ void FunctionLoweringInfo::ComputePHILiveOutRegInfo(const PHINode *PN) {
          "PHIs with non-vector integer types should have a single VT.");
   EVT IntVT = ValueVTs[0];
 
-  if (TLI->getNumRegisters(PN->getContext(), IntVT) != 1)
+  unsigned NumRegisters = TLI->getNumRegisters(PN->getContext(), IntVT);
+  // FIXME: Support multiple registers for big endian targets.
+  if (NumRegisters != 1 && MF->getDataLayout().isBigEndian())
     return;
   IntVT = TLI->getRegisterType(PN->getContext(), IntVT);
   unsigned BitWidth = IntVT.getSizeInBits();
@@ -460,82 +671,95 @@ void FunctionLoweringInfo::ComputePHILiveOutRegInfo(const PHINode *PN) {
   if (It == ValueMap.end())
     return;
 
-  Register DestReg = It->second;
-  if (DestReg == 0)
+  Register BaseReg = It->second;
+  if (!BaseReg)
     return;
-  assert(DestReg.isVirtual() && "Expected a virtual reg");
-  LiveOutRegInfo.grow(DestReg);
-  LiveOutInfo &DestLOI = LiveOutRegInfo[DestReg];
+  assert(BaseReg.isVirtual() && "Expected a virtual reg");
 
-  Value *V = PN->getIncomingValue(0);
-  if (isa<UndefValue>(V) || isa<ConstantExpr>(V)) {
-    DestLOI.NumSignBits = 1;
-    DestLOI.Known = KnownBits(BitWidth);
-    return;
-  }
+  for (unsigned RegIdx = 0; RegIdx < NumRegisters; ++RegIdx) {
+    // Split registers are assigned sequentially.
+    Register DestReg = BaseReg.id() + RegIdx;
+    LiveOutRegInfo.grow(DestReg);
+    LiveOutInfo &DestLOI = LiveOutRegInfo[DestReg];
 
-  if (ConstantInt *CI = dyn_cast<ConstantInt>(V)) {
-    APInt Val;
-    if (TLI->signExtendConstant(CI))
-      Val = CI->getValue().sext(BitWidth);
-    else
-      Val = CI->getValue().zext(BitWidth);
-    DestLOI.NumSignBits = Val.getNumSignBits();
-    DestLOI.Known = KnownBits::makeConstant(Val);
-  } else {
-    assert(ValueMap.count(V) && "V should have been placed in ValueMap when its"
-                                "CopyToReg node was created.");
-    Register SrcReg = ValueMap[V];
-    if (!SrcReg.isVirtual()) {
-      DestLOI.IsValid = false;
-      return;
-    }
-    const LiveOutInfo *SrcLOI = GetLiveOutRegInfo(SrcReg, BitWidth);
-    if (!SrcLOI) {
-      DestLOI.IsValid = false;
-      return;
-    }
-    DestLOI = *SrcLOI;
-  }
-
-  assert(DestLOI.Known.Zero.getBitWidth() == BitWidth &&
-         DestLOI.Known.One.getBitWidth() == BitWidth &&
-         "Masks should have the same bit width as the type.");
-
-  for (unsigned i = 1, e = PN->getNumIncomingValues(); i != e; ++i) {
-    Value *V = PN->getIncomingValue(i);
+    Value *V = PN->getIncomingValue(0);
     if (isa<UndefValue>(V) || isa<ConstantExpr>(V)) {
       DestLOI.NumSignBits = 1;
       DestLOI.Known = KnownBits(BitWidth);
-      return;
+      continue;
     }
 
     if (ConstantInt *CI = dyn_cast<ConstantInt>(V)) {
       APInt Val;
       if (TLI->signExtendConstant(CI))
-        Val = CI->getValue().sext(BitWidth);
+        Val = CI->getValue().sext(BitWidth * NumRegisters);
       else
-        Val = CI->getValue().zext(BitWidth);
-      DestLOI.NumSignBits = std::min(DestLOI.NumSignBits, Val.getNumSignBits());
-      DestLOI.Known.Zero &= ~Val;
-      DestLOI.Known.One &= Val;
-      continue;
+        Val = CI->getValue().zext(BitWidth * NumRegisters);
+      APInt Extracted = Val.extractBits(BitWidth, BitWidth * RegIdx);
+      DestLOI.NumSignBits = Extracted.getNumSignBits();
+      DestLOI.Known = KnownBits::makeConstant(Extracted);
+    } else {
+      assert(ValueMap.count(V) &&
+             "V should have been placed in ValueMap when its"
+             "CopyToReg node was created.");
+      Register SrcReg = ValueMap[V];
+      if (!SrcReg.isVirtual()) {
+        DestLOI.IsValid = false;
+        continue;
+      }
+      // Split registers are assigned sequentially.
+      SrcReg = SrcReg.id() + RegIdx;
+      const LiveOutInfo *SrcLOI = GetLiveOutRegInfo(SrcReg, BitWidth);
+      if (!SrcLOI) {
+        DestLOI.IsValid = false;
+        continue;
+      }
+      DestLOI = *SrcLOI;
     }
 
-    assert(ValueMap.count(V) && "V should have been placed in ValueMap when "
-                                "its CopyToReg node was created.");
-    Register SrcReg = ValueMap[V];
-    if (!SrcReg.isVirtual()) {
-      DestLOI.IsValid = false;
-      return;
+    assert(DestLOI.Known.Zero.getBitWidth() == BitWidth &&
+           DestLOI.Known.One.getBitWidth() == BitWidth &&
+           "Masks should have the same bit width as the type.");
+
+    for (unsigned i = 1, e = PN->getNumIncomingValues(); i != e; ++i) {
+      Value *V = PN->getIncomingValue(i);
+      if (isa<UndefValue>(V) || isa<ConstantExpr>(V)) {
+        DestLOI.NumSignBits = 1;
+        DestLOI.Known = KnownBits(BitWidth);
+        break;
+      }
+
+      if (ConstantInt *CI = dyn_cast<ConstantInt>(V)) {
+        APInt Val;
+        if (TLI->signExtendConstant(CI))
+          Val = CI->getValue().sext(BitWidth * NumRegisters);
+        else
+          Val = CI->getValue().zext(BitWidth * NumRegisters);
+        APInt Extracted = Val.extractBits(BitWidth, BitWidth * RegIdx);
+        DestLOI.NumSignBits =
+            std::min(DestLOI.NumSignBits, Extracted.getNumSignBits());
+        DestLOI.Known =
+            DestLOI.Known.intersectWith(KnownBits::makeConstant(Extracted));
+        continue;
+      }
+
+      assert(ValueMap.count(V) && "V should have been placed in ValueMap when "
+                                  "its CopyToReg node was created.");
+      Register SrcReg = ValueMap[V];
+      if (!SrcReg.isVirtual()) {
+        DestLOI.IsValid = false;
+        break;
+      }
+      // Split registers are assigned sequentially.
+      SrcReg = SrcReg.id() + RegIdx;
+      const LiveOutInfo *SrcLOI = GetLiveOutRegInfo(SrcReg, BitWidth);
+      if (!SrcLOI) {
+        DestLOI.IsValid = false;
+        break;
+      }
+      DestLOI.NumSignBits = std::min(DestLOI.NumSignBits, SrcLOI->NumSignBits);
+      DestLOI.Known = DestLOI.Known.intersectWith(SrcLOI->Known);
     }
-    const LiveOutInfo *SrcLOI = GetLiveOutRegInfo(SrcReg, BitWidth);
-    if (!SrcLOI) {
-      DestLOI.IsValid = false;
-      return;
-    }
-    DestLOI.NumSignBits = std::min(DestLOI.NumSignBits, SrcLOI->NumSignBits);
-    DestLOI.Known = DestLOI.Known.intersectWith(SrcLOI->Known);
   }
 }
 
@@ -556,6 +780,30 @@ int FunctionLoweringInfo::getArgumentFrameIndex(const Argument *A) {
     return I->second;
   LLVM_DEBUG(dbgs() << "Argument does not have assigned frame index!\n");
   return INT_MAX;
+}
+
+void FunctionLoweringInfo::addArgumentValueHome(const Argument *A,
+                                                uint64_t Offset, uint64_t Size,
+                                                int FI) {
+  auto &Homes = ArgumentValueHomeMap[A];
+  assert(none_of(Homes,
+                 [=](const ArgumentValueHome &Home) {
+                   return Home.Offset == Offset && Home.Size == Size;
+                 }) &&
+         "duplicate argument value home");
+  Homes.push_back({Offset, Size, FI});
+}
+
+int FunctionLoweringInfo::getArgumentValueHome(const Argument *A,
+                                               uint64_t Offset,
+                                               uint64_t Size) const {
+  auto I = ArgumentValueHomeMap.find(A);
+  if (I == ArgumentValueHomeMap.end())
+    return INT_MAX;
+  auto Home = find_if(I->second, [=](const ArgumentValueHome &Candidate) {
+    return Candidate.Offset == Offset && Candidate.Size == Size;
+  });
+  return Home == I->second.end() ? INT_MAX : Home->FI;
 }
 
 Register FunctionLoweringInfo::getCatchPadExceptionPointerVReg(

@@ -1,0 +1,464 @@
+; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O2 -verify-machineinstrs < %s | FileCheck %s
+; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O2 -verify-machineinstrs \
+; RUN:   -stop-after=finalize-isel < %s | FileCheck %s --check-prefix=MIR
+; RUN: llc -mtriple=aarch64-unknown-linux-gnu -mattr=+strict-align -O2 \
+; RUN:   -verify-machineinstrs < %s | FileCheck %s --check-prefix=STRICT
+; RUN: llc -mtriple=aarch64-unknown-linux-gnu -mattr=-fp-armv8 -O2 \
+; RUN:   -verify-machineinstrs < %s | FileCheck %s --check-prefix=NOFP
+; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O2 -verify-machineinstrs \
+; RUN:   -filetype=obj -o /dev/null < %s
+
+%pair = type { i64, i64 }
+
+declare goabiinternal void @consume(i64, i64, i64, i64, i64, i64, i64, i64,
+                                    i64, i64, i64, i64, i64, i64, i64, i64,
+                                    ptr byval(i64) align 8)
+declare goabiinternal void @consume_many(
+    i64, i64, i64, i64, i64, i64, i64, i64,
+    i64, i64, i64, i64, i64, i64, i64, i64,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8,
+    ptr byval(i64) align 8, ptr byval(i64) align 8)
+declare goabiinternal void @consume_pair(
+    i64, i64, i64, i64, i64, i64, i64, i64,
+    i64, i64, i64, i64, i64, i64, i64,
+    ptr byval(%pair) align 8)
+declare goabiinternal float @consume_memory_float(
+    ptr byval(float) align 4, float)
+declare goabiinternal void @consume_one(ptr byval(i64) align 8)
+declare goabiinternal void @consume_large(ptr byval([4099 x i8]) align 1)
+declare goabiinternal void @consume_large_align8(ptr byval([256 x i8]) align 8)
+declare goabiinternal void @consume_large_align4(ptr byval([256 x i8]) align 4)
+declare goabiinternal void @consume_large_align2(ptr byval([256 x i8]) align 2)
+declare goabiinternal void @observe(ptr)
+declare goabiinternal void @safepoint()
+declare void @llvm.lifetime.start.p0(ptr captures(none))
+declare token @llvm.experimental.gc.statepoint.p0(
+    i64 immarg, i32 immarg, ptr, i32 immarg, i32 immarg, ...)
+
+define goabiinternal void @ssa_stack_argument() {
+; CHECK-LABEL: ssa_stack_argument:
+; CHECK-NOT: memcpy
+; A one-use frontend carrier is removed and initialized directly in the
+; outgoing Go argument area.
+; CHECK: mov w{{[0-9]+}}, #42
+; CHECK: str x{{[0-9]+}}, [sp, #8]
+; CHECK: bl consume
+; MIR-LABEL: name: ssa_stack_argument
+; MIR: fixedStack:      []
+; MIR: stack:           []
+entry:
+  %argument = alloca i64, align 8
+  store i64 42, ptr %argument, align 8
+  call goabiinternal void @consume(
+      i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7,
+      i64 8, i64 9, i64 10, i64 11, i64 12, i64 13, i64 14, i64 15,
+      ptr byval(i64) align 8 %argument)
+  ret void
+}
+
+define goabiinternal void @register_argument_byval_source(i64 %value) {
+; CHECK-LABEL: register_argument_byval_source:
+; Existing incoming argument-copy elision reuses %value's fixed home for the
+; temporary, while ordinary byval lowering still writes the outgoing slot.
+; CHECK: bl consume
+; MIR-LABEL: name: register_argument_byval_source
+; MIR: fixedStack:
+; MIR: - { id: 0, type: spill-slot, offset: 8, size: 8
+; MIR: stack:           []
+; MIR: %[[VALUE:[0-9]+]]:gpr64 = COPY $x0
+; MIR: STRXui %[[VALUE]], %fixed-stack.0, 0
+; MIR: STRXui %[[VALUE]], %{{[0-9]+}}, 1
+entry:
+  %argument = alloca i64, align 8
+  store i64 %value, ptr %argument, align 8
+  call goabiinternal void @consume(
+      i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7,
+      i64 8, i64 9, i64 10, i64 11, i64 12, i64 13, i64 14, i64 15,
+      ptr byval(i64) align 8 %argument)
+  ret void
+}
+
+; Keep the stores which initialize register argument homes ordered before
+; outgoing byval copies that read those homes. The IR allocas below are
+; remapped to the incoming fixed homes by argument-copy elision.
+define goabiinternal void @register_arguments_byval_sources(
+    i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, i64 %h,
+    i64 %i, i64 %j, i64 %k, i64 %l, i64 %m, i64 %n, i64 %o, i64 %p,
+    ptr byval(i64) align 8 %q, ptr byval(i64) align 8 %r,
+    ptr byval(i64) align 8 %s, ptr byval(i64) align 8 %t,
+    ptr byval(i64) align 8 %u, ptr byval(i64) align 8 %v,
+    ptr byval(i64) align 8 %w, ptr byval(i64) align 8 %x,
+    ptr byval(i64) align 8 %y, ptr byval(i64) align 8 %z) {
+; CHECK-LABEL: register_arguments_byval_sources:
+; The loads at 352 and 368 read d/e and f/g respectively. Check that every
+; contributing fixed home is initialized first.
+; CHECK-DAG: stp x2, x3, [sp, #344]
+; CHECK-DAG: stp x4, x5, [sp, #360]
+; CHECK: ldp x0, x{{[0-9]+}}, [sp, #352]
+; CHECK: stp x6, x7, [sp, #376]
+; CHECK: ldp x0, x{{[0-9]+}}, [sp, #368]
+; CHECK: bl consume_many
+; MIR-LABEL: name: register_arguments_byval_sources
+; Remapped allocas must use the actual fixed-stack provenance. Describing these
+; loads with the old IR allocas would let scheduling move them above the stores
+; which initialize the incoming register homes.
+; MIR: LDRXui %fixed-stack.{{[0-9]+}}{{.*}} :: (load (s64) from %fixed-stack.{{[0-9]+}})
+entry:
+  %a.home = alloca i64, align 8
+  %b.home = alloca i64, align 8
+  %c.home = alloca i64, align 8
+  %d.home = alloca i64, align 8
+  %e.home = alloca i64, align 8
+  %f.home = alloca i64, align 8
+  %g.home = alloca i64, align 8
+  %h.home = alloca i64, align 8
+  %i.home = alloca i64, align 8
+  %j.home = alloca i64, align 8
+  %q.value = load i64, ptr %q, align 8
+  %r.value = load i64, ptr %r, align 8
+  %s.value = load i64, ptr %s, align 8
+  %t.value = load i64, ptr %t, align 8
+  %u.value = load i64, ptr %u, align 8
+  %v.value = load i64, ptr %v, align 8
+  %w.value = load i64, ptr %w, align 8
+  %x.value = load i64, ptr %x, align 8
+  %y.value = load i64, ptr %y, align 8
+  %z.value = load i64, ptr %z, align 8
+  store i64 %j, ptr %j.home, align 8
+  store i64 %i, ptr %i.home, align 8
+  store i64 %h, ptr %h.home, align 8
+  store i64 %g, ptr %g.home, align 8
+  store i64 %f, ptr %f.home, align 8
+  store i64 %e, ptr %e.home, align 8
+  store i64 %d, ptr %d.home, align 8
+  store i64 %c, ptr %c.home, align 8
+  store i64 %b, ptr %b.home, align 8
+  store i64 %a, ptr %a.home, align 8
+  call goabiinternal void @consume_many(
+      i64 %z.value, i64 %y.value, i64 %x.value, i64 %w.value,
+      i64 %v.value, i64 %u.value, i64 %t.value, i64 %s.value,
+      i64 %r.value, i64 %q.value, i64 %p, i64 %o, i64 %n, i64 %m,
+      i64 %l, i64 %k,
+      ptr byval(i64) align 8 %j.home, ptr byval(i64) align 8 %i.home,
+      ptr byval(i64) align 8 %h.home, ptr byval(i64) align 8 %g.home,
+      ptr byval(i64) align 8 %f.home, ptr byval(i64) align 8 %e.home,
+      ptr byval(i64) align 8 %d.home, ptr byval(i64) align 8 %c.home,
+      ptr byval(i64) align 8 %b.home, ptr byval(i64) align 8 %a.home)
+  ret void
+}
+
+define goabiinternal void @memory_stack_argument(ptr %source) {
+; CHECK-LABEL: memory_stack_argument:
+; CHECK-NOT: memcpy
+; CHECK: ldr x{{[0-9]+}}, [x{{[0-9]+}}]
+; CHECK: str x{{[0-9]+}}, [sp, #8]
+; CHECK: bl consume
+; MIR-LABEL: name: memory_stack_argument
+; MIR: LDRXui {{.*}} :: (load (s64) from %ir.source)
+entry:
+  call goabiinternal void @consume(
+      i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7,
+      i64 8, i64 9, i64 10, i64 11, i64 12, i64 13, i64 14, i64 15,
+      ptr byval(i64) align 8 %source)
+  ret void
+}
+
+define goabiinternal void @large_memory_stack_argument(ptr %source) {
+; CHECK-LABEL: large_memory_stack_argument:
+; A Go byval copy cannot call libc after reserving its outgoing frame. Keep a
+; large inline copy as a real CFG loop rather than thousands of DAG stores.
+; Match Go's native arm64 loop throughput: two 32-byte vector pairs per
+; iteration.
+; CHECK: [[LOOP:.LBB[0-9]+_[0-9]+]]:
+; CHECK: ldp q{{[0-9]+}}, q{{[0-9]+}}, [x{{[0-9]+}}], #32
+; CHECK: subs x{{[0-9]+}}, x{{[0-9]+}}, #64
+; CHECK: stp q{{[0-9]+}}, q{{[0-9]+}}, [x{{[0-9]+}}], #32
+; CHECK: ldp q{{[0-9]+}}, q{{[0-9]+}}, [x{{[0-9]+}}], #32
+; CHECK: stp q{{[0-9]+}}, q{{[0-9]+}}, [x{{[0-9]+}}], #32
+; CHECK: b.ne [[LOOP]]
+; CHECK: ldrb [[TAIL8:w[0-9]+]], [[[TAIL_SRC:x[0-9]+]], #2]
+; CHECK: ldrh [[TAIL16:w[0-9]+]], [[[TAIL_SRC]]]
+; CHECK: strb [[TAIL8]], [[[TAIL_DST:x[0-9]+]], #2]
+; CHECK: strh [[TAIL16]], [[[TAIL_DST]]]
+; CHECK: bl consume_large
+; MIR-LABEL: name: large_memory_stack_argument
+; MIR: noPhis: false
+; MIR: bb.0.entry:
+; MIR: ADJCALLSTACKDOWN 4112
+; MIR: bb.1.entry (call-frame-size 4112):
+; MIR: successors: %bb.1(0x7e000000), %bb.2(0x02000000)
+; MIR: PHI
+; MIR: PHI
+; MIR: PHI
+; MIR: LDPQpost {{.*}} :: (load (s32768)
+; MIR: STPQpost {{.*}} :: (store (s32768)
+; MIR: LDPQpost {{.*}} :: (load (s32768)
+; MIR: STPQpost {{.*}} :: (store (s32768)
+; MIR: SUBSXri {{.*}}, 64, 0
+; MIR: Bcc 1, %bb.1
+; MIR: bb.2.entry (call-frame-size 4112):
+; MIR: ADJCALLSTACKUP 4112
+; STRICT-LABEL: large_memory_stack_argument:
+; Strict alignment permits only byte accesses here, so unroll four copies per
+; iteration.
+; STRICT: [[STRICT_LOOP:.LBB[0-9]+_[0-9]+]]:
+; STRICT: ldrb [[BYTE0:w[0-9]+]], [{{x[0-9]+}}], #1
+; STRICT: subs x{{[0-9]+}}, x{{[0-9]+}}, #4
+; STRICT: strb [[BYTE0]], [{{x[0-9]+}}], #1
+; STRICT: ldrb [[BYTE1:w[0-9]+]], [{{x[0-9]+}}], #1
+; STRICT: strb [[BYTE1]], [{{x[0-9]+}}], #1
+; STRICT: ldrb [[BYTE2:w[0-9]+]], [{{x[0-9]+}}], #1
+; STRICT: strb [[BYTE2]], [{{x[0-9]+}}], #1
+; STRICT: ldrb [[BYTE3:w[0-9]+]], [{{x[0-9]+}}], #1
+; STRICT: strb [[BYTE3]], [{{x[0-9]+}}], #1
+; STRICT: b.ne [[STRICT_LOOP]]
+; NOFP-LABEL: large_memory_stack_argument:
+; Without FP/SIMD, retain the same 64-byte stride with four GPR pairs.
+; NOFP: [[NOFP_LOOP:.LBB[0-9]+_[0-9]+]]:
+; NOFP: ldp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: subs x{{[0-9]+}}, x{{[0-9]+}}, #64
+; NOFP: stp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: ldp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: stp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: ldp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: stp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: ldp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: stp x{{[0-9]+}}, x{{[0-9]+}}, [x{{[0-9]+}}], #16
+; NOFP: b.ne [[NOFP_LOOP]]
+entry:
+  call goabiinternal void @consume_large(
+      ptr byval([4099 x i8]) align 1 %source)
+  ret void
+}
+
+; Exercise every wider scalar access used when strict alignment is required.
+define goabiinternal void @large_memory_stack_argument_align8(ptr %source) {
+; STRICT-LABEL: large_memory_stack_argument_align8:
+; STRICT: [[STRICT_ALIGN8_LOOP:.LBB[0-9]+_[0-9]+]]:
+; STRICT: ldr x{{[0-9]+}}, [x{{[0-9]+}}], #8
+; STRICT: subs x{{[0-9]+}}, x{{[0-9]+}}, #32
+; STRICT: str x{{[0-9]+}}, [x{{[0-9]+}}], #8
+; STRICT: b.ne [[STRICT_ALIGN8_LOOP]]
+entry:
+  call goabiinternal void @consume_large_align8(
+      ptr byval([256 x i8]) align 8 %source)
+  ret void
+}
+
+define goabiinternal void @large_memory_stack_argument_align4(ptr %source) {
+; STRICT-LABEL: large_memory_stack_argument_align4:
+; STRICT: [[STRICT_ALIGN4_LOOP:.LBB[0-9]+_[0-9]+]]:
+; STRICT: ldr w{{[0-9]+}}, [x{{[0-9]+}}], #4
+; STRICT: subs x{{[0-9]+}}, x{{[0-9]+}}, #16
+; STRICT: str w{{[0-9]+}}, [x{{[0-9]+}}], #4
+; STRICT: b.ne [[STRICT_ALIGN4_LOOP]]
+entry:
+  call goabiinternal void @consume_large_align4(
+      ptr byval([256 x i8]) align 4 %source)
+  ret void
+}
+
+define goabiinternal void @large_memory_stack_argument_align2(ptr %source) {
+; STRICT-LABEL: large_memory_stack_argument_align2:
+; STRICT: [[STRICT_ALIGN2_LOOP:.LBB[0-9]+_[0-9]+]]:
+; STRICT: ldrh w{{[0-9]+}}, [x{{[0-9]+}}], #2
+; STRICT: subs x{{[0-9]+}}, x{{[0-9]+}}, #8
+; STRICT: strh w{{[0-9]+}}, [x{{[0-9]+}}], #2
+; STRICT: b.ne [[STRICT_ALIGN2_LOOP]]
+entry:
+  call goabiinternal void @consume_large_align2(
+      ptr byval([256 x i8]) align 2 %source)
+  ret void
+}
+
+define goabiinternal void @ssa_aggregate_stack_argument() {
+; CHECK-LABEL: ssa_aggregate_stack_argument:
+; CHECK-NOT: ldr q
+; CHECK: stp x{{[0-9]+}}, x{{[0-9]+}}, [sp, #8]
+; CHECK: bl consume_pair
+; MIR-LABEL: name: ssa_aggregate_stack_argument
+; MIR: fixedStack:      []
+; MIR: stack:           []
+; MIR: store (s64) into stack + 16
+; MIR: store (s64) into stack + 8
+entry:
+  %argument = alloca %pair, align 8
+  store %pair { i64 13, i64 17 }, ptr %argument, align 8
+  call goabiinternal void @consume_pair(
+      i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7,
+      i64 8, i64 9, i64 10, i64 11, i64 12, i64 13, i64 14,
+      ptr byval(%pair) align 8 %argument)
+  ret void
+}
+
+define goabiinternal void @noncanonical_stack_argument() {
+; Lifetime markers do not make an otherwise one-use carrier observable.
+; MIR-LABEL: name: noncanonical_stack_argument
+; MIR: fixedStack:      []
+; MIR: stack:           []
+entry:
+  %argument = alloca i64, align 8
+  call void @llvm.lifetime.start.p0(ptr %argument)
+  store i64 42, ptr %argument, align 8
+  call goabiinternal void @consume(
+      i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7,
+      i64 8, i64 9, i64 10, i64 11, i64 12, i64 13, i64 14, i64 15,
+      ptr byval(i64) align 8 %argument)
+  ret void
+}
+
+define goabiinternal void @escaped_stack_argument() {
+; Passing the carrier's address to another call makes its contents observable
+; and potentially mutable, so the source object and ordinary byval copy stay.
+; MIR-LABEL: name: escaped_stack_argument
+; MIR: stack:
+; MIR-NEXT: - { id: 0, name: argument, type: default, offset: 0, size: 8
+entry:
+  %argument = alloca i64, align 8
+  store i64 42, ptr %argument, align 8
+  call goabiinternal void @observe(ptr %argument)
+  call goabiinternal void @consume(
+      i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7,
+      i64 8, i64 9, i64 10, i64 11, i64 12, i64 13, i64 14, i64 15,
+      ptr byval(i64) align 8 %argument)
+  ret void
+}
+
+define goabiinternal void @statepoint_stack_argument() gc "statepoint-example" {
+; A pointer-free carrier used only as the target statepoint's byval argument is
+; still initialized directly in the outgoing slot.
+; MIR-LABEL: name: statepoint_stack_argument
+; MIR: fixedStack:      []
+; MIR: stack:           []
+entry:
+  %argument = alloca i64, align 8
+  store i64 42, ptr %argument, align 8
+  %token = call goabiinternal token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 1, i32 0, ptr elementtype(void (ptr)) @consume_one,
+          i32 1, i32 0, ptr byval(i64) align 8 %argument, i32 0, i32 0)
+  ret void
+}
+
+define goabiinternal void @statepoint_memory_stack_argument(ptr %source)
+    gc "statepoint-example" {
+; The statepoint call-lowering path retains the original IR byval source too.
+; MIR-LABEL: name: statepoint_memory_stack_argument
+; MIR: LDRXui {{.*}} :: (load (s64) from %ir.source)
+entry:
+  %token = call goabiinternal token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 4, i32 0, ptr elementtype(void (ptr)) @consume_one,
+          i32 1, i32 0, ptr byval(i64) align 8 %source, i32 0, i32 0)
+  ret void
+}
+
+define goabiinternal void @gc_live_statepoint_stack_argument()
+    gc "statepoint-example" {
+; An explicit gc-live use makes the carrier itself part of the statepoint
+; contract, so it must not be replaced by the outgoing call slot.
+; MIR-LABEL: name: gc_live_statepoint_stack_argument
+; MIR: stack:
+; MIR-NEXT: - { id: 0, name: argument, type: default, offset: 0, size: 8
+entry:
+  %argument = alloca i64, align 8
+  store i64 42, ptr %argument, align 8
+  %token = call goabiinternal token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 2, i32 0, ptr elementtype(void (ptr)) @consume_one,
+          i32 1, i32 0, ptr byval(i64) align 8 %argument, i32 0, i32 0)
+      [ "gc-live"(ptr %argument) ]
+  ret void
+}
+
+define goabiinternal void @deopt_statepoint_stack_argument()
+    gc "statepoint-example" {
+; Go statepoints use deopt operands as frame-layout carriers. Preserve that
+; source object so its per-object pointer map still names real storage.
+; MIR-LABEL: name: deopt_statepoint_stack_argument
+; MIR: stack:
+; MIR-NEXT: - { id: 0, name: argument, type: default, offset: 0, size: 8
+entry:
+  %argument = alloca i64, align 8
+  store i64 42, ptr %argument, align 8
+  %token = call goabiinternal token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 3, i32 0, ptr elementtype(void (ptr)) @consume_one,
+          i32 1, i32 0, ptr byval(i64) align 8 %argument, i32 0, i32 0)
+      [ "deopt"(ptr %argument) ]
+  ret void
+}
+
+define goabiinternal void @intervening_call_stack_argument() {
+; A call between partial initialization and the target byval call can reuse
+; the outgoing area and has no stack map for a later call's partial arguments.
+; MIR-LABEL: name: intervening_call_stack_argument
+; MIR: stack:
+; MIR-NEXT: - { id: 0, name: argument, type: default, offset: 0, size: 16
+entry:
+  %argument = alloca %pair, align 8
+  %first = getelementptr inbounds %pair, ptr %argument, i32 0, i32 0
+  %second = getelementptr inbounds %pair, ptr %argument, i32 0, i32 1
+  store i64 13, ptr %first, align 8
+  call goabiinternal void @safepoint()
+  store i64 17, ptr %second, align 8
+  call goabiinternal void @consume_pair(
+      i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7,
+      i64 8, i64 9, i64 10, i64 11, i64 12, i64 13, i64 14,
+      ptr byval(%pair) align 8 %argument)
+  ret void
+}
+
+define goabiinternal i64 @read_stack_argument(
+    i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6, i64 %a7,
+    i64 %a8, i64 %a9, i64 %a10, i64 %a11, i64 %a12, i64 %a13, i64 %a14,
+    i64 %a15, ptr byval(i64) align 8 %value) {
+; CHECK-LABEL: read_stack_argument:
+; CHECK: ldr x0, [sp, #8]
+; CHECK-NEXT: ret
+; MIR-LABEL: name: read_stack_argument
+; MIR: frameInfo:
+; MIR: goABIStackArgsSize: 8
+; MIR: goABIArgSize: 136
+entry:
+  %result = load i64, ptr %value, align 8
+  ret i64 %result
+}
+
+define goabiinternal ptr @address_stack_pair_argument(
+    i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6, i64 %a7,
+    i64 %a8, i64 %a9, i64 %a10, i64 %a11, i64 %a12, i64 %a13, i64 %a14,
+    ptr byval(%pair) align 8 %value) {
+; CHECK-LABEL: address_stack_pair_argument:
+; CHECK: add x0, sp, #8
+; MIR-LABEL: name: address_stack_pair_argument
+; MIR: fixedStack:
+; MIR-NEXT: - { id: 0, type: default, offset: 8, size: 16
+; MIR-NEXT: isImmutable: false, isAliased: true
+entry:
+  ret ptr %value
+}
+
+define goabiinternal float @read_memory_float(
+    ptr byval(float) align 4 %memory, float %register) {
+; CHECK-LABEL: read_memory_float:
+; CHECK: ldr [[MEMORY:s[0-9]+]], [sp, #8]
+; CHECK: fadd s0, [[MEMORY]], s0
+entry:
+  %loaded = load float, ptr %memory, align 4
+  %sum = fadd float %loaded, %register
+  ret float %sum
+}
+
+define goabiinternal float @call_memory_float(ptr %source, float %register) {
+; CHECK-LABEL: call_memory_float:
+; CHECK: str {{w[0-9]+}}, [sp, #8]
+; CHECK: bl consume_memory_float
+entry:
+  %result = call goabiinternal float @consume_memory_float(
+      ptr byval(float) align 4 %source, float %register)
+  ret float %result
+}

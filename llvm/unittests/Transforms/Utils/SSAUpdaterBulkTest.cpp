@@ -44,6 +44,7 @@ TEST(SSAUpdaterBulk, SimpleMerge) {
   //     %6 = add i32 %3, 6
   //     %7 = add i32 %2, %4
   //     %8 = sub i32 %2, %4
+  //     ret void
   Argument *FirstArg = &*(F->arg_begin());
   BasicBlock *IfBB = BasicBlock::Create(C, "if", F);
   BasicBlock *TrueBB = BasicBlock::Create(C, "true", F);
@@ -68,6 +69,7 @@ TEST(SSAUpdaterBulk, SimpleMerge) {
   auto *I2 = cast<Instruction>(B.CreateAdd(AddOp2, ConstantInt::get(I32Ty, 6)));
   auto *I3 = cast<Instruction>(B.CreateAdd(SubOp1, SubOp2));
   auto *I4 = cast<Instruction>(B.CreateSub(SubOp1, SubOp2));
+  B.CreateRetVoid();
 
   // Now rewrite uses in instructions %5, %6, %7. They need to use a phi, which
   // SSAUpdater should insert into %merge.
@@ -374,8 +376,71 @@ TEST(SSAUpdaterBulk, SimplifyPHIs) {
   EXPECT_EQ(Phi, Cmp->getOperand(1));
 }
 
-bool EliminateNewDuplicatePHINodes(BasicBlock *BB,
-                                   BasicBlock::phi_iterator FirstExistingPN);
+TEST(SSAUpdaterBulk, DeterministicDependentPHIDeduplication) {
+  const char *IR = R"(
+    define i32 @main(i32 %value, i1 %cond) {
+    entry:
+      br i1 %cond, label %left, label %right
+    left:
+      %a = add i32 %value, 1
+      br label %join
+    right:
+      %b = sub i32 %value, 1
+      br label %join
+    join:
+      %existing = phi i32 [ %b, %right ], [ %a, %left ]
+      br i1 %cond, label %forward, label %replace
+    forward:
+      br label %exit
+    replace:
+      %c = add i32 %value, 2
+      br label %exit
+    exit:
+      %existing2 = phi i32 [ %c, %replace ], [ %existing, %forward ]
+      %use = add i32 0, %existing2
+      ret i32 %use
+    }
+  )";
+
+  // The new PHI at exit becomes identical to existing2 only after the new
+  // PHI at join is replaced. Vary allocation addresses, keeping IR and SSA
+  // update order identical, and require identical optimization results.
+  LLVMContext Context;
+  Module Padding("padding", Context);
+  auto *PaddingFn = Function::Create(
+      FunctionType::get(Type::getVoidTy(Context), false),
+      GlobalValue::ExternalLinkage, "padding", Padding);
+  std::string Expected;
+  for (unsigned Trial = 0; Trial != 64; ++Trial) {
+    BasicBlock::Create(Context, "padding", PaddingFn);
+    SMDiagnostic Err;
+    auto M = parseAssemblyString(IR, Err, Context);
+    ASSERT_NE(M, nullptr);
+    Function *F = M->getFunction("main");
+    auto *Entry = &F->getEntryBlock();
+    auto *Left = Entry->getTerminator()->getSuccessor(0);
+    auto *Right = Entry->getTerminator()->getSuccessor(1);
+    auto *Join = Left->getSingleSuccessor();
+    auto *Replace = Join->getTerminator()->getSuccessor(1);
+    auto *Exit = Replace->getSingleSuccessor();
+    auto *Use = &*std::next(Exit->begin());
+    SSAUpdaterBulk Updater;
+    unsigned Var = Updater.AddVariable("new", Type::getInt32Ty(Context));
+    Updater.AddAvailableValue(Var, Left, &Left->front());
+    Updater.AddAvailableValue(Var, Right, &Right->front());
+    Updater.AddAvailableValue(Var, Replace, &Replace->front());
+    Updater.AddUse(Var, &Use->getOperandUse(0));
+    DominatorTree DT(*F);
+    Updater.RewriteAndOptimizeAllUses(DT);
+    std::string Actual;
+    raw_string_ostream OS(Actual);
+    F->print(OS);
+    if (Trial == 0)
+      Expected = Actual;
+    else
+      EXPECT_EQ(Expected, Actual) << "allocation trial " << Trial;
+  }
+}
 
 // Helper to run both versions on the same input.
 static void RunEliminateNewDuplicatePHINode(

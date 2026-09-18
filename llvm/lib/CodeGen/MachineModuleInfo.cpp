@@ -40,7 +40,7 @@ void MachineModuleInfo::finalize() {
 MachineModuleInfo::MachineModuleInfo(MachineModuleInfo &&MMI)
     : TM(std::move(MMI.TM)),
       Context(TM.getTargetTriple(), TM.getMCAsmInfo(), TM.getMCRegisterInfo(),
-              TM.getMCSubtargetInfo(), nullptr, &TM.Options.MCOptions, false),
+              TM.getMCSubtargetInfo(), nullptr, false),
       MachineFunctions(std::move(MMI.MachineFunctions)) {
   Context.setObjectFileInfo(TM.getObjFileLowering());
   ObjFileMMI = MMI.ObjFileMMI;
@@ -51,7 +51,7 @@ MachineModuleInfo::MachineModuleInfo(MachineModuleInfo &&MMI)
 MachineModuleInfo::MachineModuleInfo(const TargetMachine *TM)
     : TM(*TM), Context(TM->getTargetTriple(), TM->getMCAsmInfo(),
                        TM->getMCRegisterInfo(), TM->getMCSubtargetInfo(),
-                       nullptr, &TM->Options.MCOptions, false) {
+                       nullptr, false) {
   Context.setObjectFileInfo(TM->getObjFileLowering());
   initialize();
 }
@@ -60,7 +60,7 @@ MachineModuleInfo::MachineModuleInfo(const TargetMachine *TM,
                                      MCContext *ExtContext)
     : TM(*TM), Context(TM->getTargetTriple(), TM->getMCAsmInfo(),
                        TM->getMCRegisterInfo(), TM->getMCSubtargetInfo(),
-                       nullptr, &TM->Options.MCOptions, false),
+                       nullptr, false),
       ExternalContext(ExtContext) {
   Context.setObjectFileInfo(TM->getObjFileLowering());
   initialize();
@@ -152,15 +152,11 @@ FunctionPass *llvm::createFreeMachineFunctionPass() {
 
 MachineModuleInfoWrapperPass::MachineModuleInfoWrapperPass(
     const TargetMachine *TM)
-    : ImmutablePass(ID), MMI(TM) {
-  initializeMachineModuleInfoWrapperPassPass(*PassRegistry::getPassRegistry());
-}
+    : ImmutablePass(ID), MMI(TM) {}
 
 MachineModuleInfoWrapperPass::MachineModuleInfoWrapperPass(
     const TargetMachine *TM, MCContext *ExtContext)
-    : ImmutablePass(ID), MMI(TM, ExtContext) {
-  initializeMachineModuleInfoWrapperPassPass(*PassRegistry::getPassRegistry());
-}
+    : ImmutablePass(ID), MMI(TM, ExtContext) {}
 
 // Handle the Pass registration stuff necessary to use DataLayout's.
 INITIALIZE_PASS(MachineModuleInfoWrapperPass, "machinemoduleinfo",
@@ -195,6 +191,7 @@ static uint64_t getLocCookie(const SMDiagnostic &SMD, const SourceMgr &SrcMgr,
 bool MachineModuleInfoWrapperPass::doInitialization(Module &M) {
   MMI.initialize();
   MMI.TheModule = &M;
+  MMI.getContext().getGoObjBuiltinNameIndex().clear();
   LLVMContext &Ctx = M.getContext();
   MMI.getContext().setDiagnosticHandler(
       [&Ctx, &M](const SMDiagnostic &SMD, bool IsInlineAsm,
@@ -219,6 +216,7 @@ AnalysisKey MachineModuleAnalysis::Key;
 MachineModuleAnalysis::Result
 MachineModuleAnalysis::run(Module &M, ModuleAnalysisManager &) {
   MMI.TheModule = &M;
+  MMI.getContext().getGoObjBuiltinNameIndex().clear();
   LLVMContext &Ctx = M.getContext();
   MMI.getContext().setDiagnosticHandler(
       [&Ctx, &M](const SMDiagnostic &SMD, bool IsInlineAsm,

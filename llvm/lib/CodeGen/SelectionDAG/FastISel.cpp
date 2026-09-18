@@ -50,6 +50,7 @@
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -148,7 +149,7 @@ bool FastISel::lowerArguments() {
   for (Function::const_arg_iterator I = FuncInfo.Fn->arg_begin(),
                                     E = FuncInfo.Fn->arg_end();
        I != E; ++I) {
-    DenseMap<const Value *, Register>::iterator VI = LocalValueMap.find(&*I);
+    auto VI = LocalValueMap.find(&*I);
     assert(VI != LocalValueMap.end() && "Missed an argument?");
     FuncInfo.ValueMap[&*I] = VI->second;
   }
@@ -237,6 +238,15 @@ void FastISel::flushLocalValueMap() {
 }
 
 Register FastISel::getRegForValue(const Value *V) {
+  // Go byval/goret arguments are homes in a movable stack. SelectionDAG
+  // rematerializes their FrameIndex at each use; FastISel would instead reuse
+  // the address exported from the entry block, possibly across a stack grow.
+  if (const auto *Arg = dyn_cast<Argument>(V);
+      Arg && (Arg->hasByValAttr() || Arg->hasGoRetAttr()) &&
+      FuncInfo.Fn->hasGC() &&
+      goabi::isGoCallingConv(FuncInfo.Fn->getCallingConv()))
+    return Register();
+
   EVT RealVT = TLI.getValueType(DL, V->getType(), /*AllowUnknown=*/true);
   // Don't handle non-simple values in FastISel.
   if (!RealVT.isSimple())
@@ -354,7 +364,7 @@ Register FastISel::lookUpRegForValue(const Value *V) {
   // cache values defined by Instructions across blocks, and other values
   // only locally. This is because Instructions already have the SSA
   // def-dominates-use requirement enforced.
-  DenseMap<const Value *, Register>::iterator I = FuncInfo.ValueMap.find(V);
+  auto I = FuncInfo.ValueMap.find(V);
   if (I != FuncInfo.ValueMap.end())
     return I->second;
   return LocalValueMap[V];
@@ -989,13 +999,19 @@ bool FastISel::lowerCallTo(const CallInst *CI, MCSymbol *Symbol,
 }
 
 bool FastISel::lowerCallTo(CallLoweringInfo &CLI) {
+  if (goabi::isGoCallingConv(CLI.CallConv))
+    return false;
+
   // Handle the incoming return values from the call.
   CLI.clearIns();
   SmallVector<EVT, 4> RetTys;
   ComputeValueVTs(TLI, DL, CLI.RetTy, RetTys);
 
   SmallVector<ISD::OutputArg, 4> Outs;
-  GetReturnInfo(CLI.CallConv, CLI.RetTy, getReturnAttrs(CLI), Outs, TLI, DL);
+  bool GoTupleResults = goabi::isGoCallingConv(CLI.CallConv) && CLI.CB &&
+                        goabi::hasTupleResultsAttr(*CLI.CB);
+  GetReturnInfo(CLI.CallConv, CLI.RetTy, getReturnAttrs(CLI), Outs, TLI, DL,
+                GoTupleResults);
 
   bool CanLowerReturn = TLI.CanLowerReturn(
       CLI.CallConv, *FuncInfo.MF, CLI.IsVarArg, Outs, CLI.RetTy->getContext(), CLI.RetTy);
@@ -1162,6 +1178,8 @@ bool FastISel::selectCall(const User *I) {
       ExtraInfo |= InlineAsm::Extra_HasSideEffects;
     if (IA->isAlignStack())
       ExtraInfo |= InlineAsm::Extra_IsAlignStack;
+    if (IA->canThrow())
+      ExtraInfo |= InlineAsm::Extra_MayUnwind;
     if (Call->isConvergent())
       ExtraInfo |= InlineAsm::Extra_IsConvergent;
     ExtraInfo |= IA->getDialect() * InlineAsm::Extra_AsmDialect;
@@ -1415,9 +1433,14 @@ bool FastISel::selectIntrinsicCall(const IntrinsicInst *II) {
     updateValueMap(II, ResultReg);
     return true;
   }
-  case Intrinsic::fake_use:
-    // At -O0, we don't need fake use, so just ignore it.
+  case Intrinsic::fake_use: {
+    const Value *V = II->getArgOperand(0);
+    if (Register Reg = getRegForValue(V))
+      BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, MIMD,
+              TII.get(TargetOpcode::FAKE_USE))
+          .addReg(Reg);
     return true;
+  }
   case Intrinsic::experimental_stackmap:
     return selectStackmap(II);
   case Intrinsic::experimental_patchpoint_void:
@@ -1430,6 +1453,11 @@ bool FastISel::selectIntrinsicCall(const IntrinsicInst *II) {
     return selectXRayTypedEvent(II);
   }
 
+  // Target FastISel memory paths use hardcoded libc names and C calling
+  // conventions. Let SelectionDAG choose the Go ABI runtime implementation.
+  if (isa<MemIntrinsic>(II) &&
+      FuncInfo.MF->getTarget().getTargetTriple().isOSBinFormatGoObj())
+    return false;
   return fastLowerIntrinsicCall(II);
 }
 
@@ -1565,14 +1593,6 @@ bool FastISel::selectInstruction(const Instruction *I) {
 
   if (const auto *Call = dyn_cast<CallInst>(I)) {
     const Function *F = Call->getCalledFunction();
-    LibFunc Func;
-
-    // As a special case, don't handle calls to builtin library functions that
-    // may be translated directly to target instructions.
-    if (F && !F->hasLocalLinkage() && F->hasName() &&
-        LibInfo->getLibFunc(F->getName(), Func) &&
-        LibInfo->hasOptimizedCodeGen(Func))
-      return false;
 
     // Don't handle Intrinsic::trap if a trap function is specified.
     if (F && F->getIntrinsicID() == Intrinsic::trap &&
@@ -1718,7 +1738,7 @@ bool FastISel::selectExtractValue(const User *U) {
 
   // Get the base result register.
   Register ResultReg;
-  DenseMap<const Value *, Register>::iterator I = FuncInfo.ValueMap.find(Op0);
+  auto I = FuncInfo.ValueMap.find(Op0);
   if (I != FuncInfo.ValueMap.end())
     ResultReg = I->second;
   else if (isa<Instruction>(Op0))
@@ -1785,19 +1805,12 @@ bool FastISel::selectOperator(const User *I, unsigned Opcode) {
   case Instruction::GetElementPtr:
     return selectGetElementPtr(I);
 
-  case Instruction::Br: {
-    const BranchInst *BI = cast<BranchInst>(I);
-
-    if (BI->isUnconditional()) {
-      const BasicBlock *LLVMSucc = BI->getSuccessor(0);
-      MachineBasicBlock *MSucc = FuncInfo.getMBB(LLVMSucc);
-      fastEmitBranch(MSucc, BI->getDebugLoc());
-      return true;
-    }
-
-    // Conditional branches are not handed yet.
-    // Halt "fast" selection and bail.
-    return false;
+  case Instruction::UncondBr: {
+    const UncondBrInst *BI = cast<UncondBrInst>(I);
+    const BasicBlock *LLVMSucc = BI->getSuccessor(0);
+    MachineBasicBlock *MSucc = FuncInfo.getMBB(LLVMSucc);
+    fastEmitBranch(MSucc, BI->getDebugLoc());
+    return true;
   }
 
   case Instruction::Unreachable: {
@@ -1875,6 +1888,7 @@ bool FastISel::selectOperator(const User *I, unsigned Opcode) {
 
 FastISel::FastISel(FunctionLoweringInfo &FuncInfo,
                    const TargetLibraryInfo *LibInfo,
+                   const LibcallLoweringInfo *LibcallLowering,
                    bool SkipTargetIndependentISel)
     : FuncInfo(FuncInfo), MF(FuncInfo.MF), MRI(FuncInfo.MF->getRegInfo()),
       MFI(FuncInfo.MF->getFrameInfo()), MCP(*FuncInfo.MF->getConstantPool()),
@@ -1882,6 +1896,7 @@ FastISel::FastISel(FunctionLoweringInfo &FuncInfo,
       TII(*MF->getSubtarget().getInstrInfo()),
       TLI(*MF->getSubtarget().getTargetLowering()),
       TRI(*MF->getSubtarget().getRegisterInfo()), LibInfo(LibInfo),
+      LibcallLowering(LibcallLowering),
       SkipTargetIndependentISel(SkipTargetIndependentISel) {}
 
 FastISel::~FastISel() = default;
@@ -1951,7 +1966,10 @@ Register FastISel::fastEmit_ri_(MVT VT, unsigned Opcode, Register Op0,
     // fast-isel, which would be very slow.
     IntegerType *ITy =
         IntegerType::get(FuncInfo.Fn->getContext(), VT.getSizeInBits());
-    MaterialReg = getRegForValue(ConstantInt::get(ITy, Imm));
+    // TODO: Avoid implicit trunc?
+    // See https://github.com/llvm/llvm-project/issues/112510.
+    MaterialReg = getRegForValue(
+        ConstantInt::get(ITy, Imm, /*IsSigned=*/false, /*ImplicitTrunc=*/true));
     if (!MaterialReg)
       return Register();
   }
@@ -2177,7 +2195,8 @@ Register FastISel::fastEmitInst_extractsubreg(MVT RetVT, Register Op0,
   const TargetRegisterClass *RC = MRI.getRegClass(Op0);
   MRI.constrainRegClass(Op0, TRI.getSubClassWithSubReg(RC, Idx));
   BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, MIMD, TII.get(TargetOpcode::COPY),
-          ResultReg).addReg(Op0, 0, Idx);
+          ResultReg)
+      .addReg(Op0, {}, Idx);
   return ResultReg;
 }
 
@@ -2280,9 +2299,9 @@ bool FastISel::tryToFoldLoad(const LoadInst *LI, const Instruction *FoldInst) {
   if (TheUser != FoldInst)
     return false;
 
-  // Don't try to fold volatile loads.  Target has to deal with alignment
-  // constraints.
-  if (LI->isVolatile())
+  // Don't try to fold ordered loads.  Target has to deal with alignment
+  // constraints and synchronization.
+  if (!LI->isUnordered())
     return false;
 
   // Figure out which vreg this is going into.  If there is no assigned vreg yet

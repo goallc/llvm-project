@@ -19,7 +19,6 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/LEB128.h"
-#include "llvm/Support/SystemZ/zOSSupport.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/YAMLTraits.h"
 #include "llvm/Support/raw_ostream.h"
@@ -626,9 +625,12 @@ void MachOWriter::writeStringTable(raw_ostream &OS) {
 }
 
 void MachOWriter::writeDynamicSymbolTable(raw_ostream &OS) {
-  for (auto Data : Obj.LinkEdit.IndirectSymbols)
-    OS.write(reinterpret_cast<const char *>(&Data),
-             sizeof(yaml::Hex32::BaseType));
+  for (auto Data : Obj.LinkEdit.IndirectSymbols) {
+    uint32_t Value = Data;
+    if (Obj.IsLittleEndian != sys::IsLittleEndianHost)
+      MachO::swapStruct(Value);
+    OS.write(reinterpret_cast<const char *>(&Value), sizeof(uint32_t));
+  }
 }
 
 void MachOWriter::writeFunctionStarts(raw_ostream &OS) {

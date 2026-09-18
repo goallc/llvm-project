@@ -13,6 +13,7 @@
 
 #include "AArch64MacroFusion.h"
 #include "AArch64Subtarget.h"
+#include "Utils/AArch64BaseInfo.h"
 #include "llvm/CodeGen/MacroFusion.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 
@@ -73,7 +74,11 @@ static bool isArithmeticCbzPair(const MachineInstr *FirstMI,
   if (SecondMI.getOpcode() != AArch64::CBZW &&
       SecondMI.getOpcode() != AArch64::CBZX &&
       SecondMI.getOpcode() != AArch64::CBNZW &&
-      SecondMI.getOpcode() != AArch64::CBNZX)
+      SecondMI.getOpcode() != AArch64::CBNZX &&
+      SecondMI.getOpcode() != AArch64::TBZW &&
+      SecondMI.getOpcode() != AArch64::TBZX &&
+      SecondMI.getOpcode() != AArch64::TBNZW &&
+      SecondMI.getOpcode() != AArch64::TBNZX)
     return false;
 
   // Assume the 1st instr to be a wildcard if it is unspecified.
@@ -97,15 +102,25 @@ static bool isArithmeticCbzPair(const MachineInstr *FirstMI,
   case AArch64::ORRWrr:
   case AArch64::ORRXri:
   case AArch64::ORRXrr:
+  case AArch64::ORNWrr:
+  case AArch64::ORNXrr:
   case AArch64::SUBWri:
   case AArch64::SUBWrr:
   case AArch64::SUBXri:
   case AArch64::SUBXrr:
+  case AArch64::BICWrr:
+  case AArch64::BICXrr:
     return true;
   case AArch64::ADDWrs:
   case AArch64::ADDXrs:
   case AArch64::ANDWrs:
   case AArch64::ANDXrs:
+  case AArch64::EORWrs:
+  case AArch64::EORXrs:
+  case AArch64::ORNWrs:
+  case AArch64::ORNXrs:
+  case AArch64::ORRWrs:
+  case AArch64::ORRXrs:
   case AArch64::SUBWrs:
   case AArch64::SUBXrs:
   case AArch64::BICWrs:
@@ -117,19 +132,42 @@ static bool isArithmeticCbzPair(const MachineInstr *FirstMI,
   return false;
 }
 
+// True unless the pair provably writes different physical registers. Pre-RA
+// the dests are still virtual, and post-RA it requires a genuine WAW (same dest
+// reg).
+static bool mayHaveWAWDependency(const MachineInstr &FirstMI,
+                                 const MachineInstr &SecondMI) {
+  Register DestFirst = FirstMI.getOperand(0).getReg();
+  Register DestSecond = SecondMI.getOperand(0).getReg();
+  if (!DestFirst.isPhysical() || !DestSecond.isPhysical())
+    return true;
+  return DestFirst == DestSecond;
+}
+
 /// AES crypto encoding or decoding.
 static bool isAESPair(const MachineInstr *FirstMI,
                       const MachineInstr &SecondMI) {
   // Assume the 1st instr to be a wildcard if it is unspecified.
-  switch (SecondMI.getOpcode()) {
+  unsigned SecondOpcode = SecondMI.getOpcode();
+  switch (SecondOpcode) {
   // AES encode.
   case AArch64::AESMCrr:
   case AArch64::AESMCrrTied:
-    return FirstMI == nullptr || FirstMI->getOpcode() == AArch64::AESErr;
+    if (FirstMI == nullptr)
+      return true;
+    if (FirstMI->getOpcode() != AArch64::AESErr)
+      return false;
+    return SecondOpcode == AArch64::AESMCrrTied ||
+           mayHaveWAWDependency(*FirstMI, SecondMI);
   // AES decode.
   case AArch64::AESIMCrr:
   case AArch64::AESIMCrrTied:
-    return FirstMI == nullptr || FirstMI->getOpcode() == AArch64::AESDrr;
+    if (FirstMI == nullptr)
+      return true;
+    if (FirstMI->getOpcode() != AArch64::AESDrr)
+      return false;
+    return SecondOpcode == AArch64::AESIMCrrTied ||
+           mayHaveWAWDependency(*FirstMI, SecondMI);
   }
 
   return false;
@@ -236,6 +274,52 @@ static bool isAddressLdStPair(const MachineInstr *FirstMI,
   return false;
 }
 
+static bool hasRelocFragment(const MachineInstr &MI, unsigned Fragment) {
+  return llvm::any_of(MI.operands(), [Fragment](const MachineOperand &MO) {
+    return !MO.isReg() &&
+           (MO.getTargetFlags() & AArch64II::MO_FRAGMENT) == Fragment;
+  });
+}
+
+static bool isGoObjAddressLdStPair(const MachineInstr *FirstMI,
+                                   const MachineInstr &SecondMI) {
+  // GoObj has no composite relocation for a 128-bit load or store.
+  if (SecondMI.getOpcode() == AArch64::LDRQui ||
+      SecondMI.getOpcode() == AArch64::STRQui)
+    return false;
+  return isAddressLdStPair(FirstMI, SecondMI);
+}
+
+// GoObj represents an ADRP and its low-12 ADD or LD/ST as one composite
+// relocation, which requires the two instructions to remain adjacent. Keep
+// only genuine page-relative relocation pairs together; ordinary address
+// generation remains controlled by the processor's fusion features.
+static bool isGoObjPageRelocPair(const AArch64Subtarget &ST,
+                                 const MachineInstr *FirstMI,
+                                 const MachineInstr &SecondMI) {
+  if (!ST.getTargetTriple().isOSBinFormatGoObj() ||
+      !hasRelocFragment(SecondMI, AArch64II::MO_PAGEOFF))
+    return false;
+
+  if (FirstMI == nullptr)
+    return isAdrpAddPair(nullptr, SecondMI) ||
+           isGoObjAddressLdStPair(nullptr, SecondMI);
+
+  if (FirstMI->getOpcode() != AArch64::ADRP ||
+      !hasRelocFragment(*FirstMI, AArch64II::MO_PAGE))
+    return false;
+
+  return isAdrpAddPair(FirstMI, SecondMI) ||
+         isGoObjAddressLdStPair(FirstMI, SecondMI);
+}
+
+static bool shouldScheduleGoObjRelocationAdjacent(
+    const TargetInstrInfo &, const TargetSubtargetInfo &TSI,
+    const MachineInstr *FirstMI, const MachineInstr &SecondMI) {
+  const AArch64Subtarget &ST = static_cast<const AArch64Subtarget &>(TSI);
+  return isGoObjPageRelocPair(ST, FirstMI, SecondMI);
+}
+
 /// Compare and conditional select.
 static bool isCmpCSelPair(const MachineInstr *FirstMI,
                           const MachineInstr &SecondMI) {
@@ -277,6 +361,35 @@ static bool isCmpCSelPair(const MachineInstr *FirstMI,
   }
 
   return false;
+}
+
+/// Floating-point compare and floating-point conditional select.
+static bool isFCmpFCSelPair(const MachineInstr *FirstMI,
+                            const MachineInstr &SecondMI) {
+  switch (SecondMI.getOpcode()) {
+  case AArch64::FCSELSrrr:
+  case AArch64::FCSELDrrr:
+  case AArch64::FCSELHrrr:
+    break;
+  default:
+    return false;
+  }
+
+  // Assume the 1st instr to be a wildcard if it is unspecified.
+  if (FirstMI == nullptr)
+    return true;
+
+  switch (FirstMI->getOpcode()) {
+  case AArch64::FCMPSrr:
+  case AArch64::FCMPDrr:
+  case AArch64::FCMPESrr:
+  case AArch64::FCMPEDrr:
+  case AArch64::FCMPHrr:
+  case AArch64::FCMPEHrr:
+    return true;
+  default:
+    return false;
+  }
 }
 
 /// Compare and cset.
@@ -501,6 +614,8 @@ static bool shouldScheduleAdjacent(const TargetInstrInfo &TII,
     return true;
   if (ST.hasFuseCmpCSel() && isCmpCSelPair(FirstMI, SecondMI))
     return true;
+  if (ST.hasFuseFCmpFCSel() && isFCmpFCSelPair(FirstMI, SecondMI))
+    return true;
   if (ST.hasFuseCmpCSet() && isCmpCSetPair(FirstMI, SecondMI))
     return true;
   if (ST.hasFuseArithmeticLogic() && isArithmeticLogicPair(FirstMI, SecondMI))
@@ -515,4 +630,10 @@ static bool shouldScheduleAdjacent(const TargetInstrInfo &TII,
 std::unique_ptr<ScheduleDAGMutation>
 llvm::createAArch64MacroFusionDAGMutation() {
   return createMacroFusionDAGMutation(shouldScheduleAdjacent);
+}
+
+std::unique_ptr<ScheduleDAGMutation>
+llvm::createAArch64GoObjRelocationDAGMutation() {
+  return createRequiredInstrPairingDAGMutation(
+      shouldScheduleGoObjRelocationAdjacent);
 }

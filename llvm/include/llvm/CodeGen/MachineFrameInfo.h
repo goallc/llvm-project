@@ -17,6 +17,7 @@
 #include "llvm/CodeGen/Register.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/Support/Alignment.h"
+#include "llvm/Support/CodeGen.h"
 #include "llvm/Support/Compiler.h"
 #include <cassert>
 #include <vector>
@@ -27,6 +28,7 @@ class MachineFunction;
 class MachineBasicBlock;
 class BitVector;
 class AllocaInst;
+class MCSymbol;
 
 /// The CalleeSavedInfo class tracks the information need to locate where a
 /// callee saved register is in the current frame.
@@ -123,6 +125,18 @@ public:
                       ///< triggered protection.  3rd closest to the protector.
   };
 
+  struct GoObjArgLiveSlot {
+    int FrameIndex;
+    uint32_t Offset;
+    uint32_t Size;
+    uint16_t Mask;
+  };
+
+  struct GoObjArgLiveEvent {
+    const MCSymbol *Label;
+    uint16_t Mask;
+  };
+
 private:
   // Represent a single object allocated on the stack.
   struct StackObject {
@@ -130,9 +144,14 @@ private:
     // the function.  This field has no meaning for a variable sized element.
     int64_t SPOffset;
 
-    // The size of this object on the stack. 0 means a variable sized object,
-    // ~0ULL means a dead object.
+    // The size of this object on the stack. ~0ULL means a dead object. A zero
+    // size is valid for fixed address anchors and is distinguished from a
+    // variable sized object by IsVariableSized.
     uint64_t Size;
+
+    // Whether this is a variable sized object. Fixed objects may have zero
+    // size when only their ABI-defined address is materialized.
+    bool IsVariableSized;
 
     // The required alignment of this stack slot.
     Align Alignment;
@@ -146,12 +165,14 @@ private:
     // cannot alias any other memory objects.
     bool isSpillSlot;
 
-    /// If true, this stack slot is used to spill a value (could be deopt
-    /// and/or GC related) over a statepoint. We know that the address of the
-    /// slot can't alias any LLVM IR value.  This is very similar to a Spill
-    /// Slot, but is created by statepoint lowering is SelectionDAG, not the
-    /// register allocator.
+    /// If true, a statepoint operand describes the value stored in this
+    /// object. This includes both non-aliasing spills created by SelectionDAG
+    /// statepoint lowering and reusable fixed incoming argument homes.
     bool isStatepointSpillSlot = false;
+
+    /// If true, this stack slot is used for spilling a callee saved register
+    /// in the calling convention of the containing function.
+    bool isCalleeSaved = false;
 
     /// Identifier for stack memory type analagous to address space. If this is
     /// non-0, the meaning is target defined. Offsets cannot be directly
@@ -188,8 +209,10 @@ private:
 
     StackObject(uint64_t Size, Align Alignment, int64_t SPOffset,
                 bool IsImmutable, bool IsSpillSlot, const AllocaInst *Alloca,
-                bool IsAliased, uint8_t StackID = 0)
-        : SPOffset(SPOffset), Size(Size), Alignment(Alignment),
+                bool IsAliased, uint8_t StackID = 0,
+                bool IsVariableSized = false)
+        : SPOffset(SPOffset), Size(Size), IsVariableSized(IsVariableSized),
+          Alignment(Alignment),
           isImmutable(IsImmutable), isSpillSlot(IsSpillSlot), StackID(StackID),
           Alloca(Alloca), isAliased(IsAliased) {}
   };
@@ -275,6 +298,10 @@ private:
   /// Set to true if this function has any function calls.
   bool HasCalls = false;
 
+  /// Frame-pointer policy for this function to avoid repeated attribute
+  /// lookups in hot paths.
+  FramePointerKind FramePointerPolicy = FramePointerKind::None;
+
   /// The frame index for the stack protector.
   int StackProtectorIdx = -1;
 
@@ -286,6 +313,25 @@ private:
   /// class).  This information is important for frame pointer elimination.
   /// It is only valid during and after prolog/epilog code insertion.
   uint64_t MaxCallFrameSize = ~UINT64_C(0);
+
+  /// Logical Go ABI input stack extent and complete argument/home area size.
+  /// Target formal-argument lowering records the values after CCState has
+  /// assigned every input. Late GoObj emission and return lowering consume the
+  /// cached result instead of reconstructing the calling convention from IR.
+  uint64_t GoABIStackArgsSize = ~UINT64_C(0);
+  uint64_t GoABIArgSize = ~UINT64_C(0);
+
+  /// True when target frame lowering has applied native Go's implicit NOSPLIT
+  /// policy and omitted the stack-growth prologue. GoObj emission consumes
+  /// this bit so linker stack accounting observes the same effective policy.
+  bool GoObjNoSplit = false;
+
+  /// Final fixed-stack locations corresponding to frontend traceback slots,
+  /// and labels where stores already present in the final machine function
+  /// make those slots valid. These records describe code generation; they do
+  /// not request argument spills.
+  SmallVector<GoObjArgLiveSlot, 10> GoObjArgLiveSlots;
+  SmallVector<GoObjArgLiveEvent, 8> GoObjArgLiveEvents;
 
   /// The number of bytes of callee saved registers that the target wants to
   /// report for the current function in the CodeView S_FRAMEPROC record.
@@ -637,6 +683,11 @@ public:
   bool hasCalls() const { return HasCalls; }
   void setHasCalls(bool V) { HasCalls = V; }
 
+  FramePointerKind getFramePointerPolicy() const { return FramePointerPolicy; }
+  void setFramePointerPolicy(FramePointerKind Kind) {
+    FramePointerPolicy = Kind;
+  }
+
   /// Returns true if the function contains opaque dynamic stack adjustments.
   bool hasOpaqueSPAdjustment() const { return HasOpaqueSPAdjustment; }
   void setHasOpaqueSPAdjustment(bool B) { HasOpaqueSPAdjustment = B; }
@@ -691,6 +742,47 @@ public:
   }
   void setMaxCallFrameSize(uint64_t S) { MaxCallFrameSize = S; }
 
+  bool hasGoABIArgSizes() const {
+    return GoABIStackArgsSize != ~UINT64_C(0) && GoABIArgSize != ~UINT64_C(0);
+  }
+  uint64_t getGoABIStackArgsSize() const {
+    assert(hasGoABIArgSizes() && "Go ABI argument sizes are not initialized");
+    return GoABIStackArgsSize;
+  }
+  uint64_t getGoABIArgSize() const {
+    assert(hasGoABIArgSizes() && "Go ABI argument sizes are not initialized");
+    return GoABIArgSize;
+  }
+  void setGoABIArgSizes(uint64_t StackArgsSize, uint64_t ArgSize) {
+    GoABIStackArgsSize = StackArgsSize;
+    GoABIArgSize = ArgSize;
+  }
+
+  bool isGoObjNoSplit() const { return GoObjNoSplit; }
+  void setGoObjNoSplit(bool Value = true) { GoObjNoSplit = Value; }
+
+  void clearGoObjArgLiveSlots() {
+    GoObjArgLiveSlots.clear();
+    GoObjArgLiveEvents.clear();
+  }
+  void addGoObjArgLiveSlot(int FrameIndex, uint32_t Offset, uint32_t Size,
+                           uint16_t Mask) {
+    assert(isFixedObjectIndex(FrameIndex) && Size != 0 && Mask != 0 &&
+           "invalid Go argument liveness slot");
+    GoObjArgLiveSlots.push_back({FrameIndex, Offset, Size, Mask});
+  }
+  ArrayRef<GoObjArgLiveSlot> getGoObjArgLiveSlots() const {
+    return GoObjArgLiveSlots;
+  }
+
+  void addGoObjArgLiveEvent(const MCSymbol *Label, uint16_t Mask) {
+    assert(Label && "invalid Go argument liveness event");
+    GoObjArgLiveEvents.push_back({Label, Mask});
+  }
+  ArrayRef<GoObjArgLiveEvent> getGoObjArgLiveEvents() const {
+    return GoObjArgLiveEvents;
+  }
+
   /// Returns how many bytes of callee-saved registers the target pushed in the
   /// prologue. Only used for debug info.
   unsigned getCVBytesOfCalleeSavedRegisters() const {
@@ -700,14 +792,16 @@ public:
     CVBytesOfCalleeSavedRegisters = S;
   }
 
-  /// Create a new object at a fixed location on the stack.
+  /// Create a new object at a fixed location on the stack. Size may be zero
+  /// when the object is an address anchor that occupies no storage.
   /// All fixed objects should be created before other objects are created for
   /// efficiency. By default, fixed objects are not pointed to by LLVM IR
   /// values. This returns an index with a negative value.
   LLVM_ABI int CreateFixedObject(uint64_t Size, int64_t SPOffset,
                                  bool IsImmutable, bool isAliased = false);
 
-  /// Create a spill slot at a fixed location on the stack.
+  /// Create a spill slot at a fixed location on the stack. Size may be zero
+  /// for a zero-sized incoming value that occupies no storage.
   /// Returns an index with a negative value.
   LLVM_ABI int CreateFixedSpillStackObject(uint64_t Size, int64_t SPOffset,
                                            bool IsImmutable = false);
@@ -762,6 +856,18 @@ public:
     return Objects[ObjectIdx+NumFixedObjects].isStatepointSpillSlot;
   }
 
+  bool isCalleeSavedObjectIndex(int ObjectIdx) const {
+    assert(unsigned(ObjectIdx + NumFixedObjects) < Objects.size() &&
+           "Invalid Object Idx!");
+    return Objects[ObjectIdx + NumFixedObjects].isCalleeSaved;
+  }
+
+  void setIsCalleeSavedObjectIndex(int ObjectIdx, bool IsCalleeSaved) {
+    assert(unsigned(ObjectIdx + NumFixedObjects) < Objects.size() &&
+           "Invalid Object Idx!");
+    Objects[ObjectIdx + NumFixedObjects].isCalleeSaved = IsCalleeSaved;
+  }
+
   /// \see StackID
   uint8_t getStackID(int ObjectIdx) const {
     return Objects[ObjectIdx+NumFixedObjects].StackID;
@@ -788,7 +894,7 @@ public:
   bool isVariableSizedObjectIndex(int ObjectIdx) const {
     assert(unsigned(ObjectIdx + NumFixedObjects) < Objects.size() &&
            "Invalid Object Idx!");
-    return Objects[ObjectIdx + NumFixedObjects].Size == 0;
+    return Objects[ObjectIdx + NumFixedObjects].IsVariableSized;
   }
 
   void markAsStatepointSpillSlotObjectIndex(int ObjectIdx) {
@@ -807,7 +913,9 @@ public:
 
   /// Create a new statically sized stack object that represents a spill slot,
   /// returning a nonnegative identifier to represent it.
-  LLVM_ABI int CreateSpillStackObject(uint64_t Size, Align Alignment);
+  LLVM_ABI int
+  CreateSpillStackObject(uint64_t Size, Align Alignment,
+                         TargetStackID::Value StackID = TargetStackID::Default);
 
   /// Remove or mark dead a statically sized stack object.
   void RemoveStackObject(int ObjectIdx) {

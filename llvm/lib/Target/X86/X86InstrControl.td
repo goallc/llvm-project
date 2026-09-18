@@ -88,6 +88,10 @@ let isBranch = 1, isTerminator = 1, Uses = [EFLAGS], SchedRW = [WriteJump],
   }
 }
 
+let hasSideEffects = 1, Uses = [EFLAGS], SchedRW = [WriteJump] in
+def JCC_SELF : PseudoI<(outs), (ins ccode:$cond),
+                       [(X86brcond_self timm:$cond, EFLAGS)]>;
+
 // jcx/jecx/jrcx instructions.
 let isBranch = 1, isTerminator = 1, hasSideEffects = 0, SchedRW = [WriteJump] in {
   // These are the 32-bit versions of this instruction for the asmparser.  In
@@ -321,7 +325,8 @@ let isCall = 1, isTerminator = 1, isReturn = 1, isBranch = 1,
 // RSP is marked as a use to prevent stack-pointer assignments that appear
 // immediately before calls from potentially appearing dead. Uses for argument
 // registers are added manually.
-let isCall = 1, Uses = [RSP, SSP], SchedRW = [WriteJump] in {
+let isCall = 1, Uses = [RSP, SSP], SchedRW = [WriteJump],
+    hasPostISelHook = 1 in {
   // NOTE: this pattern doesn't match "X86call imm", because we do not know
   // that the offset between an arbitrary immediate and the call will fit in
   // the 32-bit pcrel field that we have.
@@ -363,6 +368,8 @@ let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
                                []>, Sched<[WriteJump]>;
   def TCRETURN_WIN64ri : PseudoI<(outs), (ins GR64_TCW64:$dst, i32imm:$offset),
                                 []>, Sched<[WriteJump]>;
+  def TCRETURN_GO64ri : PseudoI<(outs), (ins GR64_TCGo:$dst, i32imm:$offset),
+                               []>, Sched<[WriteJump]>;
 
   def TCRETURNri64_ImpCall   : PseudoI<(outs),
                                (ins GR64_A:$dst, i32imm:$offset),
@@ -372,6 +379,7 @@ let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
   def TCRETURNmi64   : PseudoI<(outs),
                                (ins i64mem_TC:$dst, i32imm:$offset),
                                []>, Sched<[WriteJumpLd]>;
+  let mayLoad = 1 in
   def TCRETURN_WINmi64   : PseudoI<(outs),
                                (ins i64mem_w64TC:$dst, i32imm:$offset),
                                []>, Sched<[WriteJumpLd]>;
@@ -381,6 +389,8 @@ let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
 
   def TAILJMPr64 : PseudoI<(outs), (ins ptr_rc_tailcall:$dst),
                            []>, Sched<[WriteJump]>;
+  def TAILJMP_GO64r : PseudoI<(outs), (ins GR64_TCGo:$dst),
+                            []>, Sched<[WriteJump]>;
 
   let mayLoad = 1 in
   def TAILJMPm64 : PseudoI<(outs), (ins i64mem_TC:$dst),
@@ -390,6 +400,8 @@ let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
   let hasREX_W = 1 in {
     def TAILJMPr64_REX : PseudoI<(outs), (ins ptr_rc_tailcall:$dst),
                                  []>, Sched<[WriteJump]>;
+    def TAILJMP_GO64r_REX : PseudoI<(outs), (ins GR64_TCGo:$dst),
+                                  []>, Sched<[WriteJump]>;
 
     let mayLoad = 1 in
     def TAILJMPm64_REX : PseudoI<(outs), (ins i64mem_TC:$dst),
@@ -420,6 +432,7 @@ let isPseudo = 1, isCall = 1, isCodeGenOnly = 1,
 
 let isPseudo = 1, isCall = 1, isCodeGenOnly = 1,
     Uses = [RSP, SSP],
+    hasPostISelHook = 1,
     SchedRW = [WriteJump] in {
   def CALL64m_RVMARKER :
      PseudoI<(outs), (ins i64imm:$rvfunc, i64mem:$dst), [(X86call_rvmarker tglobaladdr:$rvfunc, (loadi64 addr:$dst))]>,
@@ -437,6 +450,28 @@ let isPseudo = 1, isCall = 1, isCodeGenOnly = 1,
     PseudoI<(outs), (ins GR64_A:$dst), [(X86call GR64_A:$dst)]>,
             Requires<[In64BitMode,NotUseIndirectThunkCalls,ImportCallOptimizationEnabled]>;
 }
+
+// Go's write-barrier buffer entry points use a private ABI: the selected
+// runtime.gcWriteBarrierN wrapper returns the buffer pointer in R11, preserves
+// the allocatable general-purpose registers, and may clobber condition flags
+// and the allocatable floating-point/vector registers. XMM15 is Go's reserved
+// zero register and is preserved by the private ABI.
+// Keep this as a call-like pseudo through register allocation so that the
+// fixed-register and clobber constraints are visible without treating the IR
+// intrinsic as an ordinary call/statepoint.
+let isCall = 1, isCodeGenOnly = 1, hasSideEffects = 1,
+    mayLoad = 1, mayStore = 1, Uses = [RSP, SSP],
+    // Keep the fixed result first so InstrEmitter associates the intrinsic's
+    // value with R11 rather than with one of the private call's clobbers.
+    Defs = [R11, EFLAGS,
+            XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
+            XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14],
+    SchedRW = [WriteJump] in
+def GO_GC_WRITE_BARRIER
+    : PseudoI<(outs), (ins i32imm:$entries),
+              [(set R11,
+                    (int_go_gc_write_barrier (i32 timm:$entries)))]>,
+      Requires<[In64BitMode]>;
 
 // Conditional tail calls are similar to the above, but they are branches
 // rather than barriers, and they use EFLAGS.

@@ -19,6 +19,8 @@
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Target/TargetOptions.h"
+#include <array>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -33,9 +35,32 @@ class TargetMachine;
 
 namespace codegen {
 
+// GoObjConfig is decoded from !goobj.config in a Go frontend's LLVM module.
+// It is intentionally distinct from command-line flags: the IR is the
+// reproducible handoff between the frontend and llc.
+struct GoObjConfig {
+  std::string GOOS;
+  std::string GOARCH;
+  std::string GOARCHSettingKey;
+  std::string GOARCHSettingValue;
+  std::string Version;
+  std::string BuildID;
+  std::string PackagePath;
+  std::vector<std::string> Experiments;
+  std::array<uint8_t, 8> Fingerprint = {};
+  bool IsMain = false;
+  bool IsShared = false;
+  bool IsStd = false;
+};
+
+LLVM_ABI void setGoObjConfig(GoObjConfig Config);
+LLVM_ABI std::optional<GoObjConfig> getGoObjConfig();
+
 LLVM_ABI std::string getMArch();
 
 LLVM_ABI std::string getMCPU();
+
+LLVM_ABI std::string getMTune();
 
 LLVM_ABI std::vector<std::string> getMAttrs();
 
@@ -57,12 +82,6 @@ LLVM_ABI std::optional<CodeGenFileType> getExplicitFileType();
 LLVM_ABI CodeGenFileType getFileType();
 
 LLVM_ABI FramePointerKind getFramePointerUsage();
-
-LLVM_ABI bool getEnableNoInfsFPMath();
-
-LLVM_ABI bool getEnableNoNaNsFPMath();
-
-LLVM_ABI bool getEnableNoSignedZerosFPMath();
 
 LLVM_ABI bool getEnableNoTrappingFPMath();
 
@@ -125,6 +144,8 @@ LLVM_ABI llvm::EABI getEABIVersion();
 
 LLVM_ABI llvm::DebuggerKind getDebuggerTuningOpt();
 
+LLVM_ABI llvm::VectorLibrary getVectorLibrary();
+
 LLVM_ABI bool getEnableStackSizeSection();
 
 LLVM_ABI bool getEnableAddrsig();
@@ -164,6 +185,12 @@ struct RegisterCodeGenFlags {
   LLVM_ABI RegisterCodeGenFlags();
 };
 
+/// Tools that support subtarget tuning should create this object with static
+/// storage to register the -mtune command line option.
+struct RegisterMTuneFlag {
+  LLVM_ABI RegisterMTuneFlag();
+};
+
 /// Tools that support stats saving should create this object with static
 /// storage to register the --save-stats command line option.
 struct RegisterSaveStatsFlag {
@@ -186,21 +213,23 @@ InitTargetOptionsFromCodeGenFlags(const llvm::Triple &TheTriple);
 
 LLVM_ABI std::string getCPUStr();
 
+LLVM_ABI std::string getTuneCPUStr();
+
 LLVM_ABI std::string getFeaturesStr();
 
 LLVM_ABI std::vector<std::string> getFeatureList();
 
 LLVM_ABI void renderBoolStringAttr(AttrBuilder &B, StringRef Name, bool Val);
 
-/// Set function attributes of function \p F based on CPU, Features, and command
-/// line flags.
-LLVM_ABI void setFunctionAttributes(StringRef CPU, StringRef Features,
-                                    Function &F);
+/// Set function attributes of function \p F based on CPU, TuneCPU, Features,
+/// and command line flags.
+LLVM_ABI void setFunctionAttributes(Function &F, StringRef CPU,
+                                    StringRef Features, StringRef TuneCPU = "");
 
 /// Set function attributes of functions in Module M based on CPU,
-/// Features, and command line flags.
-LLVM_ABI void setFunctionAttributes(StringRef CPU, StringRef Features,
-                                    Module &M);
+/// TuneCPU, Features, and command line flags.
+LLVM_ABI void setFunctionAttributes(Module &M, StringRef CPU,
+                                    StringRef Features, StringRef TuneCPU = "");
 
 /// Should value-tracking variable locations / instruction referencing be
 /// enabled by default for this triple?
@@ -209,6 +238,13 @@ LLVM_ABI bool getDefaultValueTrackingVariableLocations(const llvm::Triple &T);
 /// Creates a TargetMachine instance with the options defined on the command
 /// line. This can be used for tools that do not need further customization of
 /// the TargetOptions.
+LLVM_ABI Expected<std::unique_ptr<TargetMachine>> createTargetMachineForTriple(
+    const Triple &TargetTriple,
+    CodeGenOptLevel OptLevel = CodeGenOptLevel::Default);
+
+// TODO: Remove after llvm 23 branches
+LLVM_DEPRECATED("Use the Triple overload instead",
+                "createTargetMachineForTriple")
 LLVM_ABI Expected<std::unique_ptr<TargetMachine>> createTargetMachineForTriple(
     StringRef TargetTriple,
     CodeGenOptLevel OptLevel = CodeGenOptLevel::Default);

@@ -1,11 +1,13 @@
 add_llvm_component_library(LLVMAArch64Desc
   AArch64AsmBackend.cpp
   AArch64ELFObjectWriter.cpp
+  AArch64GoObjObjectWriter.cpp
   AArch64ELFStreamer.cpp
   AArch64InstPrinter.cpp
   AArch64MCAsmInfo.cpp
   AArch64MCCodeEmitter.cpp
   AArch64MCExpr.cpp
+  AArch64MCLFIRewriter.cpp
   AArch64MCTargetDesc.cpp
   AArch64MachObjectWriter.cpp
   AArch64TargetStreamer.cpp

@@ -35,8 +35,7 @@ static bool runCodePreprationImpl(Function &F, DominatorTree *DT, LoopInfo *LI,
     ++I;
 
   // Abort if not necessary to split
-  if (I->isTerminator() && isa<BranchInst>(I) &&
-      cast<BranchInst>(I)->isUnconditional())
+  if (isa<UncondBrInst>(I))
     return false;
 
   // splitBlock updates DT, LI and RI.
@@ -45,16 +44,7 @@ static bool runCodePreprationImpl(Function &F, DominatorTree *DT, LoopInfo *LI,
   return true;
 }
 
-PreservedAnalyses CodePreparationPass::run(Function &F,
-                                           FunctionAnalysisManager &FAM) {
-  auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);
-  auto &LI = FAM.getResult<LoopAnalysis>(F);
-  bool Changed = runCodePreprationImpl(F, &DT, &LI, nullptr);
-  if (!Changed)
-    return PreservedAnalyses::all();
-
-  PreservedAnalyses PA;
-  PA.preserve<DominatorTreeAnalysis>();
-  PA.preserve<LoopAnalysis>();
-  return PA;
+bool polly::runCodePreparation(Function &F, DominatorTree *DT, LoopInfo *LI,
+                               RegionInfo *RI) {
+  return runCodePreprationImpl(F, DT, LI, RI);
 }

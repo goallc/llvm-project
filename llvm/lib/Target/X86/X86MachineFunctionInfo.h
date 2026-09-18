@@ -114,6 +114,44 @@ class X86MachineFunctionInfo : public MachineFunctionInfo {
   /// ArgumentStackSize - The number of bytes on stack consumed by the arguments
   /// being passed on the stack.
   unsigned ArgumentStackSize = 0;
+
+public:
+  struct GoArgHome {
+    struct RegisterPiece {
+      unsigned Reg = 0;
+      uint32_t Offset = 0;
+      unsigned Size = 0;
+      bool IsFP = false;
+    };
+
+    unsigned ArgNo = 0;
+    int FrameIndex = 0;
+    SmallVector<RegisterPiece, 2> RegisterPieces;
+    uint64_t LogicalOffset = 0;
+
+    bool valueAlreadyInFrame() const { return RegisterPieces.empty(); }
+
+    void addRegisterPiece(unsigned Reg, uint32_t Offset, unsigned Size,
+                          bool IsFP) {
+      RegisterPieces.push_back({Reg, Offset, Size, IsFP});
+    }
+  };
+
+  struct GoArgPointerSlot {
+    int FrameIndex = 0;
+    uint32_t OffsetWithinObject = 0;
+    int32_t EntryOffset = 0;
+    uint32_t ArgWord = 0;
+  };
+
+private:
+  /// Canonical fixed frame objects for Go arguments and the register pieces
+  /// that the pre-frame morestack path must save into them.
+  SmallVector<GoArgHome, 16> GoArgHomes;
+  SmallVector<GoArgPointerSlot, 16> GoArgPointerSlots;
+  int GoABI0FrameIndex = 0;
+  bool HasGoABI0FrameIndex = false;
+
   /// NumLocalDynamics - Number of local-dynamic TLS accesses.
   unsigned NumLocalDynamics = 0;
   /// HasPushSequences - Keeps track of whether this function uses sequences
@@ -148,9 +186,6 @@ class X86MachineFunctionInfo : public MachineFunctionInfo {
   /// addr]. If so, bit 60 of the in-memory frame pointer will be 1 to enable
   /// other tools to detect the extended record.
   bool HasSwiftAsyncContext = false;
-
-  /// Adjust stack for push2/pop2
-  bool PadForPush2Pop2 = false;
 
   /// Candidate registers for push2/pop2
   std::set<Register> CandidatesForPush2Pop2;
@@ -211,9 +246,7 @@ public:
   const DenseMap<int, unsigned>& getWinEHXMMSlotInfo() const {
     return WinEHXMMSlotInfo; }
 
-  unsigned getCalleeSavedFrameSize() const {
-    return CalleeSavedFrameSize + 8 * padForPush2Pop2();
-  }
+  unsigned getCalleeSavedFrameSize() const { return CalleeSavedFrameSize; }
   void setCalleeSavedFrameSize(unsigned bytes) { CalleeSavedFrameSize = bytes; }
 
   unsigned getBytesToPopOnReturn() const { return BytesToPopOnReturn; }
@@ -249,6 +282,31 @@ public:
   unsigned getArgumentStackSize() const { return ArgumentStackSize; }
   void setArgumentStackSize(unsigned size) { ArgumentStackSize = size; }
 
+  void clearGoArgHomes() { GoArgHomes.clear(); }
+  GoArgHome &addGoArgHome(unsigned ArgNo, int FrameIndex) {
+    GoArgHomes.push_back({ArgNo, FrameIndex, {}});
+    return GoArgHomes.back();
+  }
+  MutableArrayRef<GoArgHome> getGoArgHomes() { return GoArgHomes; }
+  ArrayRef<GoArgHome> getGoArgHomes() const { return GoArgHomes; }
+
+  bool hasGoABI0FrameIndex() const { return HasGoABI0FrameIndex; }
+  int getGoABI0FrameIndex() const { return GoABI0FrameIndex; }
+  void setGoABI0FrameIndex(int FrameIndex) {
+    GoABI0FrameIndex = FrameIndex;
+    HasGoABI0FrameIndex = true;
+  }
+
+  void clearGoArgPointerSlots() { GoArgPointerSlots.clear(); }
+  void addGoArgPointerSlot(int FrameIndex, uint32_t OffsetWithinObject,
+                           int32_t EntryOffset, uint32_t ArgWord) {
+    GoArgPointerSlots.push_back(
+        {FrameIndex, OffsetWithinObject, EntryOffset, ArgWord});
+  }
+  ArrayRef<GoArgPointerSlot> getGoArgPointerSlots() const {
+    return GoArgPointerSlots;
+  }
+
   unsigned getNumLocalDynamicTLSAccesses() const { return NumLocalDynamics; }
   void incNumLocalDynamicTLSAccesses() { ++NumLocalDynamics; }
 
@@ -283,9 +341,6 @@ public:
 
   bool hasSwiftAsyncContext() const { return HasSwiftAsyncContext; }
   void setHasSwiftAsyncContext(bool v) { HasSwiftAsyncContext = v; }
-
-  bool padForPush2Pop2() const { return PadForPush2Pop2; }
-  void setPadForPush2Pop2(bool V) { PadForPush2Pop2 = V; }
 
   bool isCandidateForPush2Pop2(Register Reg) const {
     return CandidatesForPush2Pop2.find(Reg) != CandidatesForPush2Pop2.end();

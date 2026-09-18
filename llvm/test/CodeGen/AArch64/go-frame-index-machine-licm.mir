@@ -1,0 +1,80 @@
+# RUN: llc -mtriple=aarch64 -run-pass=early-machinelicm -o - %s | FileCheck %s
+
+# A Go stack frame address can change at a stack-growing call. Do not hoist a
+# selected FrameIndex computation out of a loop, even though ordinary LLVM
+# machine LICM considers it invariant.
+
+--- |
+  declare goabiinternal void @safepoint()
+
+  define goabiinternal void @go_frame_address() {
+  entry:
+    br label %loop
+
+  loop:
+    br label %loop
+  }
+
+  define void @ordinary_frame_address() {
+  entry:
+    br label %loop
+
+  loop:
+    br label %loop
+  }
+...
+---
+name: go_frame_address
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: default, size: 552, alignment: 8 }
+body: |
+  ; CHECK-LABEL: name: go_frame_address
+  ; CHECK: bb.0.entry:
+  ; CHECK-NOT: ADDXri %stack.0
+  ; CHECK: bb.1.loop:
+  ; CHECK: BL @safepoint
+  ; CHECK: [[BASE:%[0-9]+]]:gpr64sp = ADDXri %stack.0, 0, 0
+  ; CHECK-NEXT: [[FIELD:%[0-9]+]]:gpr64sp = ADDXri [[BASE]], 376, 0
+  ; CHECK-NEXT: STRQui {{%[0-9]+}}, [[FIELD]], 0
+  ; CHECK-NEXT: STRXui $xzr, [[BASE]], 0
+  bb.0.entry:
+    successors: %bb.1
+
+  bb.1.loop:
+    successors: %bb.1
+    BL @safepoint, csr_aarch64_go, implicit-def dead $lr, implicit $sp, implicit-def $sp
+    %2:fpr128 = MOVIv2d_ns 0
+    %0:gpr64sp = ADDXri %stack.0, 0, 0
+    %1:gpr64sp = ADDXri %0, 376, 0
+    STRQui %2, %1, 0
+    STRXui $xzr, %0, 0
+    B %bb.1
+...
+---
+name: ordinary_frame_address
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: default, size: 552, alignment: 8 }
+body: |
+  ; CHECK-LABEL: name: ordinary_frame_address
+  ; CHECK: bb.0.entry:
+  ; CHECK: [[BASE:%[0-9]+]]:gpr64sp = ADDXri %stack.0, 0, 0
+  ; CHECK: bb.1.loop:
+  ; CHECK: BL @safepoint
+  ; CHECK: [[FIELD:%[0-9]+]]:gpr64sp = ADDXri [[BASE]], 376, 0
+  ; CHECK-NEXT: STRQui {{%[0-9]+}}, [[FIELD]], 0
+  ; CHECK-NEXT: STRXui $xzr, [[BASE]], 0
+  bb.0.entry:
+    successors: %bb.1
+
+  bb.1.loop:
+    successors: %bb.1
+    BL @safepoint, csr_aarch64_go, implicit-def dead $lr, implicit $sp, implicit-def $sp
+    %2:fpr128 = MOVIv2d_ns 0
+    %0:gpr64sp = ADDXri %stack.0, 0, 0
+    %1:gpr64sp = ADDXri %0, 376, 0
+    STRQui %2, %1, 0
+    STRXui $xzr, %0, 0
+    B %bb.1
+...

@@ -11,6 +11,7 @@
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDXContainerWriter.h"
 #include "llvm/MC/MCELFObjectWriter.h"
+#include "llvm/MC/MCGoObjObjectWriter.h"
 #include "llvm/MC/MCGOFFObjectWriter.h"
 #include "llvm/MC/MCMachObjectWriter.h"
 #include "llvm/MC/MCObjectWriter.h"
@@ -51,6 +52,9 @@ MCAsmBackend::createObjectWriter(raw_pwrite_stream &OS) const {
   case Triple::GOFF:
     return createGOFFObjectWriter(cast<MCGOFFObjectTargetWriter>(std::move(TW)),
                                   OS);
+  case Triple::GoObj:
+    return createGoObjObjectWriter(
+        cast<MCGoObjObjectTargetWriter>(std::move(TW)), OS);
   case Triple::XCOFF:
     return createXCOFFObjectWriter(
         cast<MCXCOFFObjectTargetWriter>(std::move(TW)), OS);
@@ -107,12 +111,10 @@ MCFixupKindInfo MCAsmBackend::getFixupKindInfo(MCFixupKind Kind) const {
 }
 
 bool MCAsmBackend::fixupNeedsRelaxationAdvanced(const MCFragment &,
-                                                const MCFixup &Fixup,
-                                                const MCValue &, uint64_t Value,
+                                                const MCFixup &,
+                                                const MCValue &, uint64_t,
                                                 bool Resolved) const {
-  if (!Resolved)
-    return true;
-  return fixupNeedsRelaxation(Fixup, Value);
+  return !Resolved;
 }
 
 void MCAsmBackend::maybeAddReloc(const MCFragment &F, const MCFixup &Fixup,

@@ -26,8 +26,17 @@ class RISCVRegisterBankInfo;
 class RISCVSubtarget;
 class RISCVTargetMachine;
 
-FunctionPass *createRISCVCodeGenPreparePass();
-void initializeRISCVCodeGenPreparePass(PassRegistry &);
+class RISCVCodeGenPreparePass
+    : public OptionalPassInfoMixin<RISCVCodeGenPreparePass> {
+private:
+  const RISCVTargetMachine *TM;
+
+public:
+  RISCVCodeGenPreparePass(const RISCVTargetMachine *TM) : TM(TM) {}
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM);
+};
+FunctionPass *createRISCVCodeGenPrepareLegacyPass();
+void initializeRISCVCodeGenPrepareLegacyPassPass(PassRegistry &);
 
 FunctionPass *createRISCVDeadRegisterDefinitionsPass();
 void initializeRISCVDeadRegisterDefinitionsPass(PassRegistry &);
@@ -94,6 +103,9 @@ void initializeRISCVPushPopOptPass(PassRegistry &);
 FunctionPass *createRISCVLoadStoreOptPass();
 void initializeRISCVLoadStoreOptPass(PassRegistry &);
 
+FunctionPass *createRISCVPreAllocZilsdOptPass();
+void initializeRISCVPreAllocZilsdOptPass(PassRegistry &);
+
 FunctionPass *createRISCVZacasABIFixPass();
 void initializeRISCVZacasABIFixPass(PassRegistry &);
 
@@ -120,6 +132,9 @@ void initializeRISCVVLOptimizerPass(PassRegistry &);
 
 FunctionPass *createRISCVVMV0EliminationPass();
 void initializeRISCVVMV0EliminationPass(PassRegistry &);
+
+FunctionPass *createRISCVQCRelaxMarkingPass();
+void initializeRISCVQCRelaxMarkingPass(PassRegistry &);
 
 void initializeRISCVAsmPrinterPass(PassRegistry &);
 } // namespace llvm

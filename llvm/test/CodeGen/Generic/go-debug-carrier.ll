@@ -1,0 +1,299 @@
+; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O0 -verify-machineinstrs -stop-after=finalize-isel < %s | FileCheck %s --check-prefix=O0
+; RUN: llc -mtriple=x86_64-unknown-linux-gnu -O0 -verify-machineinstrs -stop-after=finalize-isel < %s | FileCheck %s --check-prefix=O0
+; RUN: llc -mtriple=x86_64-unknown-linux-gnu -O2 -verify-machineinstrs -filetype=obj < %s -o %t.x86_64.o
+; RUN: llc -mtriple=x86_64-unknown-linux-gnu -O2 -verify-machineinstrs -stop-after=finalize-isel < %s | FileCheck %s
+; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O2 -verify-machineinstrs -filetype=obj < %s -o %t.aarch64.o
+; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O2 -verify-machineinstrs -stop-after=finalize-isel < %s | FileCheck %s
+
+; RUN: llvm-dwarfdump --verify %t.x86_64.o
+; RUN: llvm-dwarfdump --verify %t.aarch64.o
+
+; RUN: opt -strip-debug < %s | llc -mtriple=x86_64-unknown-linux-gnu -O2 -filetype=obj -o %t.x86_64.nodebug.o
+; RUN: llvm-objcopy --dump-section .text=%t.x86_64.debug.text %t.x86_64.o
+; RUN: llvm-objcopy --dump-section .text=%t.x86_64.nodebug.text %t.x86_64.nodebug.o
+; RUN: cmp %t.x86_64.debug.text %t.x86_64.nodebug.text
+; RUN: opt -strip-debug < %s | llc -mtriple=aarch64-unknown-linux-gnu -O2 -filetype=obj -o %t.aarch64.nodebug.o
+; RUN: llvm-objcopy --dump-section .text=%t.aarch64.debug.text %t.aarch64.o
+; RUN: llvm-objcopy --dump-section .text=%t.aarch64.nodebug.text %t.aarch64.nodebug.o
+; RUN: cmp %t.aarch64.debug.text %t.aarch64.nodebug.text
+
+; Optimized carriers are removed even when their addresses have debug users.
+; The frontend describes existing SSA values and split pieces directly. These
+; survive through native tracking without reconstructing the eliminated home.
+; Legacy address descriptions become unavailable; keep homes at O0.
+%pair = type { i64, i64 }
+declare goabi0 void @sink(ptr byval(%pair) align 8)
+declare goabi0 void @source(ptr goret(%pair) align 8 "goretindex"="0")
+declare token @llvm.experimental.gc.statepoint.p0(i64 immarg, i32 immarg, ptr, i32 immarg, i32 immarg, ...)
+
+; O0-LABEL: name: byval_root
+; O0: name: home
+; CHECK-LABEL: name: byval_root
+; CHECK: stack: {{ *}}[]
+; CHECK: DBG_VALUE 13, $noreg, !{{[0-9]+}}, !DIExpression()
+define goabiinternal i64 @byval_root() gc "statepoint-example" !dbg !10 {
+entry:
+  %home = alloca %pair, align 8
+  %field = getelementptr inbounds %pair, ptr %home, i32 0, i32 1
+  ; A legacy storage declaration must not outlive the home or suppress the
+  ; independent SSA description below.
+  #dbg_declare(ptr %home, !11, !DIExpression(), !12)
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !12
+  #dbg_value(i64 13, !11, !DIExpression(), !12)
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !12
+  ret i64 0, !dbg !12
+}
+
+; O0-LABEL: name: byval_gep
+; O0: name: home
+; CHECK-LABEL: name: byval_gep
+; CHECK: stack: {{ *}}[]
+; CHECK: DBG_VALUE 17, $noreg, !{{[0-9]+}}, !DIExpression()
+define goabiinternal i64 @byval_gep() gc "statepoint-example" !dbg !13 {
+entry:
+  %home = alloca %pair, align 8
+  %field = getelementptr inbounds %pair, ptr %home, i32 0, i32 1
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !15
+  #dbg_value(i64 17, !14, !DIExpression(), !15)
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !15
+  ret i64 0, !dbg !15
+}
+
+; O0-LABEL: name: goret_root
+; O0: name: home
+; CHECK-LABEL: name: goret_root
+; CHECK: stack: {{ *}}[]
+; CHECK: {{(DBG_INSTR_REF !|DBG_VALUE %)[0-9]+}}
+define goabiinternal i64 @goret_root() gc "statepoint-example" !dbg !16 {
+entry:
+  %home = alloca %pair, align 8
+  %field = getelementptr inbounds %pair, ptr %home, i32 0, i32 1
+  %token = call goabi0 token (i64, i32, ptr, i32, i32, ...) @llvm.experimental.gc.statepoint.p0(
+      i64 1, i32 0, ptr elementtype(void (ptr)) @source, i32 1, i32 0,
+      ptr goret(%pair) align 8 "goretindex"="0" %home, i32 0, i32 0), !dbg !18
+  %value = load i64, ptr %home, align 8, !dbg !18
+  #dbg_value(i64 %value, !17, !DIExpression(), !18)
+  ret i64 %value, !dbg !18
+}
+
+; O0-LABEL: name: goret_gep
+; O0: name: home
+; CHECK-LABEL: name: goret_gep
+; CHECK: stack: {{ *}}[]
+; CHECK: {{(DBG_INSTR_REF !|DBG_VALUE %)[0-9]+}}
+define goabiinternal i64 @goret_gep() gc "statepoint-example" !dbg !19 {
+entry:
+  %home = alloca %pair, align 8
+  %field = getelementptr inbounds %pair, ptr %home, i32 0, i32 1
+  %token = call goabi0 token (i64, i32, ptr, i32, i32, ...) @llvm.experimental.gc.statepoint.p0(
+      i64 1, i32 0, ptr elementtype(void (ptr)) @source, i32 1, i32 0,
+      ptr goret(%pair) align 8 "goretindex"="0" %home, i32 0, i32 0), !dbg !21
+  %value = load i64, ptr %field, align 8, !dbg !21
+  #dbg_value(i64 %value, !20, !DIExpression(), !21)
+  ret i64 %value, !dbg !21
+}
+
+; O0-LABEL: name: byval_value
+; O0: name: home
+; CHECK-LABEL: name: byval_value
+; CHECK: stack: {{ *}}[]
+; CHECK: DBG_VALUE $noreg, $noreg, !{{[0-9]+}}, !DIExpression()
+define goabiinternal i64 @byval_value() gc "statepoint-example" !dbg !22 {
+entry:
+  %home = alloca %pair, align 8
+  %field = getelementptr inbounds %pair, ptr %home, i32 0, i32 1
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !24
+  #dbg_value(ptr %home, !23, !DIExpression(DW_OP_deref), !24)
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !24
+  ret i64 0, !dbg !24
+}
+
+; O0-LABEL: name: byval_pieces
+; O0: name: home
+; CHECK-LABEL: name: byval_pieces
+; CHECK: stack: {{ *}}[]
+; CHECK-DAG: DBG_VALUE 13, $noreg, !{{[0-9]+}}, !DIExpression(DW_OP_LLVM_fragment, 0, 64)
+; CHECK-DAG: DBG_VALUE 17, $noreg, !{{[0-9]+}}, !DIExpression(DW_OP_LLVM_fragment, 64, 64)
+define goabiinternal i64 @byval_pieces() gc "statepoint-example" !dbg !25 {
+entry:
+  %home = alloca %pair, align 8
+  %field = getelementptr inbounds %pair, ptr %home, i32 0, i32 1
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !27
+  #dbg_value(i64 13, !26, !DIExpression(DW_OP_LLVM_fragment, 0, 64), !27)
+  #dbg_value(i64 17, !26, !DIExpression(DW_OP_LLVM_fragment, 64, 64), !27)
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !27
+  ret i64 0, !dbg !27
+}
+
+; The eliminated address itself has no value equivalent: explicitly unavailable.
+; O0-LABEL: name: byval_address
+; O0: name: home
+; CHECK-LABEL: name: byval_address
+; CHECK: stack: {{ *}}[]
+; CHECK: DBG_VALUE $noreg, $noreg, !{{[0-9]+}}, !DIExpression()
+define goabiinternal i64 @byval_address() gc "statepoint-example" !dbg !28 {
+entry:
+  %home = alloca %pair, align 8
+  %field = getelementptr inbounds %pair, ptr %home, i32 0, i32 1
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !30
+  #dbg_value(ptr %home, !29, !DIExpression(), !30)
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !30
+  ret i64 0, !dbg !30
+}
+
+; O0-LABEL: name: byval_inserted
+; O0: name: home
+; CHECK-LABEL: name: byval_inserted
+; CHECK: stack: {{ *}}[]
+; CHECK: {{(DBG_INSTR_REF !|DBG_VALUE %)[0-9]+}}{{.*}}DW_OP_LLVM_fragment, 0, 64
+; CHECK: DBG_VALUE 17, $noreg, !{{[0-9]+}}, !DIExpression(DW_OP_LLVM_fragment, 64, 64)
+define goabiinternal i64 @byval_inserted(i64 %input) gc "statepoint-example" !dbg !33 {
+entry:
+  %home = alloca %pair, align 8
+  %first = insertvalue %pair poison, i64 %input, 0
+  %both = insertvalue %pair %first, i64 17, 1
+  store %pair %both, ptr %home, align 8, !dbg !35
+  #dbg_value(i64 %input, !34, !DIExpression(DW_OP_LLVM_fragment, 0, 64), !35)
+  #dbg_value(i64 17, !34, !DIExpression(DW_OP_LLVM_fragment, 64, 64), !35)
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !35
+  ret i64 0, !dbg !35
+}
+
+; A later address record must not reintroduce a removed frame object.
+; O0-LABEL: name: byval_late
+; O0: name: home
+; CHECK-LABEL: name: byval_late
+; CHECK: stack: {{ *}}[]
+; CHECK: DBG_VALUE $noreg, $noreg,
+define goabiinternal i64 @byval_late() gc "statepoint-example" !dbg !36 {
+entry:
+  %home = alloca %pair, align 8
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !38
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !38
+  #dbg_value(ptr %home, !37, !DIExpression(DW_OP_deref), !38)
+  ret i64 0, !dbg !38
+}
+
+; A later block can still lower an address record after the home was removed.
+; O0-LABEL: name: byval_late_block
+; O0: name: home
+; CHECK-LABEL: name: byval_late_block
+; CHECK: stack: {{ *}}[]
+; CHECK: DBG_VALUE $noreg, $noreg,
+define goabiinternal i64 @byval_late_block() gc "statepoint-example" !dbg !45 {
+entry:
+  %home = alloca %pair, align 8
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !47
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !47
+  br label %after
+after:
+  #dbg_value(ptr %home, !46, !DIExpression(DW_OP_deref), !47)
+  ret i64 0, !dbg !47
+}
+
+; Invalidating one operand of a list must not make its other operand the value.
+; O0-LABEL: name: byval_value_list
+; O0: name: home
+; CHECK-LABEL: name: byval_value_list
+; CHECK: stack: {{ *}}[]
+; CHECK: DBG_VALUE_LIST !{{[0-9]+}}, !DIExpression(DW_OP_LLVM_arg, 0, DW_OP_LLVM_arg, 1, DW_OP_deref, DW_OP_plus), 7, $noreg
+define goabiinternal i64 @byval_value_list() gc "statepoint-example" !dbg !48 {
+entry:
+  %home = alloca %pair, align 8
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !50
+  #dbg_value(!DIArgList(i64 7, ptr %home), !49, !DIExpression(DW_OP_LLVM_arg, 0, DW_OP_LLVM_arg, 1, DW_OP_deref, DW_OP_plus), !50)
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !50
+  ret i64 0, !dbg !50
+}
+
+; A debug record in an already-selected block must not retain the old FI.
+; O0-LABEL: name: byval_earlier_block
+; O0: name: home
+; CHECK-LABEL: name: byval_earlier_block
+; CHECK: stack: {{ *}}[]
+; CHECK: DBG_VALUE $noreg, $noreg,
+define goabiinternal i64 @byval_earlier_block() gc "statepoint-example" !dbg !39 {
+entry:
+  %home = alloca %pair, align 8
+  #dbg_value(ptr %home, !40, !DIExpression(DW_OP_deref), !41)
+  br label %use
+use:
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !41
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !41
+  ret i64 0, !dbg !41
+}
+
+; The IR candidate proof succeeds, but overlapping DAG stores reject forwarding.
+; Debug descriptions must remain attached to the surviving home in that case.
+; O0-LABEL: name: byval_not_forwarded
+; O0: name: home
+; CHECK-LABEL: name: byval_not_forwarded
+; CHECK: name: home
+; CHECK: debug-info-variable: '!{{[0-9]+}}'
+define goabiinternal i64 @byval_not_forwarded() gc "statepoint-example" !dbg !42 {
+entry:
+  %home = alloca %pair, align 8
+  #dbg_declare(ptr %home, !43, !DIExpression(), !44)
+  store %pair { i64 13, i64 17 }, ptr %home, align 8, !dbg !44
+  store i64 19, ptr %home, align 8, !dbg !44
+  call goabi0 void @sink(ptr byval(%pair) align 8 %home), !dbg !44
+  ret i64 0, !dbg !44
+}
+
+!llvm.dbg.cu = !{!0}
+!llvm.module.flags = !{!8, !9}
+!0 = distinct !DICompileUnit(language: DW_LANG_Go, file: !1, producer: "Go", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug)
+!1 = !DIFile(filename: "test.go", directory: "/")
+!2 = !DISubroutineType(types: !5)
+!4 = !DIBasicType(name: "int", size: 64, encoding: DW_ATE_signed)
+!5 = !{}
+!8 = !{i32 2, !"Debug Info Version", i32 3}
+!9 = !{i32 2, !"Dwarf Version", i32 4}
+!10 = distinct !DISubprogram(name: "byval_root", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!11 = !DILocalVariable(name: "value", scope: !10, file: !1, line: 2, type: !4)
+!12 = !DILocation(line: 2, column: 1, scope: !10)
+!13 = distinct !DISubprogram(name: "byval_gep", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!14 = !DILocalVariable(name: "value", scope: !13, file: !1, line: 2, type: !4)
+!15 = !DILocation(line: 2, column: 1, scope: !13)
+!16 = distinct !DISubprogram(name: "goret_root", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!17 = !DILocalVariable(name: "value", scope: !16, file: !1, line: 2, type: !4)
+!18 = !DILocation(line: 2, column: 1, scope: !16)
+!19 = distinct !DISubprogram(name: "goret_gep", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!20 = !DILocalVariable(name: "value", scope: !19, file: !1, line: 2, type: !4)
+!21 = !DILocation(line: 2, column: 1, scope: !19)
+
+!22 = distinct !DISubprogram(name: "byval_value", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!23 = !DILocalVariable(name: "value", scope: !22, file: !1, line: 2, type: !4)
+!24 = !DILocation(line: 2, column: 1, scope: !22)
+
+!25 = distinct !DISubprogram(name: "byval_pieces", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!26 = !DILocalVariable(name: "pair", scope: !25, file: !1, line: 2, type: !31)
+!27 = !DILocation(line: 2, column: 1, scope: !25)
+!28 = distinct !DISubprogram(name: "byval_address", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!29 = !DILocalVariable(name: "address", scope: !28, file: !1, line: 2, type: !32)
+!30 = !DILocation(line: 2, column: 1, scope: !28)
+!31 = !DICompositeType(tag: DW_TAG_structure_type, name: "pair", file: !1, size: 128, elements: !5)
+!32 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !31, size: 64)
+
+!33 = distinct !DISubprogram(name: "byval_inserted", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!34 = !DILocalVariable(name: "pair", scope: !33, file: !1, line: 2, type: !31)
+!35 = !DILocation(line: 2, column: 1, scope: !33)
+
+!36 = distinct !DISubprogram(name: "byval_late", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!37 = !DILocalVariable(name: "value", scope: !36, file: !1, line: 2, type: !4)
+!38 = !DILocation(line: 2, column: 1, scope: !36)
+
+!39 = distinct !DISubprogram(name: "byval_earlier_block", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!40 = !DILocalVariable(name: "value", scope: !39, file: !1, line: 2, type: !4)
+!41 = !DILocation(line: 2, column: 1, scope: !39)
+
+!42 = distinct !DISubprogram(name: "byval_not_forwarded", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!43 = !DILocalVariable(name: "value", scope: !42, file: !1, line: 2, type: !31)
+!44 = !DILocation(line: 2, column: 1, scope: !42)
+
+!45 = distinct !DISubprogram(name: "byval_late_block", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!46 = !DILocalVariable(name: "late_block", scope: !45, file: !1, line: 1, type: !4)
+!47 = !DILocation(line: 1, column: 1, scope: !45)
+!48 = distinct !DISubprogram(name: "byval_value_list", scope: !1, file: !1, line: 1, type: !2, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!49 = !DILocalVariable(name: "value_list", scope: !48, file: !1, line: 1, type: !4)
+!50 = !DILocation(line: 1, column: 1, scope: !48)

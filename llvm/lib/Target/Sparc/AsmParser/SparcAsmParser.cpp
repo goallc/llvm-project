@@ -141,8 +141,8 @@ class SparcAsmParser : public MCTargetAsmParser {
 
 public:
   SparcAsmParser(const MCSubtargetInfo &sti, MCAsmParser &parser,
-                 const MCInstrInfo &MII, const MCTargetOptions &Options)
-      : MCTargetAsmParser(Options, sti, MII), Parser(parser),
+                 const MCInstrInfo &MII)
+      : MCTargetAsmParser(sti, MII), Parser(parser),
         MRI(*Parser.getContext().getRegisterInfo()) {
     Parser.addAliasForDirective(".half", ".2byte");
     Parser.addAliasForDirective(".uahalf", ".2byte");
@@ -1457,6 +1457,10 @@ SparcAsmParser::parseSparcAsmOperand(std::unique_ptr<SparcOperand> &Op) {
     if (MCRegister Reg = matchRegisterName(Parser.getTok(), RegKind)) {
       StringRef Name = Parser.getTok().getString();
       Parser.Lex(); // Eat the identifier token.
+
+      if (Name == "ncc")
+        Name = is64Bit() ? "xcc" : "icc";
+
       E = SMLoc::getFromPointer(Parser.getTok().getLoc().getPointer() - 1);
       if (Reg == Sparc::ICC && Name == "xcc")
         Op = SparcOperand::CreateToken("%xcc", S);
@@ -1587,12 +1591,12 @@ MCRegister SparcAsmParser::matchRegisterName(const AsmToken &Tok,
   // %r0 - %r31
   int64_t RegNo = 0;
   if (Name.starts_with_insensitive("r") &&
-      !Name.substr(1, 2).getAsInteger(10, RegNo) && RegNo < 31) {
+      !Name.substr(1, 2).getAsInteger(10, RegNo) && RegNo <= 31) {
     RegKind = SparcOperand::rk_IntReg;
     return IntRegs[RegNo];
   }
 
-  if (Name == "xcc") {
+  if (Name == "xcc" || Name == "ncc") {
     // FIXME:: check 64bit.
     RegKind = SparcOperand::rk_Special;
     return SP::ICC;

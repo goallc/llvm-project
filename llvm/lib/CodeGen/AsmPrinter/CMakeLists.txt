@@ -20,6 +20,7 @@ add_llvm_component_library(LLVMAsmPrinter
   DwarfUnit.cpp
   EHStreamer.cpp
   ErlangGCPrinter.cpp
+  GoObjDebug.cpp
   OcamlGCPrinter.cpp
   PseudoProbePrinter.cpp
   WinCFGuard.cpp
@@ -41,6 +42,7 @@ add_llvm_component_library(LLVMAsmPrinter
   DebugInfoDWARFLowLevel
   MC
   MCParser
+  ProfileData
   Remarks
   Support
   Target

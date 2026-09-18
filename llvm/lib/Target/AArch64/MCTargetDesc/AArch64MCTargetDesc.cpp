@@ -13,6 +13,7 @@
 #include "AArch64MCTargetDesc.h"
 #include "AArch64ELFStreamer.h"
 #include "AArch64MCAsmInfo.h"
+#include "AArch64MCLFIRewriter.h"
 #include "AArch64WinCOFFStreamer.h"
 #include "MCTargetDesc/AArch64AddressingModes.h"
 #include "MCTargetDesc/AArch64InstPrinter.h"
@@ -28,11 +29,22 @@
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/Compiler.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/TargetParser/AArch64TargetParser.h"
 
 using namespace llvm;
+
+static cl::opt<bool> AArch64GoObjCompositeRelocations(
+    "aarch64-goobj-composite-relocations",
+    cl::desc("Keep AArch64 GoObj page-relative references representable as "
+             "composite relocations"),
+    cl::init(false), cl::Hidden);
+
+bool llvm::useAArch64GoObjCompositeRelocations() {
+  return AArch64GoObjCompositeRelocations;
+}
 
 #define GET_INSTRINFO_MC_DESC
 #define GET_INSTRINFO_MC_HELPERS
@@ -305,25 +317,25 @@ void AArch64_MC::initLLVMToCVRegMapping(MCRegisterInfo *MRI) {
 }
 
 bool AArch64_MC::isHForm(const MCInst &MI, const MCInstrInfo *MCII) {
-  const auto &FPR16 = AArch64MCRegisterClasses[AArch64::FPR16RegClassID];
+  const auto &FPR16 = getAArch64MCRegisterClass(AArch64::FPR16RegClassID);
   return llvm::any_of(MI, [&](const MCOperand &Op) {
     return Op.isReg() && FPR16.contains(Op.getReg());
   });
 }
 
 bool AArch64_MC::isQForm(const MCInst &MI, const MCInstrInfo *MCII) {
-  const auto &FPR128 = AArch64MCRegisterClasses[AArch64::FPR128RegClassID];
+  const auto &FPR128 = getAArch64MCRegisterClass(AArch64::FPR128RegClassID);
   return llvm::any_of(MI, [&](const MCOperand &Op) {
     return Op.isReg() && FPR128.contains(Op.getReg());
   });
 }
 
 bool AArch64_MC::isFpOrNEON(const MCInst &MI, const MCInstrInfo *MCII) {
-  const auto &FPR128 = AArch64MCRegisterClasses[AArch64::FPR128RegClassID];
-  const auto &FPR64 = AArch64MCRegisterClasses[AArch64::FPR64RegClassID];
-  const auto &FPR32 = AArch64MCRegisterClasses[AArch64::FPR32RegClassID];
-  const auto &FPR16 = AArch64MCRegisterClasses[AArch64::FPR16RegClassID];
-  const auto &FPR8 = AArch64MCRegisterClasses[AArch64::FPR8RegClassID];
+  const auto &FPR128 = getAArch64MCRegisterClass(AArch64::FPR128RegClassID);
+  const auto &FPR64 = getAArch64MCRegisterClass(AArch64::FPR64RegClassID);
+  const auto &FPR32 = getAArch64MCRegisterClass(AArch64::FPR32RegClassID);
+  const auto &FPR16 = getAArch64MCRegisterClass(AArch64::FPR16RegClassID);
+  const auto &FPR8 = getAArch64MCRegisterClass(AArch64::FPR8RegClassID);
 
   auto IsFPR = [&](const MCOperand &Op) {
     if (!Op.isReg())
@@ -348,13 +360,14 @@ static MCAsmInfo *createAArch64MCAsmInfo(const MCRegisterInfo &MRI,
                                          const MCTargetOptions &Options) {
   MCAsmInfo *MAI;
   if (TheTriple.isOSBinFormatMachO())
-    MAI = new AArch64MCAsmInfoDarwin(TheTriple.getArch() == Triple::aarch64_32);
-  else if (TheTriple.isOSBinFormatELF())
-    MAI = new AArch64MCAsmInfoELF(TheTriple);
+    MAI = new AArch64MCAsmInfoDarwin(TheTriple.getArch() == Triple::aarch64_32,
+                                     Options);
+  else if (TheTriple.isOSBinFormatELF() || TheTriple.isOSBinFormatGoObj())
+    MAI = new AArch64MCAsmInfoELF(TheTriple, Options);
   else if (TheTriple.isWindowsMSVCEnvironment())
-    MAI = new AArch64MCAsmInfoMicrosoftCOFF();
+    MAI = new AArch64MCAsmInfoMicrosoftCOFF(Options);
   else if (TheTriple.isOSBinFormatCOFF())
-    MAI = new AArch64MCAsmInfoGNUCOFF();
+    MAI = new AArch64MCAsmInfoGNUCOFF(Options);
   else
     reportFatalUsageError("unsupported object format");
 
@@ -432,7 +445,7 @@ public:
     const MCRegisterClass &FPR128RC =
         MRI.getRegClass(AArch64::FPR128RegClassID);
 
-    auto ClearsSuperReg = [=](MCRegister Reg) {
+    auto ClearsSuperReg = [&](MCRegister Reg) {
       // An update to the lower 32 bits of a 64 bit integer register is
       // architecturally defined to zero extend the upper 32 bits on a write.
       if (GPR32RC.contains(Reg))
@@ -475,15 +488,16 @@ public:
       uint64_t Off = 0;
       // Check for optional bti c that prefixes adrp in BTI enabled entries
       if (Insn == 0xd503245f) {
-         Off = 4;
-         Insn = support::endian::read32le(PltContents.data() + Byte + Off);
+        Off = 4;
+        Insn = support::endian::read32le(PltContents.data() + Byte + Off);
       }
       // Check for adrp.
       if ((Insn & 0x9f000000) != 0x90000000)
         continue;
       Off += 4;
       uint64_t Imm = (((PltSectionVA + Byte) >> 12) << 12) +
-            (((Insn >> 29) & 3) << 12) + (((Insn >> 5) & 0x3ffff) << 14);
+                     (((Insn >> 29) & 3) << 12) +
+                     (((Insn >> 5) & 0x3ffff) << 14);
       uint32_t Insn2 =
           support::endian::read32le(PltContents.data() + Byte + Off);
       // Check for: ldr Xt, [Xn, #pimm].
@@ -501,6 +515,13 @@ public:
 
 static MCInstrAnalysis *createAArch64InstrAnalysis(const MCInstrInfo *Info) {
   return new AArch64MCInstrAnalysis(Info);
+}
+
+static MCLFIRewriter *
+createAArch64MCLFIRewriter(MCContext &Ctx,
+                           std::unique_ptr<MCRegisterInfo> &&RegInfo,
+                           std::unique_ptr<MCInstrInfo> &&InstInfo) {
+  return new AArch64MCLFIRewriter(Ctx, std::move(RegInfo), std::move(InstInfo));
 }
 
 // Force static initialization.
@@ -531,6 +552,9 @@ LLVMInitializeAArch64TargetMC() {
     TargetRegistry::RegisterELFStreamer(*T, createAArch64ELFStreamer);
     TargetRegistry::RegisterMachOStreamer(*T, createMachOStreamer);
     TargetRegistry::RegisterCOFFStreamer(*T, createAArch64WinCOFFStreamer);
+
+    // Register the LFI rewriter.
+    TargetRegistry::RegisterMCLFIRewriter(*T, createAArch64MCLFIRewriter);
 
     // Register the obj target streamer.
     TargetRegistry::RegisterObjectTargetStreamer(

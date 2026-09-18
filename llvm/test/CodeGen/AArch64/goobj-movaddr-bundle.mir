@@ -1,0 +1,60 @@
+# RUN: llc -mtriple=aarch64-unknown-linux-goobj -run-pass=aarch64-expand-pseudo \
+# RUN:   -aarch64-goobj-composite-relocations -o - %s | FileCheck %s --check-prefix=BUNDLE
+# RUN: llc -mtriple=aarch64-unknown-linux-goobj \
+# RUN:   -run-pass=aarch64-expand-pseudo,aarch64-ldst-opt \
+# RUN:   -aarch64-goobj-composite-relocations -verify-machineinstrs -o - %s \
+# RUN:   | FileCheck %s --check-prefix=LDST
+# RUN: llc -mtriple=aarch64-unknown-linux-goobj -run-pass=aarch64-expand-pseudo \
+# RUN:   -o - %s | FileCheck %s --check-prefix=PLAIN
+
+--- |
+  @global = external global i64
+  @other = external global i64
+
+  define void @movaddr() {
+    ret void
+  }
+
+  define void @movaddr_store_pair() {
+    ret void
+  }
+...
+---
+name:            movaddr
+tracksRegLiveness: true
+body:             |
+  bb.0:
+    liveins: $x0
+    renamable $x8 = MOVaddr target-flags(aarch64-page) @global, target-flags(aarch64-pageoff, aarch64-nc) @global
+    STRXui killed $x0, killed $x8, 0 :: (store (s64) into @global)
+    RET_ReallyLR
+...
+
+# BUNDLE:      BUNDLE implicit-def $x8 {
+# BUNDLE-NEXT:   $x8 = ADRP target-flags(aarch64-page) @global
+# BUNDLE-NEXT:   $x8 = ADDXri internal $x8,
+# BUNDLE-NEXT: }
+
+# PLAIN-NOT:   BUNDLE
+# PLAIN:       $x8 = ADRP target-flags(aarch64-page) @global
+# PLAIN-NEXT:  $x8 = ADDXri $x8,
+
+---
+name:            movaddr_store_pair
+tracksRegLiveness: true
+body:             |
+  bb.0:
+    liveins: $x0
+    renamable $x8 = MOVaddr target-flags(aarch64-page) @global, target-flags(aarch64-pageoff, aarch64-nc) @global
+    STRXui killed renamable $x8, renamable $x0, 0 :: (store (s64))
+    renamable $x8 = MOVaddr target-flags(aarch64-page) @other, target-flags(aarch64-pageoff, aarch64-nc) @other
+    STRXui killed renamable $x8, killed renamable $x0, 1 :: (store (s64))
+    RET_ReallyLR
+...
+
+# LDST-LABEL: name: movaddr_store_pair
+# LDST:       BUNDLE implicit-def $x8 {
+# LDST-NEXT:    $x8 = ADRP target-flags(aarch64-page) @global
+# LDST-NEXT:    renamable $x8 = ADDXri internal $x8,
+# LDST-NEXT:  }
+# LDST-NEXT:  STRXui killed renamable $x8,

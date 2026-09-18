@@ -35,6 +35,11 @@ class MCTargetStreamer;
 class Target;
 class Triple;
 
+/// Whether GoObj code generation must keep AArch64 page-relative references
+/// representable as composite relocations for linkers that cannot preserve
+/// split page and low-12 relocations.
+bool useAArch64GoObjCompositeRelocations();
+
 MCCodeEmitter *createAArch64MCCodeEmitter(const MCInstrInfo &MCII,
                                           MCContext &Ctx);
 MCAsmBackend *createAArch64leAsmBackend(const Target &T,
@@ -48,6 +53,8 @@ MCAsmBackend *createAArch64beAsmBackend(const Target &T,
 
 std::unique_ptr<MCObjectTargetWriter>
 createAArch64ELFObjectWriter(uint8_t OSABI, bool IsILP32);
+
+std::unique_ptr<MCObjectTargetWriter> createAArch64GoObjObjectWriter();
 
 std::unique_ptr<MCObjectTargetWriter>
 createAArch64MachObjectWriter(uint32_t CPUType, uint32_t CPUSubtype,
@@ -71,6 +78,10 @@ namespace AArch64 {
 enum OperandType {
   OPERAND_IMPLICIT_IMM_0 = MCOI::OPERAND_FIRST_TARGET,
   OPERAND_SHIFT_MSL,
+  OPERAND_SHIFTED_REGISTER,
+  OPERAND_SHIFTED_IMMEDIATE,
+  OPERAND_IMM_UINT5,
+  OPERAND_IMM_UINT8,
 };
 } // namespace AArch64
 

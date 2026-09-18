@@ -22,6 +22,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
 #include "llvm/CodeGen/MachineDomTreeUpdater.h"
@@ -310,17 +311,13 @@ namespace {
   class MachineLICM : public MachineLICMBase {
   public:
     static char ID;
-    MachineLICM() : MachineLICMBase(ID, false) {
-      initializeMachineLICMPass(*PassRegistry::getPassRegistry());
-    }
+    MachineLICM() : MachineLICMBase(ID, false) {}
   };
 
   class EarlyMachineLICM : public MachineLICMBase {
   public:
     static char ID;
-    EarlyMachineLICM() : MachineLICMBase(ID, true) {
-      initializeEarlyMachineLICMPass(*PassRegistry::getPassRegistry());
-    }
+    EarlyMachineLICM() : MachineLICMBase(ID, true) {}
   };
 
 } // end anonymous namespace
@@ -492,7 +489,7 @@ static void applyBitsNotInRegMaskToRegUnitsMask(const TargetRegisterInfo &TRI,
 
       if (PhysReg && !((Word >> Bit) & 1)) {
         for (MCRegUnit Unit : TRI.regunits(PhysReg))
-          RUsFromRegsNotInMask.set(Unit);
+          RUsFromRegsNotInMask.set(static_cast<unsigned>(Unit));
       }
     }
   }
@@ -541,7 +538,8 @@ void MachineLICMImpl::ProcessMI(MachineInstr *MI, BitVector &RUDefs,
         for (MCRegUnit Unit : TRI->regunits(Reg)) {
           // If it's using a non-loop-invariant register, then it's obviously
           // not safe to hoist.
-          if (RUDefs.test(Unit) || RUClobbers.test(Unit)) {
+          if (RUDefs.test(static_cast<unsigned>(Unit)) ||
+              RUClobbers.test(static_cast<unsigned>(Unit))) {
             HasNonInvariantUse = true;
             break;
           }
@@ -562,16 +560,16 @@ void MachineLICMImpl::ProcessMI(MachineInstr *MI, BitVector &RUDefs,
     // register, then this is not safe.  Two defs is indicated by setting a
     // PhysRegClobbers bit.
     for (MCRegUnit Unit : TRI->regunits(Reg)) {
-      if (RUDefs.test(Unit)) {
-        RUClobbers.set(Unit);
+      if (RUDefs.test(static_cast<unsigned>(Unit))) {
+        RUClobbers.set(static_cast<unsigned>(Unit));
         RuledOut = true;
-      } else if (RUClobbers.test(Unit)) {
+      } else if (RUClobbers.test(static_cast<unsigned>(Unit))) {
         // MI defined register is seen defined by another instruction in
         // the loop, it cannot be a LICM candidate.
         RuledOut = true;
       }
 
-      RUDefs.set(Unit);
+      RUDefs.set(static_cast<unsigned>(Unit));
     }
   }
 
@@ -612,7 +610,7 @@ void MachineLICMImpl::HoistRegionPostRA(MachineLoop *CurLoop) {
     // be LICM'ed.
     for (const auto &LI : BB->liveins()) {
       for (MCRegUnit Unit : TRI->regunits(LI.PhysReg))
-        RUDefs.set(Unit);
+        RUDefs.set(static_cast<unsigned>(Unit));
     }
 
     // Funclet entry blocks will clobber all registers
@@ -626,10 +624,10 @@ void MachineLICMImpl::HoistRegionPostRA(MachineLoop *CurLoop) {
       const TargetLowering &TLI = *MF.getSubtarget().getTargetLowering();
       if (MCRegister Reg = TLI.getExceptionPointerRegister(PersonalityFn))
         for (MCRegUnit Unit : TRI->regunits(Reg))
-          RUClobbers.set(Unit);
+          RUClobbers.set(static_cast<unsigned>(Unit));
       if (MCRegister Reg = TLI.getExceptionSelectorRegister(PersonalityFn))
         for (MCRegUnit Unit : TRI->regunits(Reg))
-          RUClobbers.set(Unit);
+          RUClobbers.set(static_cast<unsigned>(Unit));
     }
 
     SpeculationState = SpeculateUnknown;
@@ -648,7 +646,7 @@ void MachineLICMImpl::HoistRegionPostRA(MachineLoop *CurLoop) {
       if (!Reg)
         continue;
       for (MCRegUnit Unit : TRI->regunits(Reg))
-        TermRUs.set(Unit);
+        TermRUs.set(static_cast<unsigned>(Unit));
     }
   }
 
@@ -668,7 +666,8 @@ void MachineLICMImpl::HoistRegionPostRA(MachineLoop *CurLoop) {
     Register Def = Candidate.Def;
     bool Safe = true;
     for (MCRegUnit Unit : TRI->regunits(Def)) {
-      if (RUClobbers.test(Unit) || TermRUs.test(Unit)) {
+      if (RUClobbers.test(static_cast<unsigned>(Unit)) ||
+          TermRUs.test(static_cast<unsigned>(Unit))) {
         Safe = false;
         break;
       }
@@ -682,7 +681,8 @@ void MachineLICMImpl::HoistRegionPostRA(MachineLoop *CurLoop) {
       if (!MO.getReg())
         continue;
       for (MCRegUnit Unit : TRI->regunits(MO.getReg())) {
-        if (RUDefs.test(Unit) || RUClobbers.test(Unit)) {
+        if (RUDefs.test(static_cast<unsigned>(Unit)) ||
+            RUClobbers.test(static_cast<unsigned>(Unit))) {
           // If it's using a non-loop-invariant register, then it's obviously
           // not safe to hoist.
           Safe = false;
@@ -834,24 +834,25 @@ void MachineLICMImpl::HoistOutOfLoop(MachineDomTreeNode *HeaderN,
       continue;
 
     Scopes.push_back(Node);
-    unsigned NumChildren = Node->getNumChildren();
 
     // Don't hoist things out of a large switch statement.  This often causes
     // code to be hoisted that wasn't going to be executed, and increases
     // register pressure in a situation where it's likely to matter.
-    if (BB->succ_size() >= 25)
-      NumChildren = 0;
-
-    OpenChildren[Node] = NumChildren;
-    if (NumChildren) {
-      // Add children in reverse order as then the next popped worklist node is
-      // the first child of this node.  This means we ultimately traverse the
-      // DOM tree in exactly the same order as if we'd recursed.
-      for (MachineDomTreeNode *Child : reverse(Node->children())) {
-        ParentMap[Child] = Node;
-        WorkList.push_back(Child);
-      }
+    if (BB->succ_size() >= 25) {
+      OpenChildren[Node] = 0;
+      continue;
     }
+
+    // Add children in reverse order as then the next popped worklist node is
+    // the first child of this node.  This means we ultimately traverse the
+    // DOM tree in exactly the same order as if we'd recursed.
+    size_t WorkListStart = WorkList.size();
+    for (MachineDomTreeNode *Child : Node->children()) {
+      ParentMap[Child] = Node;
+      WorkList.push_back(Child);
+    }
+    std::reverse(WorkList.begin() + WorkListStart, WorkList.end());
+    OpenChildren[Node] = WorkList.size() - WorkListStart;
   }
 
   if (Scopes.size() == 0)
@@ -1076,6 +1077,20 @@ static bool isCopyFeedingInvariantStore(const MachineInstr &MI,
 /// Returns true if the instruction may be a suitable candidate for LICM.
 /// e.g. If the instruction is a call, then it's obviously not safe to hoist it.
 bool MachineLICMImpl::IsLICMCandidate(MachineInstr &I, MachineLoop *CurLoop) {
+  // A Go frame index is an abstract address into a movable goroutine stack.
+  // SelectionDAG deliberately rematerializes it in each statepoint
+  // continuation, but hoisting the selected frame-address instruction out of
+  // a loop can move that materialization above a stack-growing statepoint.
+  // Keep the direct FrameIndex definition in its continuation; dependent
+  // address arithmetic then remains non-invariant as well.
+  const Function &F = I.getMF()->getFunction();
+  if (goabi::isGoCallingConv(F.getCallingConv()) &&
+      llvm::any_of(I.operands(),
+                   [](const MachineOperand &MO) { return MO.isFI(); })) {
+    LLVM_DEBUG(dbgs() << "LICM: Go frame address may change at a statepoint.\n");
+    return false;
+  }
+
   // Check if it's safe to move the instruction.
   bool DontMoveAcrossStore = !HoistConstLoads || !AllowedToHoistLoads[CurLoop];
   if ((!I.isSafeToMove(DontMoveAcrossStore)) &&

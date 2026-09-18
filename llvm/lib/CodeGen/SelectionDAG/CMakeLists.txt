@@ -2,6 +2,7 @@ add_llvm_component_library(LLVMSelectionDAG
   DAGCombiner.cpp
   FastISel.cpp
   FunctionLoweringInfo.cpp
+  GoISelLowering.cpp
   InstrEmitter.cpp
   LegalizeDAG.cpp
   LegalizeFloatTypes.cpp

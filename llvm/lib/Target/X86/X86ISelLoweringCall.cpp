@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "MCTargetDesc/X86MCAsmInfo.h"
+#include "MCTargetDesc/X86MCTargetDesc.h"
 #include "X86.h"
 #include "X86CallingConv.h"
 #include "X86FrameLowering.h"
@@ -19,20 +20,287 @@
 #include "X86InstrBuilder.h"
 #include "X86MachineFunctionInfo.h"
 #include "X86TargetMachine.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/ObjCARCUtil.h"
+#include "llvm/CodeGen/FunctionLoweringInfo.h"
+#include "llvm/CodeGen/GoCallingConv.h"
+#include "llvm/CodeGen/GoISelLowering.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/WinEHFuncInfo.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Transforms/CFGuard.h"
 
 #define DEBUG_TYPE "x86-isel"
 
 using namespace llvm;
 
 STATISTIC(NumTailCalls, "Number of tail calls");
+
+namespace {
+
+static constexpr unsigned X86GoIntRegs[] = {X86::RAX, X86::RBX, X86::RCX,
+                                            X86::RDI, X86::RSI, X86::R8,
+                                            X86::R9,  X86::R10, X86::R11};
+static constexpr unsigned X86GoFPRegs[] = {
+    X86::XMM0,  X86::XMM1,  X86::XMM2,  X86::XMM3,  X86::XMM4,
+    X86::XMM5,  X86::XMM6,  X86::XMM7,  X86::XMM8,  X86::XMM9,
+    X86::XMM10, X86::XMM11, X86::XMM12, X86::XMM13, X86::XMM14};
+
+static goabi::ABIConfig getX86GoABIConfig(const X86Subtarget &Subtarget,
+                                          CallingConv::ID CallConv) {
+  assert(Subtarget.is64Bit() && "Go calling convention is only supported on x86-64");
+  if (goabi::isGoABI0CallingConv(CallConv))
+    return {ArrayRef<unsigned>(), ArrayRef<unsigned>(), 8, Align(8),
+            Subtarget.getFrameLowering()->getStackAlign(),
+            Subtarget.useSoftFloat()};
+  return {X86GoIntRegs, X86GoFPRegs, 8, Align(8),
+          Subtarget.getFrameLowering()->getStackAlign(),
+          Subtarget.useSoftFloat()};
+}
+
+static bool isX86GoFloatPiece(Type *Ty) {
+  return Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||
+         Ty->isDoubleTy() || isa<FixedVectorType>(Ty);
+}
+
+struct X86GoFormalArgInfo {
+  goabi::CallLayout Layout;
+  SmallVector<int, 8> HomeFIs;
+};
+
+static X86GoFormalArgInfo
+prepareX86GoFormalArguments(MachineFunction &MF, ArrayRef<ISD::InputArg> Ins,
+                            ArrayRef<CCValAssign> ArgLocs,
+                            uint64_t StackArgsSize, uint64_t StackResultsEnd,
+                            SelectionDAG &DAG) {
+  auto *FuncInfo = MF.getInfo<X86MachineFunctionInfo>();
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  const Function &F = MF.getFunction();
+  const X86Subtarget &Subtarget = MF.getSubtarget<X86Subtarget>();
+  // Fixed argument homes use offsets in the logical Go argument area. Stack
+  // map locations are instead relative to the physical entry RSP, which
+  // points at the return address for both Go calling conventions.
+  int64_t EntryStackMapBias =
+      static_cast<int64_t>(DAG.getDataLayout().getPointerSize());
+
+  goabi::ABIConfig ABIConfig = getX86GoABIConfig(Subtarget, F.getCallingConv());
+  X86GoFormalArgInfo Info;
+  Info.Layout = goabi::computeFormalArgLayout(F, Ins, ArgLocs, StackArgsSize,
+                                              StackResultsEnd,
+                                              DAG.getDataLayout(), ABIConfig);
+  const goabi::CallLayout &Layout = Info.Layout;
+  goabi::validateGoObjArgInfo(F, Layout);
+  MFI.setGoABIArgSizes(Layout.StackArgsSize, Layout.ArgSize);
+
+  goabi::EntryArgsInfo EntryArgs = goabi::computeEntryArgsInfo(
+      Layout, DAG.getDataLayout(), ABIConfig);
+  SmallBitVector MatchedEntryArgWords(EntryArgs.NumBits);
+
+  SmallVector<uint64_t, 8> ArgSpillOffsets(Layout.Args.size(), 0);
+  uint64_t SpillOffset = Layout.SpillAreaOffset;
+  for (unsigned I = 0, E = Layout.Args.size(); I != E; ++I) {
+    const goabi::ValueLayout &ArgLayout = Layout.Args[I];
+    if (!ArgLayout.InRegs || ArgLayout.Size == 0)
+      continue;
+    SpillOffset = alignTo(SpillOffset, ArgLayout.Alignment.value());
+    ArgSpillOffsets[I] = SpillOffset;
+    SpillOffset += ArgLayout.Size;
+  }
+
+  FuncInfo->setBytesToPopOnReturn(0);
+  FuncInfo->setArgumentStackSize(Layout.TotalStackSize);
+  FuncInfo->setRegSaveFrameIndex(0xAAAAAAA);
+  FuncInfo->clearGoArgHomes();
+  FuncInfo->clearGoArgPointerSlots();
+  MFI.clearGoObjArgLiveSlots();
+  Info.HomeFIs.assign(F.arg_size(), INT_MAX);
+
+  SmallVector<bool, 8> IsLiveAtEntry(F.arg_size(), false);
+  for (const ISD::InputArg &In : Ins)
+    if (In.OrigArgIndex != ISD::InputArg::NoArgIndex &&
+        In.OrigArgIndex < F.arg_size())
+      IsLiveAtEntry[In.OrigArgIndex] |= In.Used;
+
+  auto RecordPointerSlots = [&](int FI, uint64_t ArgOffset, uint64_t Size,
+                                bool IsLiveAtEntry) {
+    uint64_t PointerSize = EntryArgs.PointerSize;
+    for (uint32_t Word : EntryArgs.PointerWords) {
+      uint64_t PointerOffset = static_cast<uint64_t>(Word) * PointerSize;
+      if (PointerOffset < ArgOffset ||
+          PointerOffset + PointerSize > ArgOffset + Size)
+        continue;
+      if (MatchedEntryArgWords.test(Word))
+        report_fatal_error(
+            "Go entry argument pointer word maps to multiple X86 fixed "
+            "objects");
+      uint64_t WithinObject = PointerOffset - ArgOffset;
+      if (WithinObject > UINT32_MAX)
+        report_fatal_error(
+            "Go entry argument pointer offset exceeds X86 metadata range");
+      int64_t FixedObjectOffset =
+          MFI.getObjectOffset(FI) + static_cast<int64_t>(WithinObject);
+      int64_t ExpectedFixedObjectOffset = static_cast<int64_t>(PointerOffset);
+      int64_t EntryOffset =
+          EntryStackMapBias + static_cast<int64_t>(PointerOffset);
+      if (FixedObjectOffset != ExpectedFixedObjectOffset ||
+          !isInt<32>(EntryOffset))
+        report_fatal_error(
+            "Go entry argument pointer word has an invalid X86 fixed object");
+      if (IsLiveAtEntry)
+        FuncInfo->addGoArgPointerSlot(
+            FI, static_cast<uint32_t>(WithinObject),
+            static_cast<int32_t>(EntryOffset), Word);
+      MatchedEntryArgWords.set(Word);
+    }
+  };
+
+  unsigned NextLayoutIndex = 0;
+  for (const Argument &Arg : F.args()) {
+    if (Arg.hasNestAttr())
+      continue;
+
+    if (Arg.hasGoRetAttr()) {
+      const ISD::InputArg *Carrier = nullptr;
+      const CCValAssign *CarrierLoc = nullptr;
+      for (auto [I, In] : llvm::enumerate(Ins)) {
+        if (In.OrigArgIndex != Arg.getArgNo())
+          continue;
+        if (Carrier)
+          report_fatal_error("invalid split X86 goret carrier");
+        Carrier = &In;
+        CarrierLoc = &ArgLocs[I];
+      }
+      uint64_t Size =
+          DAG.getDataLayout().getTypeAllocSize(Arg.getParamGoRetType());
+      if (!Carrier || !Carrier->Flags.isGoRet() || !CarrierLoc->isMemLoc() ||
+          Carrier->Flags.getGoRetSize() != Size ||
+          CarrierLoc->getLocMemOffset() < int64_t(StackArgsSize))
+        report_fatal_error("invalid X86 goret result home");
+      Info.HomeFIs[Arg.getArgNo()] = MFI.CreateFixedObject(
+          Size, CarrierLoc->getLocMemOffset(), /*IsImmutable=*/false,
+          /*IsAliased=*/true);
+      continue;
+    }
+
+    if (NextLayoutIndex >= Layout.Args.size())
+      report_fatal_error("X86 Go argument has no logical layout");
+    unsigned LayoutIndex = NextLayoutIndex++;
+    const goabi::ValueLayout &ArgLayout = Layout.Args[LayoutIndex];
+    uint64_t LogicalHomeOffset =
+        ArgLayout.InRegs ? ArgSpillOffsets[LayoutIndex] : ArgLayout.StackOffset;
+    int HomeFI;
+    if (ArgLayout.InRegs)
+      HomeFI =
+          MFI.CreateFixedSpillStackObject(ArgLayout.Size, LogicalHomeOffset,
+                                          /*IsImmutable=*/false);
+    else
+      HomeFI = MFI.CreateFixedObject(ArgLayout.Size, LogicalHomeOffset,
+                                     /*IsImmutable=*/false,
+                                     /*IsAliased=*/true);
+    Info.HomeFIs[Arg.getArgNo()] = HomeFI;
+    X86MachineFunctionInfo::GoArgHome &Home =
+        FuncInfo->addGoArgHome(Arg.getArgNo(), HomeFI);
+    Home.LogicalOffset = LogicalHomeOffset;
+    // LLVM may replace an unused incoming pointer with poison at every call
+    // edge. Keep its ABI home so morestack can preserve the complete register
+    // assignment, but do not expose that uninitialized word as a GC root.
+    RecordPointerSlots(HomeFI, LogicalHomeOffset, ArgLayout.Size,
+                       IsLiveAtEntry[Arg.getArgNo()]);
+
+    if (!ArgLayout.InRegs)
+      continue;
+    for (auto [I, In] : llvm::enumerate(Ins)) {
+      if (In.OrigArgIndex != Arg.getArgNo())
+        continue;
+      const CCValAssign &VA = ArgLocs[I];
+      if (!VA.isRegLoc())
+        report_fatal_error("invalid X86 Go register argument location");
+      MCPhysReg PReg = VA.getLocReg();
+      bool IsFP = isX86GoFloatPiece(In.OrigTy);
+
+      // The physical register copy may widen i1 to i8, but its Go ABI home
+      // retains the original piece's size and offset.
+      unsigned Size = static_cast<unsigned>(
+          std::max<uint64_t>(1, In.ArgVT.getStoreSize().getKnownMinValue()));
+      Home.addRegisterPiece(PReg, In.PartOffset, Size, IsFP);
+    }
+  }
+  if (NextLayoutIndex != Layout.Args.size())
+    report_fatal_error("X86 Go ABI layout has unmatched arguments");
+
+  if (std::optional<goabi::GoObjArgInfo> ArgInfo =
+          goabi::getGoObjArgInfo(F)) {
+    for (auto [SlotIndex, Slot] : llvm::enumerate(ArgInfo->TracebackSlots)) {
+      unsigned Matches = 0;
+      for (X86MachineFunctionInfo::GoArgHome &Home :
+           FuncInfo->getGoArgHomes())
+        for (const X86MachineFunctionInfo::GoArgHome::RegisterPiece &Piece :
+             Home.RegisterPieces)
+          if (Home.LogicalOffset + Piece.Offset == Slot.first &&
+              Piece.Size == Slot.second) {
+            MFI.addGoObjArgLiveSlot(Home.FrameIndex, Piece.Offset, Piece.Size,
+                                    uint16_t(1) << SlotIndex);
+            ++Matches;
+          }
+      if (Matches != 1)
+        report_fatal_error(
+            "Go traceback slot does not match one X86 register home");
+    }
+  }
+
+  for (uint32_t Word : EntryArgs.PointerWords)
+    if (!MatchedEntryArgWords.test(Word))
+      report_fatal_error(
+          "Go entry argument pointer word has no X86 fixed object");
+
+  return Info;
+}
+
+} // namespace
+
+std::optional<TargetLowering::ArgumentCopyElisionFrameInfo>
+X86TargetLowering::getArgumentCopyElisionFrameInfo(const Argument &Arg,
+                                                   MachineFunction &MF) const {
+  if (!goabi::isGoCallingConv(MF.getFunction().getCallingConv()) ||
+      Arg.hasByValAttr() || Arg.hasGoRetAttr())
+    return std::nullopt;
+  const auto *FuncInfo = MF.getInfo<X86MachineFunctionInfo>();
+  uint64_t ArgSize = MF.getDataLayout().getTypeAllocSize(Arg.getType());
+  for (const X86MachineFunctionInfo::GoArgHome &Home :
+       FuncInfo->getGoArgHomes())
+    if (Home.ArgNo == Arg.getArgNo() &&
+        MF.getFrameInfo().getObjectSize(Home.FrameIndex) == int64_t(ArgSize))
+      return ArgumentCopyElisionFrameInfo{Home.FrameIndex,
+                                          Home.valueAlreadyInFrame()};
+  return std::nullopt;
+}
+
+int X86TargetLowering::getGoABI0FrameIndex(MachineFunction &MF) const {
+  const Function &F = MF.getFunction();
+  if (!goabi::isGoABI0CallingConv(F.getCallingConv()))
+    report_fatal_error("llvm.go.abi0.frame requires Go ABI0");
+  auto *FuncInfo = MF.getInfo<X86MachineFunctionInfo>();
+  if (FuncInfo->hasGoABI0FrameIndex())
+    return FuncInfo->getGoABI0FrameIndex();
+
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  if (!MFI.hasGoABIArgSizes())
+    report_fatal_error("missing X86 Go ABI argument layout");
+  int FI = MFI.CreateFixedObject(MFI.getGoABIArgSize(), /*SPOffset=*/0,
+                                 /*IsImmutable=*/false,
+                                 /*IsAliased=*/true);
+  for (const X86MachineFunctionInfo::GoArgHome &Home :
+       FuncInfo->getGoArgHomes()) {
+    MF.getFrameInfo().setIsImmutableObjectIndex(Home.FrameIndex, false);
+    MF.getFrameInfo().setIsAliasedObjectIndex(Home.FrameIndex, true);
+  }
+  FuncInfo->setGoABI0FrameIndex(FI);
+  return FI;
+}
 
 /// Call this when the user attempts to do something unsupported, like
 /// returning a double without SSE2 enabled on x86_64. This is not fatal, unlike
@@ -100,9 +368,38 @@ handleMaskRegisterForCallingConv(unsigned NumElts, CallingConv::ID CC,
   return {MVT::INVALID_SIMPLE_VALUE_TYPE, 0};
 }
 
+static MVT getGoABIWideVectorCarrier(CallingConv::ID CC, EVT VT,
+                                     const X86Subtarget &Subtarget) {
+  if (!goabi::isGoABIInternalCallingConv(CC) || !VT.isFixedLengthVector())
+    return MVT::INVALID_SIMPLE_VALUE_TYPE;
+
+  // Go assigns one floating-point register slot to each fixed-width SIMD
+  // value. Keep that physical carrier independent of whether the source lane
+  // type is legal for this function's target features: AVX, for example,
+  // provides a YMM carrier even though LLVM otherwise splits v32i8 until
+  // AVX2. The frontend guarantees the corresponding width feature at every
+  // Go ABI boundary.
+  switch (VT.getFixedSizeInBits()) {
+  case 256:
+    if (!Subtarget.hasAVX())
+      report_fatal_error("256-bit Go ABI SIMD carrier requires AVX");
+    return MVT::v8f32;
+  case 512:
+    if (!Subtarget.useAVX512Regs())
+      report_fatal_error("512-bit Go ABI SIMD carrier requires AVX-512");
+    return MVT::v16f32;
+  default:
+    return MVT::INVALID_SIMPLE_VALUE_TYPE;
+  }
+}
+
 MVT X86TargetLowering::getRegisterTypeForCallingConv(LLVMContext &Context,
                                                      CallingConv::ID CC,
                                                      EVT VT) const {
+  if (MVT Carrier = getGoABIWideVectorCarrier(CC, VT, Subtarget);
+      Carrier != MVT::INVALID_SIMPLE_VALUE_TYPE)
+    return Carrier;
+
   if (VT.isVector()) {
     if (VT.getVectorElementType() == MVT::i1 && Subtarget.hasAVX512()) {
       unsigned NumElts = VT.getVectorNumElements();
@@ -125,9 +422,9 @@ MVT X86TargetLowering::getRegisterTypeForCallingConv(LLVMContext &Context,
     return MVT::i32;
 
   if (isTypeLegal(MVT::f16)) {
-    if (VT.isVector() && VT.getVectorElementType() == MVT::bf16)
+    if (VT.isVectorOf(MVT::bf16))
       return getRegisterTypeForCallingConv(
-          Context, CC, VT.changeVectorElementType(MVT::f16));
+          Context, CC, VT.changeVectorElementType(Context, MVT::f16));
 
     if (VT == MVT::bf16)
       return MVT::f16;
@@ -139,6 +436,10 @@ MVT X86TargetLowering::getRegisterTypeForCallingConv(LLVMContext &Context,
 unsigned X86TargetLowering::getNumRegistersForCallingConv(LLVMContext &Context,
                                                           CallingConv::ID CC,
                                                           EVT VT) const {
+  if (getGoABIWideVectorCarrier(CC, VT, Subtarget) !=
+      MVT::INVALID_SIMPLE_VALUE_TYPE)
+    return 1;
+
   if (VT.isVector()) {
     if (VT.getVectorElementType() == MVT::i1 && Subtarget.hasAVX512()) {
       unsigned NumElts = VT.getVectorNumElements();
@@ -164,10 +465,9 @@ unsigned X86TargetLowering::getNumRegistersForCallingConv(LLVMContext &Context,
       return 3;
   }
 
-  if (VT.isVector() && VT.getVectorElementType() == MVT::bf16 &&
-      isTypeLegal(MVT::f16))
-    return getNumRegistersForCallingConv(Context, CC,
-                                         VT.changeVectorElementType(MVT::f16));
+  if (VT.isVectorOf(MVT::bf16) && isTypeLegal(MVT::f16))
+    return getNumRegistersForCallingConv(
+        Context, CC, VT.changeVectorElementType(Context, MVT::f16));
 
   return TargetLowering::getNumRegistersForCallingConv(Context, CC, VT);
 }
@@ -176,8 +476,7 @@ unsigned X86TargetLowering::getVectorTypeBreakdownForCallingConv(
     LLVMContext &Context, CallingConv::ID CC, EVT VT, EVT &IntermediateVT,
     unsigned &NumIntermediates, MVT &RegisterVT) const {
   // Break wide or odd vXi1 vectors into scalars to match avx2 behavior.
-  if (VT.isVector() && VT.getVectorElementType() == MVT::i1 &&
-      Subtarget.hasAVX512() &&
+  if (VT.isVectorOf(MVT::i1) && Subtarget.hasAVX512() &&
       (!isPowerOf2_32(VT.getVectorNumElements()) ||
        (VT.getVectorNumElements() == 64 && !Subtarget.hasBWI()) ||
        VT.getVectorNumElements() > 64)) {
@@ -197,9 +496,8 @@ unsigned X86TargetLowering::getVectorTypeBreakdownForCallingConv(
   }
 
   // Split vNbf16 vectors according to vNf16.
-  if (VT.isVector() && VT.getVectorElementType() == MVT::bf16 &&
-      isTypeLegal(MVT::f16))
-    VT = VT.changeVectorElementType(MVT::f16);
+  if (VT.isVectorOf(MVT::bf16) && isTypeLegal(MVT::f16))
+    VT = VT.changeVectorElementType(Context, MVT::f16);
 
   return TargetLowering::getVectorTypeBreakdownForCallingConv(Context, CC, VT, IntermediateVT,
                                               NumIntermediates, RegisterVT);
@@ -298,7 +596,8 @@ Align X86TargetLowering::getByValTypeAlignment(Type *Ty,
 EVT X86TargetLowering::getOptimalMemOpType(
     LLVMContext &Context, const MemOp &Op,
     const AttributeList &FuncAttributes) const {
-  if (!FuncAttributes.hasFnAttr(Attribute::NoImplicitFloat)) {
+  if (!Subtarget.useSoftFloat() &&
+      !FuncAttributes.hasFnAttr(Attribute::NoImplicitFloat)) {
     if (Op.size() >= 16 &&
         (!Subtarget.isUnalignedMem16Slow() || Op.isAligned(Align(16)))) {
       // FIXME: Check if unaligned 64-byte accesses are slow.
@@ -323,7 +622,8 @@ EVT X86TargetLowering::getOptimalMemOpType(
       if (Subtarget.hasSSE1() && (Subtarget.is64Bit() || Subtarget.hasX87()) &&
           (Subtarget.getPreferVectorWidth() >= 128))
         return MVT::v4f32;
-    } else if (((Op.isMemcpy() && !Op.isMemcpyStrSrc()) || Op.isZeroMemset()) &&
+    } else if (((Op.isMemcpyOrMemmove() && !Op.isMemcpyStrSrc()) ||
+                Op.isZeroMemset()) &&
                Op.size() >= 8 && !Subtarget.is64Bit() && Subtarget.hasSSE2()) {
       // Do not use f64 to lower memcpy if source is string constant. It's
       // better to use i32 to avoid the loads.
@@ -546,18 +846,20 @@ unsigned X86TargetLowering::getAddressSpace() const {
 }
 
 static bool hasStackGuardSlotTLS(const Triple &TargetTriple) {
-  return TargetTriple.isOSGlibc() || TargetTriple.isOSFuchsia() ||
-         TargetTriple.isAndroid();
+  return TargetTriple.isOSGlibc() || TargetTriple.isMusl() ||
+         TargetTriple.isOSFuchsia() || TargetTriple.isAndroid();
 }
 
 static Constant* SegmentOffset(IRBuilderBase &IRB,
                                int Offset, unsigned AddressSpace) {
   return ConstantExpr::getIntToPtr(
-      ConstantInt::get(Type::getInt32Ty(IRB.getContext()), Offset),
+      ConstantInt::getSigned(Type::getInt32Ty(IRB.getContext()), Offset),
       IRB.getPtrTy(AddressSpace));
 }
 
-Value *X86TargetLowering::getIRStackGuard(IRBuilderBase &IRB) const {
+Value *
+X86TargetLowering::getIRStackGuard(IRBuilderBase &IRB,
+                                   const LibcallLoweringInfo &Libcalls) const {
   // glibc, bionic, and Fuchsia have a special slot for the stack guard in
   // tcbhead_t; use it instead of the usual global variable (see
   // sysdeps/{i386,x86_64}/nptl/tls.h)
@@ -601,16 +903,17 @@ Value *X86TargetLowering::getIRStackGuard(IRBuilderBase &IRB) const {
 
     return SegmentOffset(IRB, Offset, AddressSpace);
   }
-  return TargetLowering::getIRStackGuard(IRB);
+  return TargetLowering::getIRStackGuard(IRB, Libcalls);
 }
 
-void X86TargetLowering::insertSSPDeclarations(Module &M) const {
+void X86TargetLowering::insertSSPDeclarations(
+    Module &M, const LibcallLoweringInfo &Libcalls) const {
   // MSVC CRT provides functionalities for stack protection.
   RTLIB::LibcallImpl SecurityCheckCookieLibcall =
-      getLibcallImpl(RTLIB::SECURITY_CHECK_COOKIE);
+      Libcalls.getLibcallImpl(RTLIB::SECURITY_CHECK_COOKIE);
 
   RTLIB::LibcallImpl SecurityCookieVar =
-      getLibcallImpl(RTLIB::STACK_CHECK_GUARD);
+      Libcalls.getLibcallImpl(RTLIB::STACK_CHECK_GUARD);
   if (SecurityCheckCookieLibcall != RTLIB::Unsupported &&
       SecurityCookieVar != RTLIB::Unsupported) {
     // MSVC CRT provides functionalities for stack protection.
@@ -637,11 +940,11 @@ void X86TargetLowering::insertSSPDeclarations(Module &M) const {
   if ((GuardMode == "tls" || GuardMode.empty()) &&
       hasStackGuardSlotTLS(Subtarget.getTargetTriple()))
     return;
-  TargetLowering::insertSSPDeclarations(M);
+  TargetLowering::insertSSPDeclarations(M, Libcalls);
 }
 
-Value *
-X86TargetLowering::getSafeStackPointerLocation(IRBuilderBase &IRB) const {
+Value *X86TargetLowering::getSafeStackPointerLocation(
+    IRBuilderBase &IRB, const LibcallLoweringInfo &Libcalls) const {
   // Android provides a fixed TLS slot for the SafeStack pointer. See the
   // definition of TLS_SLOT_SAFESTACK in
   // https://android.googlesource.com/platform/bionic/+/master/libc/private/bionic_tls.h
@@ -658,7 +961,7 @@ X86TargetLowering::getSafeStackPointerLocation(IRBuilderBase &IRB) const {
     return SegmentOffset(IRB, 0x18, getAddressSpace());
   }
 
-  return TargetLowering::getSafeStackPointerLocation(IRB);
+  return TargetLowering::getSafeStackPointerLocation(IRB, Libcalls);
 }
 
 //===----------------------------------------------------------------------===//
@@ -669,6 +972,54 @@ bool X86TargetLowering::CanLowerReturn(
     CallingConv::ID CallConv, MachineFunction &MF, bool isVarArg,
     const SmallVectorImpl<ISD::OutputArg> &Outs, LLVMContext &Context,
     const Type *RetTy) const {
+  if (goabi::isGoCallingConv(CallConv)) {
+    if (isVarArg)
+      return false;
+    SmallVector<CCValAssign, 16> RVLocs;
+    CCState CCInfo(CallConv, isVarArg, MF, RVLocs, Context);
+    if (!CCInfo.CheckReturn(Outs, CC_X86_64_Go))
+      report_fatal_error(
+          "X86 Go direct return exceeds the register ABI; use goret");
+    return true;
+  }
+
+  // Mingw64 GCC returns f128 via sret, and LLVM matches it for compatibility.
+  // This logic exists for libcalls, a frontend should explicitly use sret
+  // rather than rely on the sret demotion here.
+  //
+  // Using sret is a reasonable implementation of the Windows x64 calling
+  // convention:
+  //
+  // https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170#return-values
+  //
+  // > Otherwise, the caller must allocate memory for the return value and pass
+  // > a pointer to it as the first argument.
+  //
+  // Although it is not the only reasonable interpretation:
+  //
+  // > Nonscalar types including floats, doubles, and vector types such as
+  // > __m128, __m128i, __m128d are returned in XMM0.
+  //
+  // For now, we prefer compatibility with GCC. If official guidelines are ever
+  // published, this can be revisited.
+  //
+  // Return false, which will perform sret demotion.
+  auto IsWin64F128StackCC = [this](CallingConv::ID CC) -> bool {
+    switch (CC) {
+    case CallingConv::Win64:
+      return true;
+    case CallingConv::C:
+      return Subtarget.isOSWindowsOrUEFI();
+    default:
+      return false;
+    }
+  };
+
+  if (IsWin64F128StackCC(CallConv) &&
+      llvm::any_of(
+          Outs, [](const ISD::OutputArg &Out) { return Out.VT == MVT::f128; }))
+    return false;
+
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, isVarArg, MF, RVLocs, Context);
   return CCInfo.CheckReturn(Outs, RetCC_X86);
@@ -760,7 +1111,8 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
 
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, isVarArg, MF, RVLocs, *DAG.getContext());
-  CCInfo.AnalyzeReturn(Outs, RetCC_X86);
+  CCInfo.AnalyzeReturn(Outs, goabi::isGoCallingConv(CallConv) ? CC_X86_64_Go
+                                                              : RetCC_X86);
 
   SmallVector<std::pair<Register, SDValue>, 4> RetVals;
   for (unsigned I = 0, OutsIndex = 0, E = RVLocs.size(); I != E;
@@ -781,7 +1133,7 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
     else if (VA.getLocInfo() == CCValAssign::ZExt)
       ValToCopy = DAG.getNode(ISD::ZERO_EXTEND, dl, VA.getLocVT(), ValToCopy);
     else if (VA.getLocInfo() == CCValAssign::AExt) {
-      if (ValVT.isVector() && ValVT.getVectorElementType() == MVT::i1)
+      if (ValVT.isVectorOf(MVT::i1))
         ValToCopy = lowerMasksToReg(ValToCopy, VA.getLocVT(), dl, DAG);
       else
         ValToCopy = DAG.getNode(ISD::ANY_EXTEND, dl, VA.getLocVT(), ValToCopy);
@@ -942,10 +1294,10 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
   if (Glue.getNode())
     RetOps.push_back(Glue);
 
-  X86ISD::NodeType opcode = X86ISD::RET_GLUE;
+  unsigned RetOpcode = X86ISD::RET_GLUE;
   if (CallConv == CallingConv::X86_INTR)
-    opcode = X86ISD::IRET;
-  return DAG.getNode(opcode, dl, MVT::Other, RetOps);
+    RetOpcode = X86ISD::IRET;
+  return DAG.getNode(RetOpcode, dl, MVT::Other, RetOps);
 }
 
 bool X86TargetLowering::isUsedByReturnOnly(SDNode *N, SDValue &Chain) const {
@@ -1118,7 +1470,8 @@ SDValue X86TargetLowering::LowerCallResult(
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, isVarArg, DAG.getMachineFunction(), RVLocs,
                  *DAG.getContext());
-  CCInfo.AnalyzeCallResult(Ins, RetCC_X86);
+  CCInfo.AnalyzeCallResult(Ins, goabi::isGoCallingConv(CallConv) ? CC_X86_64_Go
+                                                                 : RetCC_X86);
 
   // Copy all of the result registers out of their specified physreg.
   for (unsigned I = 0, InsIndex = 0, E = RVLocs.size(); I != E;
@@ -1204,64 +1557,47 @@ SDValue X86TargetLowering::LowerCallResult(
   return Chain;
 }
 
-//===----------------------------------------------------------------------===//
-//                C & StdCall & Fast Calling Convention implementation
-//===----------------------------------------------------------------------===//
-//  StdCall calling convention seems to be standard for many Windows' API
-//  routines and around. It differs from C calling convention just a little:
-//  callee should clean up the stack, not caller. Symbols should be also
-//  decorated in some fancy way :) It doesn't support any vector arguments.
-//  For info on fast calling convention see Fast Calling Convention (tail call)
-//  implementation LowerX86_32FastCCCallTo.
-
 /// Determines whether Args, either a set of outgoing arguments to a call, or a
 /// set of incoming args of a call, contains an sret pointer that the callee
-/// pops
+/// pops. This happens on most x86-32, System V platforms, unless register
+/// parameters are in use (-mregparm=1+, regcallcc, etc).
 template <typename T>
 static bool hasCalleePopSRet(const SmallVectorImpl<T> &Args,
+                             const SmallVectorImpl<CCValAssign> &ArgLocs,
                              const X86Subtarget &Subtarget) {
   // Not C++20 (yet), so no concepts available.
   static_assert(std::is_same_v<T, ISD::OutputArg> ||
                     std::is_same_v<T, ISD::InputArg>,
                 "requires ISD::OutputArg or ISD::InputArg");
 
-  // Only 32-bit pops the sret.  It's a 64-bit world these days, so early-out
-  // for most compilations.
-  if (!Subtarget.is32Bit())
+  // Popping the sret pointer only happens on x86-32 System V ABI platforms
+  // (Linux, Cygwin, BSDs, Mac, etc). That excludes Windows-minus-Cygwin and
+  // MCU.
+  const Triple &TT = Subtarget.getTargetTriple();
+  if (!TT.isX86_32() || TT.isOSMSVCRT() || TT.isOSIAMCU())
     return false;
 
-  if (Args.empty())
-    return false;
-
-  // Most calls do not have an sret argument, check the arg next.
-  const ISD::ArgFlagsTy &Flags = Args[0].Flags;
-  if (!Flags.isSRet() || Flags.isInReg())
-    return false;
-
-  // The MSVCabi does not pop the sret.
-  if (Subtarget.getTargetTriple().isOSMSVCRT())
-    return false;
-
-  // MCUs don't pop the sret
-  if (Subtarget.isTargetMCU())
-    return false;
-
-  // Callee pops argument
-  return true;
+  // Check if the first argument is marked sret and if it is passed in memory.
+  bool IsSRetInMem = false;
+  if (!Args.empty())
+    IsSRetInMem = Args.front().Flags.isSRet() && ArgLocs.front().isMemLoc();
+  return IsSRetInMem;
 }
 
 /// Make a copy of an aggregate at address specified by "Src" to address
 /// "Dst" with size and alignment information specified by the specific
 /// parameter attribute. The copy will be passed as a byval function parameter.
-static SDValue CreateCopyOfByValArgument(SDValue Src, SDValue Dst,
-                                         SDValue Chain, ISD::ArgFlagsTy Flags,
-                                         SelectionDAG &DAG, const SDLoc &dl) {
+static SDValue
+CreateCopyOfByValArgument(SDValue Src, SDValue Dst, SDValue Chain,
+                          ISD::ArgFlagsTy Flags, SelectionDAG &DAG,
+                          const SDLoc &dl, MachinePointerInfo DstInfo,
+                          MachinePointerInfo SrcInfo) {
   SDValue SizeNode = DAG.getIntPtrConstant(Flags.getByValSize(), dl);
-
-  return DAG.getMemcpy(
-      Chain, dl, Dst, Src, SizeNode, Flags.getNonZeroByValAlign(),
-      /*isVolatile*/ false, /*AlwaysInline=*/true,
-      /*CI=*/nullptr, std::nullopt, MachinePointerInfo(), MachinePointerInfo());
+  Align Alignment = Flags.getNonZeroByValAlign();
+  return DAG.getMemcpy(Chain, dl, Dst, Src, SizeNode, Alignment, Alignment,
+                       /*isVolatile*/ false, /*AlwaysInline=*/true,
+                       /*CI=*/nullptr, std::nullopt, DstInfo,
+                       SrcInfo);
 }
 
 /// Return true if the calling convention is one that we can guarantee TCO for.
@@ -1692,6 +2028,7 @@ SDValue X86TargetLowering::LowerFormalArguments(
     SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
     const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &dl,
     SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals) const {
+  bool IsGo = goabi::isGoCallingConv(CallConv);
   MachineFunction &MF = DAG.getMachineFunction();
   X86MachineFunctionInfo *FuncInfo = MF.getInfo<X86MachineFunctionInfo>();
 
@@ -1704,9 +2041,24 @@ SDValue X86TargetLowering::LowerFormalArguments(
   bool Is64Bit = Subtarget.is64Bit();
   bool IsWin64 = Subtarget.isCallingConvWin64(CallConv);
 
+  // On x86_64 with x87 disabled, x86_fp80 cannot be handled: the type would
+  // need to be returned/passed in x87 registers (FP0/FP1) which are
+  // unavailable. Emit a clear diagnostic instead of crashing later with
+  // "Cannot select: build_pair".
+  if (Is64Bit && !Subtarget.hasX87()) {
+    if (F.getReturnType()->isX86_FP80Ty() ||
+        any_of(F.args(), [](const Argument &Arg) {
+          return Arg.getType()->isX86_FP80Ty();
+        }))
+      reportFatalUsageError(
+          "cannot use x86_fp80 type with x87 disabled on x86_64 target");
+  }
+
   assert(
       !(IsVarArg && canGuaranteeTCO(CallConv)) &&
       "Var args not supported with calling conv' regcall, fastcc, ghc or hipe");
+  if (IsGo && IsVarArg)
+    report_fatal_error("X86 Go calling conventions do not support varargs");
 
   // Assign locations to all of the incoming arguments.
   SmallVector<CCValAssign, 16> ArgLocs;
@@ -1716,7 +2068,7 @@ SDValue X86TargetLowering::LowerFormalArguments(
   if (IsWin64)
     CCInfo.AllocateStack(32, Align(8));
 
-  CCInfo.AnalyzeArguments(Ins, CC_X86);
+  CCInfo.AnalyzeArguments(Ins, IsGo ? CC_X86_64_Go : CC_X86);
 
   // In vectorcall calling convention a second pass is required for the HVA
   // types.
@@ -1728,6 +2080,12 @@ SDValue X86TargetLowering::LowerFormalArguments(
   // input arguments.
   assert(isSortedByValueNo(ArgLocs) &&
          "Argument Location list must be sorted before lowering");
+
+  std::optional<X86GoFormalArgInfo> GoInfo;
+  if (IsGo)
+    GoInfo = prepareX86GoFormalArguments(MF, Ins, ArgLocs,
+                                         CCInfo.getGoStackArgsSize(),
+                                         CCInfo.getStackSize(), DAG);
 
   SDValue ArgValue;
   for (unsigned I = 0, InsIndex = 0, E = ArgLocs.size(); I != E;
@@ -1816,6 +2174,15 @@ SDValue X86TargetLowering::LowerFormalArguments(
         } else
           ArgValue = DAG.getNode(ISD::TRUNCATE, dl, VA.getValVT(), ArgValue);
       }
+    } else if (IsGo && (Ins[InsIndex].Flags.isByVal() ||
+                        Ins[InsIndex].Flags.isGoRet())) {
+      unsigned ArgIndex = Ins[InsIndex].OrigArgIndex;
+      if (ArgIndex == ISD::InputArg::NoArgIndex ||
+          ArgIndex >= GoInfo->HomeFIs.size() ||
+          GoInfo->HomeFIs[ArgIndex] == INT_MAX)
+        report_fatal_error("X86 Go indirect value has no incoming home");
+      ArgValue = DAG.getFrameIndex(GoInfo->HomeFIs[ArgIndex],
+                                   getPointerTy(DAG.getDataLayout()));
     } else {
       assert(VA.isMemLoc());
       ArgValue =
@@ -1872,7 +2239,8 @@ SDValue X86TargetLowering::LowerFormalArguments(
     }
   }
 
-  unsigned StackSize = CCInfo.getStackSize();
+  unsigned StackSize =
+      IsGo ? GoInfo->Layout.TotalStackSize : CCInfo.getStackSize();
   // Align stack specially for tail calls.
   if (shouldGuaranteeTCO(CallConv,
                          MF.getTarget().Options.GuaranteedTailCallOpt))
@@ -1893,7 +2261,7 @@ SDValue X86TargetLowering::LowerFormalArguments(
   } else {
     FuncInfo->setBytesToPopOnReturn(0); // Callee pops nothing.
     // If this is an sret function, the return should pop the hidden pointer.
-    if (!canGuaranteeTCO(CallConv) && hasCalleePopSRet(Ins, Subtarget))
+    if (hasCalleePopSRet(Ins, ArgLocs, Subtarget))
       FuncInfo->setBytesToPopOnReturn(4);
   }
 
@@ -1946,13 +2314,17 @@ SDValue X86TargetLowering::LowerMemOpCallTo(SDValue Chain, SDValue StackPtr,
                                             SelectionDAG &DAG,
                                             const CCValAssign &VA,
                                             ISD::ArgFlagsTy Flags,
-                                            bool isByVal) const {
+                                            bool isByVal,
+                                            MachinePointerInfo SrcInfo) const {
   unsigned LocMemOffset = VA.getLocMemOffset();
   SDValue PtrOff = DAG.getIntPtrConstant(LocMemOffset, dl);
   PtrOff = DAG.getNode(ISD::ADD, dl, getPointerTy(DAG.getDataLayout()),
                        StackPtr, PtrOff);
   if (isByVal)
-    return CreateCopyOfByValArgument(Arg, PtrOff, Chain, Flags, DAG, dl);
+    return CreateCopyOfByValArgument(
+        Arg, PtrOff, Chain, Flags, DAG, dl,
+        MachinePointerInfo::getStack(DAG.getMachineFunction(), LocMemOffset),
+        SrcInfo);
 
   MaybeAlign Alignment;
   if (Subtarget.isTargetWindowsMSVC() && !Subtarget.is64Bit() &&
@@ -2009,11 +2381,53 @@ SDValue X86TargetLowering::getMOVL(SelectionDAG &DAG, const SDLoc &dl, MVT VT,
   return DAG.getVectorShuffle(VT, dl, V1, V2, Mask);
 }
 
-SDValue
-X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
-                             SmallVectorImpl<SDValue> &InVals) const {
-  SelectionDAG &DAG                     = CLI.DAG;
-  SDLoc &dl                             = CLI.DL;
+// Returns the type of copying which is required to set up a byval argument to
+// a tail-called function. This isn't needed for non-tail calls, because they
+// always need the equivalent of CopyOnce, but tail-calls sometimes need two to
+// avoid clobbering another argument (CopyViaTemp), and sometimes can be
+// optimised to zero copies when forwarding an argument from the caller's
+// caller (NoCopy).
+X86TargetLowering::ByValCopyKind X86TargetLowering::ByValNeedsCopyForTailCall(
+    SelectionDAG &DAG, SDValue Src, SDValue Dst, ISD::ArgFlagsTy Flags) const {
+  MachineFrameInfo &MFI = DAG.getMachineFunction().getFrameInfo();
+
+  // Globals are always safe to copy from.
+  if (isa<GlobalAddressSDNode>(Src) || isa<ExternalSymbolSDNode>(Src))
+    return CopyOnce;
+
+  // Can only analyse frame index nodes, conservatively assume we need a
+  // temporary.
+  auto *SrcFrameIdxNode = dyn_cast<FrameIndexSDNode>(Src);
+  auto *DstFrameIdxNode = dyn_cast<FrameIndexSDNode>(Dst);
+  if (!SrcFrameIdxNode || !DstFrameIdxNode)
+    return CopyViaTemp;
+
+  int SrcFI = SrcFrameIdxNode->getIndex();
+  int DstFI = DstFrameIdxNode->getIndex();
+  assert(MFI.isFixedObjectIndex(DstFI) &&
+         "byval passed in non-fixed stack slot");
+
+  int64_t SrcOffset = MFI.getObjectOffset(SrcFI);
+  int64_t DstOffset = MFI.getObjectOffset(DstFI);
+
+  // If the source is in the local frame, then the copy to the argument
+  // memory is always valid.
+  bool FixedSrc = MFI.isFixedObjectIndex(SrcFI);
+  if (!FixedSrc || (FixedSrc && SrcOffset < 0))
+    return CopyOnce;
+
+  // If the value is already in the correct location, then no copying is
+  // needed. If not, then we need to copy via a temporary.
+  if (SrcOffset == DstOffset)
+    return NoCopy;
+  else
+    return CopyViaTemp;
+}
+
+SDValue X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
+                                     SmallVectorImpl<SDValue> &InVals) const {
+  SelectionDAG &DAG = CLI.DAG;
+  SDLoc &dl = CLI.DL;
   SmallVectorImpl<ISD::OutputArg> &Outs = CLI.Outs;
   SmallVectorImpl<SDValue> &OutVals     = CLI.OutVals;
   SmallVectorImpl<ISD::InputArg> &Ins   = CLI.Ins;
@@ -2025,12 +2439,21 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   const auto *CB                        = CLI.CB;
 
   MachineFunction &MF = DAG.getMachineFunction();
-  bool Is64Bit        = Subtarget.is64Bit();
-  bool IsWin64        = Subtarget.isCallingConvWin64(CallConv);
-  bool IsSibcall      = false;
-  bool IsGuaranteeTCO = MF.getTarget().Options.GuaranteedTailCallOpt ||
-      CallConv == CallingConv::Tail || CallConv == CallingConv::SwiftTail;
-  bool IsCalleePopSRet = !IsGuaranteeTCO && hasCalleePopSRet(Outs, Subtarget);
+  bool Is64Bit = Subtarget.is64Bit();
+  bool IsGo = goabi::isGoCallingConv(CallConv);
+  bool IsSupportedGoTailCall =
+      IsGo && isTailCall && CB &&
+      goabi::isSupportedMustTailCall(MF.getFunction(), *CB);
+  if (IsGo) {
+    isTailCall = IsSupportedGoTailCall;
+    if (!Is64Bit)
+      report_fatal_error("Go calling convention requires x86-64");
+    if (isVarArg)
+      report_fatal_error("Go calling convention does not support varargs");
+  }
+  bool IsWin64 = Subtarget.isCallingConvWin64(CallConv);
+  bool ShouldGuaranteeTCO = shouldGuaranteeTCO(
+      CallConv, MF.getTarget().Options.GuaranteedTailCallOpt);
   X86MachineFunctionInfo *X86Info = MF.getInfo<X86MachineFunctionInfo>();
   bool HasNCSR = (CB && isa<CallInst>(CB) &&
                   CB->hasFnAttr("no_caller_saved_registers"));
@@ -2041,6 +2464,7 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   // If the indirect call target has the nocf_check attribute, the call needs
   // the NOTRACK prefix. For simplicity just disable tail calls as there are
   // so many variants.
+  // FIXME: This will cause backend errors if the user forces the issue.
   bool IsNoTrackIndirectCall = IsIndirectCall && CB->doesNoCfCheck() &&
                                M->getModuleFlag("cf-protection-branch");
   if (IsNoTrackIndirectCall)
@@ -2051,8 +2475,7 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     report_fatal_error("X86 interrupts may not be called directly");
 
   // Set type id for call site info.
-  if (MF.getTarget().Options.EmitCallGraphSection && CB && CB->isIndirectCall())
-    CSInfo = MachineFunction::CallSiteInfo(*CB);
+  setTypeIdForCallsiteInfo(CB, MF, CSInfo);
 
   if (IsIndirectCall && !IsWin64 &&
       M->getModuleFlag("import-call-optimization"))
@@ -2068,7 +2491,13 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   if (IsWin64)
     CCInfo.AllocateStack(32, Align(8));
 
-  CCInfo.AnalyzeArguments(Outs, CC_X86);
+  CCInfo.AnalyzeArguments(Outs, IsGo ? CC_X86_64_Go : CC_X86);
+
+  goabi::CallLayout GoLayout;
+  if (IsGo)
+    GoLayout = goabi::computeCallLayout(
+        CLI, ArgLocs, CCInfo.getGoStackArgsSize(), CCInfo.getStackSize(),
+        getX86GoABIConfig(Subtarget, CLI.CallConv));
 
   // In vectorcall calling convention a second pass is required for the HVA
   // types.
@@ -2076,32 +2505,29 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     CCInfo.AnalyzeArgumentsSecondPass(Outs, CC_X86);
   }
 
+  // We cannot guarantee TCO for mismatched calling conventions.
+  if (isTailCall && ShouldGuaranteeTCO) {
+    CallingConv::ID CallerCC = MF.getFunction().getCallingConv();
+    isTailCall = (CallConv == CallerCC);
+  }
+
+  // Check if this tail call is a "sibling" call, which is loosely defined to
+  // be a tail call that doesn't require heroics like moving the return
+  // address or swapping byval arguments. We treat some musttail calls as
+  // sibling calls to avoid unnecessary argument copies.
   bool IsMustTail = CLI.CB && CLI.CB->isMustTailCall();
-  if (Subtarget.isPICStyleGOT() && !IsGuaranteeTCO && !IsMustTail) {
-    // If we are using a GOT, disable tail calls to external symbols with
-    // default visibility. Tail calling such a symbol requires using a GOT
-    // relocation, which forces early binding of the symbol. This breaks code
-    // that require lazy function symbol resolution. Using musttail or
-    // GuaranteedTailCallOpt will override this.
-    GlobalAddressSDNode *G = dyn_cast<GlobalAddressSDNode>(Callee);
-    if (!G || (!G->getGlobal()->hasLocalLinkage() &&
-               G->getGlobal()->hasDefaultVisibility()))
-      isTailCall = false;
-  }
-
-  if (isTailCall && !IsMustTail) {
-    // Check if it's really possible to do a tail call.
-    isTailCall = IsEligibleForTailCallOptimization(CLI, CCInfo, ArgLocs,
-                                                   IsCalleePopSRet);
-
-    // Sibcalls are automatically detected tailcalls which do not require
-    // ABI changes.
-    if (!IsGuaranteeTCO && isTailCall)
+  bool IsSibcall = false;
+  if (isTailCall) {
+    if (IsSupportedGoTailCall) {
       IsSibcall = true;
-
-    if (isTailCall)
-      ++NumTailCalls;
+    } else {
+      IsSibcall = isEligibleForSiblingCallOpt(CLI, CCInfo, ArgLocs);
+      isTailCall = IsSibcall || IsMustTail || ShouldGuaranteeTCO;
+    }
   }
+
+  if (isTailCall)
+    ++NumTailCalls;
 
   if (IsMustTail && !isTailCall)
     report_fatal_error("failed to perform tail call elimination on a call "
@@ -2111,18 +2537,18 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
          "Var args not supported with calling convention fastcc, ghc or hipe");
 
   // Get a count of how many bytes are to be pushed on the stack.
-  unsigned NumBytes = CCInfo.getAlignedCallFrameSize();
+  unsigned NumBytes =
+      IsGo ? GoLayout.TotalStackSize : CCInfo.getAlignedCallFrameSize();
   if (IsSibcall)
     // This is a sibcall. The memory operands are available in caller's
     // own caller's stack.
     NumBytes = 0;
-  else if (IsGuaranteeTCO && canGuaranteeTCO(CallConv))
+  else if (ShouldGuaranteeTCO && canGuaranteeTCO(CallConv))
     NumBytes = GetAlignedArgumentStackSize(NumBytes, DAG);
 
+  // A sibcall is ABI-compatible and does not need to adjust the stack pointer.
   int FPDiff = 0;
-  if (isTailCall &&
-      shouldGuaranteeTCO(CallConv,
-                         MF.getTarget().Options.GuaranteedTailCallOpt)) {
+  if (isTailCall && ShouldGuaranteeTCO && !IsSibcall) {
     // Lower arguments at fp - stackoffset + fpdiff.
     unsigned NumBytesCallerPushed = X86Info->getBytesToPopOnReturn();
 
@@ -2136,6 +2562,89 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
 
   unsigned NumBytesToPush = NumBytes;
   unsigned NumBytesToPop = NumBytes;
+
+  SDValue StackPtr;
+  const X86RegisterInfo *RegInfo = Subtarget.getRegisterInfo();
+
+  // If we are doing a tail-call, any byval arguments will be written to stack
+  // space which was used for incoming arguments. If any the values being used
+  // are incoming byval arguments to this function, then they might be
+  // overwritten by the stores of the outgoing arguments. To avoid this, we
+  // need to make a temporary copy of them in local stack space, then copy back
+  // to the argument area.
+  // FIXME: There's potential to improve the code by using virtual registers for
+  // temporary storage, and letting the register allocator spill if needed.
+  SmallVector<SDValue, 8> ByValTemporaries;
+  SmallVector<MachinePointerInfo, 8> ByValTemporaryInfos;
+  SDValue ByValTempChain;
+  if (isTailCall) {
+    // Use null SDValue to mean "no temporary recorded for this arg index".
+    ByValTemporaries.assign(OutVals.size(), SDValue());
+    ByValTemporaryInfos.assign(OutVals.size(), MachinePointerInfo());
+
+    SmallVector<SDValue, 8> ByValCopyChains;
+    for (const CCValAssign &VA : ArgLocs) {
+      unsigned ArgIdx = VA.getValNo();
+      SDValue Src = OutVals[ArgIdx];
+      ISD::ArgFlagsTy Flags = Outs[ArgIdx].Flags;
+      MachinePointerInfo SrcInfo =
+          CLI.getArgumentPointerInfo(Outs[ArgIdx]);
+
+      if (!Flags.isByVal())
+        continue;
+
+      auto PtrVT = getPointerTy(DAG.getDataLayout());
+
+      if (!StackPtr.getNode())
+        StackPtr =
+            DAG.getCopyFromReg(Chain, dl, RegInfo->getStackRegister(), PtrVT);
+
+      // Destination: where this byval should live in the callee’s frame
+      // after the tail call.
+      int64_t Offset = VA.getLocMemOffset() + FPDiff;
+      uint64_t Size = VA.getLocVT().getFixedSizeInBits() / 8;
+      int FI = MF.getFrameInfo().CreateFixedObject(Size, Offset,
+                                                   /*IsImmutable=*/true);
+      SDValue Dst = DAG.getFrameIndex(FI, PtrVT);
+
+      ByValCopyKind Copy = ByValNeedsCopyForTailCall(DAG, Src, Dst, Flags);
+
+      if (Copy == NoCopy) {
+        // If the argument is already at the correct offset on the stack
+        // (because we are forwarding a byval argument from our caller), we
+        // don't need any copying.
+        continue;
+      } else if (Copy == CopyOnce) {
+        // If the argument is in our local stack frame, no other argument
+        // preparation can clobber it, so we can copy it to the final location
+        // later.
+        ByValTemporaries[ArgIdx] = Src;
+        ByValTemporaryInfos[ArgIdx] = SrcInfo;
+      } else {
+        assert(Copy == CopyViaTemp && "unexpected enum value");
+        // If we might be copying this argument from the outgoing argument
+        // stack area, we need to copy via a temporary in the local stack
+        // frame.
+        MachineFrameInfo &MFI = MF.getFrameInfo();
+        int TempFrameIdx = MFI.CreateStackObject(Flags.getByValSize(),
+                                                 Flags.getNonZeroByValAlign(),
+                                                 /*isSS=*/false);
+        SDValue Temp =
+            DAG.getFrameIndex(TempFrameIdx, getPointerTy(DAG.getDataLayout()));
+
+        MachinePointerInfo TempInfo =
+            MachinePointerInfo::getFixedStack(MF, TempFrameIdx);
+        SDValue CopyChain = CreateCopyOfByValArgument(
+            Src, Temp, Chain, Flags, DAG, dl, TempInfo, SrcInfo);
+        ByValCopyChains.push_back(CopyChain);
+        ByValTemporaries[ArgIdx] = Temp;
+        ByValTemporaryInfos[ArgIdx] = TempInfo;
+      }
+    }
+    if (!ByValCopyChains.empty())
+      ByValTempChain =
+          DAG.getNode(ISD::TokenFactor, dl, MVT::Other, ByValCopyChains);
+  }
 
   // If we have an inalloca argument, all stack space has already been allocated
   // for us and be right at the top of the stack.  We don't support multiple
@@ -2177,7 +2686,6 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
 
   SmallVector<std::pair<Register, SDValue>, 8> RegsToPass;
   SmallVector<SDValue, 8> MemOpChains;
-  SDValue StackPtr;
 
   // The next loop assumes that the locations are in the same order of the
   // input arguments.
@@ -2186,18 +2694,19 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
 
   // Walk the register/memloc assignments, inserting copies/loads.  In the case
   // of tail call optimization arguments are handle later.
-  const X86RegisterInfo *RegInfo = Subtarget.getRegisterInfo();
   for (unsigned I = 0, OutIndex = 0, E = ArgLocs.size(); I != E;
        ++I, ++OutIndex) {
     assert(OutIndex < Outs.size() && "Invalid Out index");
     // Skip inalloca/preallocated arguments, they have already been written.
     ISD::ArgFlagsTy Flags = Outs[OutIndex].Flags;
-    if (Flags.isInAlloca() || Flags.isPreallocated())
+    if (Flags.isInAlloca() || Flags.isPreallocated() || Flags.isGoRet())
       continue;
 
     CCValAssign &VA = ArgLocs[I];
     EVT RegVT = VA.getLocVT();
     SDValue Arg = OutVals[OutIndex];
+    MachinePointerInfo SrcInfo =
+        CLI.getArgumentPointerInfo(Outs[OutIndex]);
     bool isByVal = Flags.isByVal();
 
     // Promote the value if needed.
@@ -2235,8 +2744,9 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
             std::max(Align(16), Flags.getNonZeroByValAlign()), false);
         SDValue StackSlot =
             DAG.getFrameIndex(FrameIdx, getPointerTy(DAG.getDataLayout()));
-        Chain =
-            CreateCopyOfByValArgument(Arg, StackSlot, Chain, Flags, DAG, dl);
+        Chain = CreateCopyOfByValArgument(
+            Arg, StackSlot, Chain, Flags, DAG, dl,
+            MachinePointerInfo::getFixedStack(MF, FrameIdx), SrcInfo);
         // From now on treat this as a regular pointer
         Arg = StackSlot;
         isByVal = false;
@@ -2276,13 +2786,13 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
         if (ShadowReg)
           RegsToPass.push_back(std::make_pair(ShadowReg, Arg));
       }
-    } else if (!IsSibcall && (!isTailCall || isByVal)) {
+    } else if (!IsSibcall && (!isTailCall || (isByVal && !IsMustTail))) {
       assert(VA.isMemLoc());
       if (!StackPtr.getNode())
         StackPtr = DAG.getCopyFromReg(Chain, dl, RegInfo->getStackRegister(),
                                       getPointerTy(DAG.getDataLayout()));
-      MemOpChains.push_back(LowerMemOpCallTo(Chain, StackPtr, Arg,
-                                             dl, DAG, VA, Flags, isByVal));
+      MemOpChains.push_back(LowerMemOpCallTo(Chain, StackPtr, Arg, dl, DAG, VA,
+                                             Flags, isByVal, SrcInfo));
     }
   }
 
@@ -2291,12 +2801,13 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
 
   if (Subtarget.isPICStyleGOT()) {
     // ELF / PIC requires GOT in the EBX register before function calls via PLT
-    // GOT pointer (except regcall).
+    // GOT pointer.
     if (!isTailCall) {
-      // Indirect call with RegCall calling convertion may use up all the
-      // general registers, so it is not suitable to bind EBX reister for
-      // GOT address, just let register allocator handle it.
-      if (CallConv != CallingConv::X86_RegCall)
+      // Only PLT calls (GlobalAddress or ExternalSymbol) require the GOT in
+      // EBX. Indirect calls through a register or an absolute address do not
+      // go through the PLT and do not need EBX to hold the GOT base.
+      if ((Callee->getOpcode() == ISD::GlobalAddress ||
+           Callee->getOpcode() == ISD::ExternalSymbol))
         RegsToPass.push_back(std::make_pair(
           Register(X86::EBX), DAG.getNode(X86ISD::GlobalBaseReg, SDLoc(),
                                           getPointerTy(DAG.getDataLayout()))));
@@ -2353,7 +2864,7 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   // For tail calls lower the arguments to the 'real' stack slots.  Sibcalls
   // don't need this because the eligibility check rejects calls that require
   // shuffling arguments passed in memory.
-  if (!IsSibcall && isTailCall) {
+  if (isTailCall && !IsSibcall) {
     // Force all the incoming stack arguments to be loaded from the stack
     // before any new outgoing arguments or the return address are stored to the
     // stack, because the outgoing stack slots may alias the incoming argument
@@ -2362,6 +2873,10 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     // effectively depends on every argument instead of just those arguments it
     // would clobber.
     Chain = DAG.getStackArgumentTokenFactor(Chain);
+
+    if (ByValTempChain)
+      Chain =
+          DAG.getNode(ISD::TokenFactor, dl, MVT::Other, Chain, ByValTempChain);
 
     SmallVector<SDValue, 8> MemOpChains2;
     SDValue FIN;
@@ -2395,16 +2910,15 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
       FIN = DAG.getFrameIndex(FI, getPointerTy(DAG.getDataLayout()));
 
       if (Flags.isByVal()) {
-        // Copy relative to framepointer.
-        SDValue Source = DAG.getIntPtrConstant(VA.getLocMemOffset(), dl);
-        if (!StackPtr.getNode())
-          StackPtr = DAG.getCopyFromReg(Chain, dl, RegInfo->getStackRegister(),
-                                        getPointerTy(DAG.getDataLayout()));
-        Source = DAG.getNode(ISD::ADD, dl, getPointerTy(DAG.getDataLayout()),
-                             StackPtr, Source);
+        if (SDValue ByValSrc = ByValTemporaries[OutsIndex]) {
+          auto PtrVT = getPointerTy(DAG.getDataLayout());
+          SDValue DstAddr = DAG.getFrameIndex(FI, PtrVT);
 
-        MemOpChains2.push_back(
-            CreateCopyOfByValArgument(Source, FIN, Chain, Flags, DAG, dl));
+          MemOpChains2.push_back(CreateCopyOfByValArgument(
+              ByValSrc, DstAddr, Chain, Flags, DAG, dl,
+              MachinePointerInfo::getFixedStack(MF, FI),
+              ByValTemporaryInfos[OutsIndex]));
+        }
       } else {
         // Store relative to framepointer.
         MemOpChains2.push_back(DAG.getStore(
@@ -2431,6 +2945,7 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   }
 
   bool IsImpCall = false;
+  bool IsCFGuardCall = false;
   if (DAG.getTarget().getCodeModel() == CodeModel::Large) {
     assert(Is64Bit && "Large code model is only legal in 64-bit mode.");
     // In the 64-bit large code model, we have to make all calls
@@ -2448,6 +2963,21 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
              Callee.getValueType() == MVT::i32) {
     // Zero-extend the 32-bit Callee address into a 64-bit according to x32 ABI
     Callee = DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i64, Callee);
+  } else if (Is64Bit && CB && isCFGuardCall(CB)) {
+    // We'll use a specific psuedo instruction for tail calls to control flow
+    // guard functions to guarantee the instruction used for the call. To do
+    // this we need to unwrap the load now and use the CFG Func GV as the
+    // callee.
+    IsCFGuardCall = true;
+    auto *LoadNode = cast<LoadSDNode>(Callee);
+    GlobalAddressSDNode *GA =
+        cast<GlobalAddressSDNode>(unwrapAddress(LoadNode->getBasePtr()));
+    assert(isCFGuardFunction(GA->getGlobal()) &&
+           "CFG Call should be to a guard function");
+    assert(LoadNode->getOffset()->isUndef() &&
+           "CFG Function load should not have an offset");
+    Callee = DAG.getTargetGlobalAddress(
+        GA->getGlobal(), dl, GA->getValueType(0), 0, X86II::MO_NO_FLAG);
   }
 
   SmallVector<SDValue, 8> Ops;
@@ -2552,7 +3082,9 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     // should be computed from returns not tail calls.  Consider a void
     // function making a tail call to a function returning int.
     MF.getFrameInfo().setHasTailCall();
-    SDValue Ret = DAG.getNode(X86ISD::TC_RETURN, dl, MVT::Other, Ops);
+    auto Opcode =
+        IsCFGuardCall ? X86ISD::TC_RETURN_GLOBALADDR : X86ISD::TC_RETURN;
+    SDValue Ret = DAG.getNode(Opcode, dl, MVT::Other, Ops);
 
     if (IsCFICall)
       Ret.getNode()->setCFIType(CLI.CFIType->getZExtValue());
@@ -2568,6 +3100,8 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     Chain = DAG.getNode(X86ISD::IMP_CALL, dl, NodeTys, Ops);
   } else if (IsNoTrackIndirectCall) {
     Chain = DAG.getNode(X86ISD::NT_CALL, dl, NodeTys, Ops);
+  } else if (IsCFGuardCall) {
+    Chain = DAG.getNode(X86ISD::CALL_GLOBALADDR, dl, NodeTys, Ops);
   } else if (CLI.CB && objcarc::hasAttachedCallOpBundle(CLI.CB)) {
     // Calls with a "clang.arc.attachedcall" bundle are special. They should be
     // expanded to the call, directly followed by a special marker sequence and
@@ -2599,15 +3133,87 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     if (MDNode *HeapAlloc = CLI.CB->getMetadata("heapallocsite"))
       DAG.addHeapAllocSite(Chain.getNode(), HeapAlloc);
 
+  if (IsGo) {
+    Chain = LowerCallResult(Chain, InGlue, CallConv, isVarArg, Ins, dl, DAG,
+                            InVals, RegMask);
+
+    bool HasGoRet = llvm::any_of(
+        Outs, [](const ISD::OutputArg &Out) { return Out.Flags.isGoRet(); });
+    SDValue ResultGlue =
+        Ins.empty() ? InGlue : Chain.getValue(Chain->getNumValues() - 1);
+    if (HasGoRet) {
+      MVT PtrVT = getPointerTy(DAG.getDataLayout());
+      SDValue ResultStackPtr = DAG.getCopyFromReg(
+          Chain, dl, RegInfo->getStackRegister(), PtrVT, ResultGlue);
+      Chain = ResultStackPtr.getValue(1);
+
+      SmallVector<SDValue, 4> Copies;
+      for (auto [I, VA] : llvm::enumerate(ArgLocs)) {
+        const ISD::ArgFlagsTy &Flags = Outs[I].Flags;
+        if (!Flags.isGoRet())
+          continue;
+        if (!VA.isMemLoc() || VA.getLocMemOffset() < 0)
+          report_fatal_error("invalid X86 goret call location");
+        uint64_t Offset = static_cast<uint64_t>(VA.getLocMemOffset());
+        SDValue Source = DAG.getNode(ISD::ADD, dl, PtrVT, ResultStackPtr,
+                                     DAG.getIntPtrConstant(Offset, dl));
+        const auto *AI =
+            dyn_cast_or_null<AllocaInst>(CLI.Args[Outs[I].OrigArgIndex].Val);
+        FunctionLoweringInfo *FLI = DAG.getFunctionLoweringInfo();
+        ArrayRef<FunctionLoweringInfo::GoRetValueProjection> Projections =
+            AI && FLI ? FLI->getGoRetValueProjections(AI)
+                      : ArrayRef<FunctionLoweringInfo::GoRetValueProjection>();
+        auto *ResultFI = dyn_cast<FrameIndexSDNode>(OutVals[I]);
+        if (!Projections.empty() && ResultFI) {
+          SDValue ProjectionChain = Chain;
+          for (const auto &Projection : Projections) {
+            EVT VT =
+                getValueType(DAG.getDataLayout(), Projection.Load->getType());
+            SDValue ProjectionSource =
+                DAG.getNode(ISD::ADD, dl, PtrVT, Source,
+                            DAG.getIntPtrConstant(Projection.Offset, dl));
+            Align Alignment =
+                commonAlignment(Flags.getNonZeroMemAlign(), Projection.Offset);
+            SDValue Load = DAG.getLoad(
+                VT, dl, ProjectionChain, ProjectionSource,
+                MachinePointerInfo::getStack(MF, Offset + Projection.Offset),
+                Alignment);
+            ProjectionChain = Load.getValue(1);
+            ProjectionChain =
+                DAG.getCopyToReg(ProjectionChain, dl, Projection.Reg, Load);
+          }
+          FLI->invalidateDebugFrameIndex(ResultFI->getIndex());
+          MF.getFrameInfo().RemoveStackObject(ResultFI->getIndex());
+          FLI->activateGoRetValueProjections(AI);
+          Copies.push_back(ProjectionChain);
+          continue;
+        }
+        Copies.push_back(DAG.getMemcpy(
+            Chain, dl, OutVals[I], Source,
+            DAG.getConstant(Flags.getGoRetSize(), dl, PtrVT),
+            Flags.getNonZeroMemAlign(), Flags.getNonZeroMemAlign(),
+            /*isVol=*/false, /*AlwaysInline=*/true, /*CI=*/nullptr,
+            std::nullopt, MachinePointerInfo(),
+            MachinePointerInfo::getStack(MF, Offset)));
+      }
+      if (!Copies.empty())
+        Chain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, Copies);
+      ResultGlue = SDValue();
+    }
+
+    return DAG.getCALLSEQ_END(Chain, NumBytes, 0, ResultGlue, dl);
+  }
+
   // Create the CALLSEQ_END node.
   unsigned NumBytesForCalleeToPop = 0; // Callee pops nothing.
   if (X86::isCalleePop(CallConv, Is64Bit, isVarArg,
-                       DAG.getTarget().Options.GuaranteedTailCallOpt))
+                       DAG.getTarget().Options.GuaranteedTailCallOpt)) {
     NumBytesForCalleeToPop = NumBytes;    // Callee pops everything
-  else if (!canGuaranteeTCO(CallConv) && IsCalleePopSRet)
+  } else if (hasCalleePopSRet(Outs, ArgLocs, Subtarget)) {
     // If this call passes a struct-return pointer, the callee
     // pops that struct pointer.
     NumBytesForCalleeToPop = 4;
+  }
 
   // Returns a glue for retval copy to use.
   if (!IsSibcall) {
@@ -2803,14 +3409,18 @@ mayBeSRetTailCallCompatible(const TargetLowering::CallLoweringInfo &CLI,
   return false;
 }
 
-/// Check whether the call is eligible for tail call optimization. Targets
-/// that want to do tail call optimization should implement this function.
-/// Note that the x86 backend does not check musttail calls for eligibility! The
-/// rest of x86 tail call lowering must be prepared to forward arguments of any
-/// type.
-bool X86TargetLowering::IsEligibleForTailCallOptimization(
+/// Check whether the call is eligible for sibling call optimization. Sibling
+/// calls are loosely defined to be simple, profitable tail calls that only
+/// require adjusting register parameters. We do not speculatively to optimize
+/// complex calls that require lots of argument memory operations that may
+/// alias.
+///
+/// Note that LLVM supports multiple ways, such as musttail, to force tail call
+/// emission. Returning false from this function will not prevent tail call
+/// emission in all cases.
+bool X86TargetLowering::isEligibleForSiblingCallOpt(
     TargetLowering::CallLoweringInfo &CLI, CCState &CCInfo,
-    SmallVectorImpl<CCValAssign> &ArgLocs, bool IsCalleePopSRet) const {
+    SmallVectorImpl<CCValAssign> &ArgLocs) const {
   SelectionDAG &DAG = CLI.DAG;
   const SmallVectorImpl<ISD::OutputArg> &Outs = CLI.Outs;
   const SmallVectorImpl<SDValue> &OutVals = CLI.OutVals;
@@ -2833,23 +3443,33 @@ bool X86TargetLowering::IsEligibleForTailCallOptimization(
   if (CallerF.getReturnType()->isX86_FP80Ty() && !CLI.RetTy->isX86_FP80Ty())
     return false;
 
-  CallingConv::ID CallerCC = CallerF.getCallingConv();
-  bool CCMatch = CallerCC == CalleeCC;
-  bool IsCalleeWin64 = Subtarget.isCallingConvWin64(CalleeCC);
-  bool IsCallerWin64 = Subtarget.isCallingConvWin64(CallerCC);
-  bool IsGuaranteeTCO = DAG.getTarget().Options.GuaranteedTailCallOpt ||
-      CalleeCC == CallingConv::Tail || CalleeCC == CallingConv::SwiftTail;
-
   // Win64 functions have extra shadow space for argument homing. Don't do the
   // sibcall if the caller and callee have mismatched expectations for this
   // space.
+  CallingConv::ID CallerCC = CallerF.getCallingConv();
+  bool IsCalleeWin64 = Subtarget.isCallingConvWin64(CalleeCC);
+  bool IsCallerWin64 = Subtarget.isCallingConvWin64(CallerCC);
   if (IsCalleeWin64 != IsCallerWin64)
     return false;
 
-  if (IsGuaranteeTCO) {
-    if (canGuaranteeTCO(CalleeCC) && CCMatch)
-      return true;
+  // Do not optimize vararg calls with 6 arguments for LFI since LFI reserves
+  // %r11, meaning there will not be enough registers available.
+  if (Subtarget.isLFI() && ArgLocs.size() > 5)
     return false;
+
+  // If we are using a GOT, don't generate sibling calls to non-local,
+  // default-visibility symbols. Tail calling such a symbol requires using a GOT
+  // relocation, which forces early binding of the symbol. This breaks code that
+  // require lazy function symbol resolution. Using musttail or
+  // GuaranteedTailCallOpt will override this.
+  if (Subtarget.isPICStyleGOT()) {
+    if (isa<ExternalSymbolSDNode>(Callee))
+      return false;
+    if (GlobalAddressSDNode *G = dyn_cast<GlobalAddressSDNode>(Callee)) {
+      if (!G->getGlobal()->hasLocalLinkage() &&
+          G->getGlobal()->hasDefaultVisibility())
+        return false;
+    }
   }
 
   // Look for obvious safe cases to perform tail call optimization that do not
@@ -2870,7 +3490,7 @@ bool X86TargetLowering::IsEligibleForTailCallOptimization(
     // sret. Condition #b is harder to determine.
     if (!mayBeSRetTailCallCompatible(CLI, SRetReg))
       return false;
-  } else if (IsCalleePopSRet)
+  } else if (hasCalleePopSRet(Outs, ArgLocs, Subtarget))
     // The callee pops an sret, so we cannot tail-call, as our caller doesn't
     // expect that.
     return false;
@@ -2916,7 +3536,7 @@ bool X86TargetLowering::IsEligibleForTailCallOptimization(
   // The callee has to preserve all registers the caller needs to preserve.
   const X86RegisterInfo *TRI = Subtarget.getRegisterInfo();
   const uint32_t *CallerPreserved = TRI->getCallPreservedMask(MF, CallerCC);
-  if (!CCMatch) {
+  if (CallerCC != CalleeCC) {
     const uint32_t *CalleePreserved = TRI->getCallPreservedMask(MF, CalleeCC);
     if (!TRI->regmaskSubsetEqual(CallerPreserved, CalleePreserved))
       return false;

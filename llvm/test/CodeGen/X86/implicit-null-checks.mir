@@ -1191,8 +1191,10 @@ body:             |
   bb.1.not_null:
     liveins: $rdi, $rsi
 
-    MOV32mi killed $rsi, 1, $noreg, 0, $noreg, 3 
-    MOV32mi killed $rdi, 1, $noreg, 0, $noreg, 2
+    ; A MachineMemOperand without an IR value must conservatively block
+    ; hoisting rather than make alias analysis assert.
+    MOV32mi killed $rsi, 1, $noreg, 0, $noreg, 3 :: (store (s32))
+    MOV32mi killed $rdi, 1, $noreg, 0, $noreg, 2 :: (store (s32))
     RET64
 
   bb.2.is_null:

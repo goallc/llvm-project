@@ -44,6 +44,16 @@ static cl::opt<int> StackMapVersion(
 
 const char *StackMaps::WSMP = "Stack Maps: ";
 
+std::optional<int64_t>
+StackMaps::getConstantValue(const StackMaps::Location &Loc) const {
+  if (Loc.Type == Location::Constant)
+    return Loc.Offset;
+  if (Loc.Type != Location::ConstantIndex || Loc.Offset < 0 ||
+      static_cast<size_t>(Loc.Offset) >= ConstPool.size())
+    return std::nullopt;
+  return std::next(ConstPool.begin(), Loc.Offset)->second;
+}
+
 static uint64_t getConstMetaVal(const MachineInstr &MI, unsigned Idx) {
   assert(MI.getOperand(Idx).isImm() &&
          MI.getOperand(Idx).getImm() == StackMaps::ConstantOp);
@@ -240,15 +250,6 @@ StackMaps::parseOperand(MachineInstr::const_mop_iterator MOI,
       if (isInt<32>(Imm)) {
         Locs.emplace_back(Location::Constant, sizeof(int64_t), 0, Imm);
       } else {
-        // ConstPool is intentionally a MapVector of 'uint64_t's (as
-        // opposed to 'int64_t's).  We should never be in a situation
-        // where we have to insert either the tombstone or the empty
-        // keys into a map, and for a DenseMap<uint64_t, T> these are
-        // (uint64_t)0 and (uint64_t)-1.  They can be and are
-        // represented using 32 bit integers.
-        assert((uint64_t)Imm != DenseMapInfo<uint64_t>::getEmptyKey() &&
-               (uint64_t)Imm != DenseMapInfo<uint64_t>::getTombstoneKey() &&
-               "empty and tombstone keys should fit in 32 bits!");
         auto Result = ConstPool.insert(std::make_pair(Imm, Imm));
         Locs.emplace_back(Location::ConstantIndex, sizeof(int64_t), 0,
                           Result.first - ConstPool.begin());

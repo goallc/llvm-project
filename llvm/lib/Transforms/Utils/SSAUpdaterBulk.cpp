@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Utils/SSAUpdaterBulk.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/IteratedDominanceFrontier.h"
 #include "llvm/IR/BasicBlock.h"
@@ -267,6 +268,8 @@ static bool replaceIfIdentical(PHINode &PHI, PHINode &ReplPHI) {
   return true;
 }
 
+namespace llvm {
+
 bool EliminateNewDuplicatePHINodes(BasicBlock *BB,
                                    BasicBlock::phi_iterator FirstExistingPN) {
   assert(!PHIAreRefEachOther(make_range(BB->phis().begin(), FirstExistingPN)));
@@ -293,8 +296,12 @@ bool EliminateNewDuplicatePHINodes(BasicBlock *BB,
   return Changed;
 }
 
+} // end namespace llvm
+
 static void deduplicatePass(ArrayRef<PHINode *> Worklist) {
-  SmallDenseMap<BasicBlock *, unsigned> BBs;
+  // Replacing a PHI can make PHIs in another block identical. Preserve the
+  // worklist order so the result cannot depend on BasicBlock addresses.
+  SmallMapVector<BasicBlock *, unsigned, 8> BBs;
   for (PHINode *PHI : Worklist) {
     if (PHI)
       ++BBs[PHI->getParent()];

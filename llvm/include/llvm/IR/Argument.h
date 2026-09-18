@@ -78,11 +78,14 @@ public:
   /// Return true if this argument has the byval attribute.
   LLVM_ABI bool hasByValAttr() const;
 
-  /// Return true if this argument has the dead_on_return attribute.
-  LLVM_ABI bool hasDeadOnReturnAttr() const;
+  /// Returns information on the memory marked dead_on_return for the argument.
+  LLVM_ABI DeadOnReturnInfo getDeadOnReturnInfo() const;
 
   /// Return true if this argument has the byref attribute.
   LLVM_ABI bool hasByRefAttr() const;
+
+  /// Return true if this argument has the goret attribute.
+  LLVM_ABI bool hasGoRetAttr() const;
 
   /// Return true if this argument has the swiftself attribute.
   LLVM_ABI bool hasSwiftSelfAttr() const;
@@ -100,19 +103,13 @@ public:
   LLVM_ABI uint64_t getPassPointeeByValueCopySize(const DataLayout &DL) const;
 
   /// Return true if this argument has the byval, sret, inalloca, preallocated,
-  /// or byref attribute. These attributes represent arguments being passed by
-  /// value (which may or may not involve a stack copy)
+  /// byref, or goret attribute. These attributes represent values with an
+  /// associated in-memory ABI type.
   LLVM_ABI bool hasPointeeInMemoryValueAttr() const;
 
   /// If hasPointeeInMemoryValueAttr returns true, the in-memory ABI type is
   /// returned. Otherwise, nullptr.
   LLVM_ABI Type *getPointeeInMemoryValueType() const;
-
-  /// If this is a byval or inalloca argument, return its alignment.
-  /// FIXME: Remove this function once transition to Align is over.
-  /// Use getParamAlign() instead.
-  LLVM_ABI LLVM_DEPRECATED("Use getParamAlign() instead",
-                           "getParamAlign") uint64_t getParamAlignment() const;
 
   /// If this is a byval or inalloca argument, return its alignment.
   LLVM_ABI MaybeAlign getParamAlign() const;
@@ -127,6 +124,9 @@ public:
 
   /// If this is a byref argument, return its type.
   LLVM_ABI Type *getParamByRefType() const;
+
+  /// If this is a goret argument, return its logical result type.
+  LLVM_ABI Type *getParamGoRetType() const;
 
   /// If this is an inalloca argument, return its type.
   LLVM_ABI Type *getParamInAllocaType() const;

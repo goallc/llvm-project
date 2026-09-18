@@ -27,6 +27,40 @@ entry:
   ret i32 %t7
 }
 
+; A protected stack object keeps its own frame identity while unrelated
+; lifetime-disjoint allocas remain eligible for coloring with each other.
+; CHECK-LABEL: protected_no_merge:
+; YESCOLOR: subq  $280, %rsp
+; NOFIRSTUSE: subq  $280, %rsp
+; NOCOLOR: subq  $392, %rsp
+
+define i32 @protected_no_merge(i32 %in) {
+entry:
+  %a = alloca [17 x ptr], align 8, !llvm.stackcoloring.no_merge !0
+  %a2 = alloca [16 x ptr], align 8
+  %a3 = alloca [15 x ptr], align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr %a)
+  %t1 = call i32 @foo(i32 %in, ptr %a)
+  %t2 = call i32 @foo(i32 %in, ptr %a)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr %a)
+  call void @llvm.lifetime.start.p0(i64 -1, ptr %a2)
+  %t3 = call i32 @foo(i32 %in, ptr %a2)
+  %t4 = call i32 @foo(i32 %in, ptr %a2)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr %a2)
+  call void @llvm.lifetime.start.p0(i64 -1, ptr %a3)
+  %t8 = call i32 @foo(i32 %in, ptr %a3)
+  %t9 = call i32 @foo(i32 %in, ptr %a3)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr %a3)
+  %t5 = add i32 %t1, %t2
+  %t6 = add i32 %t3, %t4
+  %t10 = add i32 %t8, %t9
+  %t11 = add i32 %t5, %t6
+  %t7 = add i32 %t11, %t10
+  ret i32 %t7
+}
+
+!0 = !{}
+
 
 ;CHECK-LABEL: myCall2_no_merge
 ;YESCOLOR: subq  $272, %rsp

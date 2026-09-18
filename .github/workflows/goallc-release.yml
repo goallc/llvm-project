@@ -1,0 +1,167 @@
+name: GoALLC LLVM Payload Release
+
+on:
+  push:
+    tags:
+      - "goallc-llvm23.*"
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: Existing GoALLC LLVM release tag to rebuild
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: goallc-llvm-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    if: github.repository == 'goallc/llvm-project'
+    name: linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release-tag }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 5G
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release-tag || github.ref }}
+
+      - name: Validate release tag
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^goallc-llvm23\.1\.0-(v[0-9]+|[0-9]{8}T[0-9]{6}Z)$ ]]
+          source_revision="$(git rev-parse HEAD)"
+          test "$(git rev-list -n1 "$RELEASE_TAG")" = "$source_revision"
+          echo "source_revision=$source_revision" >>"$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ccache \
+            libedit-dev \
+            libxml2-dev \
+            libzstd-dev \
+            ninja-build \
+            zlib1g-dev
+
+      - name: Restore ccache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: goallc-llvm23-ci-linux-${{ matrix.arch }}-${{ steps.release.outputs.source_revision }}
+          restore-keys: |
+            goallc-llvm23-ci-linux-${{ matrix.arch }}-
+
+      - name: Reset ccache statistics
+        run: ccache --zero-stats
+
+      - name: Build installed LLVM payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_base="$RELEASE_TAG-linux-${{ matrix.arch }}"
+          GOALLC_LLVM_BUILD="$RUNNER_TEMP/goallc-llvm-build" \
+          GOALLC_LLVM_INSTALL="$RUNNER_TEMP/$asset_base" \
+          GOALLC_BUILD_TYPE=Release \
+          GOALLC_LLVM_TARGETS='X86;AArch64' \
+          GOALLC_BUILD_JOBS="$(nproc)" \
+          GOALLC_CCACHE=/usr/bin/ccache \
+            ./llvm/utils/goallc/build-payload.bash
+
+      - name: Validate relocatable payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_base="$RELEASE_TAG-linux-${{ matrix.arch }}"
+          mkdir -p "$RUNNER_TEMP/relocated"
+          mv "$RUNNER_TEMP/$asset_base" "$RUNNER_TEMP/relocated/$asset_base"
+          payload="$RUNNER_TEMP/relocated/$asset_base"
+
+          cmake_version_component() {
+            sed -n "s/^[[:space:]]*set(LLVM_VERSION_$1 \\([^)]*\\)).*/\\1/p" \
+              cmake/Modules/LLVMVersion.cmake | tail -n 1
+          }
+          expected_llvm_version="$(cmake_version_component MAJOR).$(cmake_version_component MINOR).$(cmake_version_component PATCH)$(cmake_version_component SUFFIX)"
+
+          test "$("$payload/bin/llvm-config" --prefix)" = "$payload"
+          test "$("$payload/bin/llvm-config" --version)" = "$expected_llvm_version"
+          test "$("$payload/bin/llvm-config" --build-mode)" = Release
+          for target in X86 AArch64; do
+            "${payload}/bin/llvm-config" --targets-built | tr ' ' '\n' | grep -Fx "$target"
+          done
+          for path in \
+            bin/FileCheck \
+            bin/llc \
+            bin/llvm-ar \
+            bin/llvm-config \
+            bin/opt \
+            include/llvm-c/Core.h \
+            include/llvm/Config/llvm-config.h \
+            lib/cmake/llvm/AddLLVM.cmake \
+            lib/cmake/llvm/LLVMConfig.cmake \
+            lib/cmake/llvm/LLVMExports.cmake \
+            lib/libLLVMCore.a; do
+            test -e "$payload/$path"
+          done
+          find "$payload/lib" -maxdepth 1 -name 'libLLVM.so*' -print -quit | grep .
+          env -u LD_LIBRARY_PATH "$payload/bin/llc" --version
+          env -u LD_LIBRARY_PATH "$payload/bin/opt" --version
+          ldd "$payload/bin/llc"
+
+      - name: Package payload
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_base="$RELEASE_TAG-linux-${{ matrix.arch }}"
+          archive="$asset_base.tar.zst"
+          tar --zstd -cf "$archive" -C "$RUNNER_TEMP/relocated" "$asset_base"
+          sha256sum "$archive" >"$archive.sha256"
+          echo "archive=$archive" >>"$GITHUB_OUTPUT"
+          cat "$archive.sha256"
+          du -h "$archive"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_suffix="${RELEASE_TAG#goallc-llvm23.1.0-}"
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            if ! gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --title "GoALLC LLVM 23.1.0 $release_suffix" \
+              --notes "Installed, relocatable GoALLC LLVM 23.1.0 payloads from commit $GITHUB_SHA. This release contains Linux amd64 and arm64 payloads consumed by GoALLC CI."; then
+              # Matrix jobs may race to create the release. Accept failure only
+              # when the sibling job successfully created the same release.
+              gh release view "$RELEASE_TAG" >/dev/null
+            fi
+          fi
+          gh release upload "$RELEASE_TAG" \
+            "$ARCHIVE" \
+            "$ARCHIVE.sha256" \
+            --clobber

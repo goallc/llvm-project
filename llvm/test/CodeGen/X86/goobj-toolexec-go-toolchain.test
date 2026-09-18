@@ -1,0 +1,28 @@
+# This exercises a mixed Go/LLVM GoObj link through go build -toolexec. The
+# dependency package contains an LLVM IR file that llvm-goobj-toolexec discovers
+# from the package source directory. Its IR uses plain ABIInternal names and
+# <ABI0>-suffixed ABI0 names, exercising the same identity contract as the Go
+# frontend for declarations, definitions, and GoObj records.
+
+# The test executes the linked binary, so it requires a native linux/amd64 host.
+# REQUIRES: x86-registered-target, x86_64-linux, native
+
+# RUN: rm -rf %t.dir %t.gocache
+# RUN: cp -R %S/Inputs/goobj-toolexec-module %t.dir
+# RUN: cd %t.dir && env GOCACHE=%t.gocache go build -a -ldflags=-w -toolexec llvm-goobj-toolexec -o toolexec-linked ./cmd/app
+# RUN: %t.dir/toolexec-linked 2>&1 | FileCheck %s
+# RUN: cd %t.dir && env GOCACHE=%t.gocache go test -ldflags=-w -toolexec llvm-goobj-toolexec -run 'TestStringEqual|TestLLVMRuntimeStack|TestLLVMTriggerGC|TestLLVMTypeDescriptor' -bench BenchmarkStringEqual -benchtime=1x -count=1 ./dep | FileCheck %s --check-prefix=BENCH
+
+# CHECK: 123
+# CHECK-NEXT: 42
+# CHECK-NEXT: 60 40
+# CHECK-NEXT: 4
+# CHECK-NEXT: 123
+
+# BENCH: BenchmarkStringEqualNativeDirectEqual
+# BENCH: BenchmarkStringEqualNativeFuncEqual
+# BENCH: BenchmarkStringEqualLLVMEqual
+# BENCH: BenchmarkStringEqualNativeDirectDifferent
+# BENCH: BenchmarkStringEqualNativeFuncDifferent
+# BENCH: BenchmarkStringEqualLLVMDifferent
+# BENCH: PASS

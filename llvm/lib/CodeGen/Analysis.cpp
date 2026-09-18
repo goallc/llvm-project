@@ -11,6 +11,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/Analysis.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
@@ -22,10 +24,129 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Statepoint.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
 
+#include <optional>
+
 using namespace llvm;
+
+bool llvm::isSingleByValCallCarrier(const AllocaInst &Alloca,
+                                    const DataLayout &DL,
+                                    bool AllowGCLiveUses) {
+  auto *Count = dyn_cast<ConstantInt>(Alloca.getArraySize());
+  std::optional<TypeSize> AllocationSize = Alloca.getAllocationSize(DL);
+  if (!Alloca.isStaticAlloca() || !Count || !Count->isOne() ||
+      !AllocationSize || AllocationSize->isScalable())
+    return false;
+  uint64_t ByteSize = AllocationSize->getFixedValue();
+
+  SmallVector<const Value *, 8> Worklist = {&Alloca};
+  SmallPtrSet<const Value *, 8> Visited;
+  SmallVector<const StoreInst *, 8> Stores;
+  SmallVector<const Instruction *, 8> AddressInsts;
+  SmallVector<const IntrinsicInst *, 2> Lifetimes;
+  const CallBase *ByValCall = nullptr;
+
+  while (!Worklist.empty()) {
+    const Value *V = Worklist.pop_back_val();
+    if (!Visited.insert(V).second)
+      continue;
+
+    for (const Use &U : V->uses()) {
+      const auto *I = dyn_cast<Instruction>(U.getUser());
+      if (!I)
+        return false;
+
+      if (const auto *GEP = dyn_cast<GetElementPtrInst>(I)) {
+        int64_t Offset = 0;
+        if (&U != &GEP->getOperandUse(0) ||
+            GetPointerBaseWithConstantOffset(GEP, Offset, DL) != &Alloca ||
+            Offset < 0 || static_cast<uint64_t>(Offset) > ByteSize)
+          return false;
+        Worklist.push_back(GEP);
+        AddressInsts.push_back(GEP);
+        continue;
+      }
+      if (isa<BitCastInst, AddrSpaceCastInst>(I)) {
+        if (U.getOperandNo() != 0)
+          return false;
+        Worklist.push_back(I);
+        AddressInsts.push_back(I);
+        continue;
+      }
+      if (const auto *SI = dyn_cast<StoreInst>(I)) {
+        int64_t Offset = 0;
+        TypeSize StoreSize =
+            DL.getTypeStoreSize(SI->getValueOperand()->getType());
+        if (U.getOperandNo() != StoreInst::getPointerOperandIndex() ||
+            !SI->isSimple() || StoreSize.isScalable() ||
+            GetPointerBaseWithConstantOffset(SI->getPointerOperand(), Offset,
+                                             DL) != &Alloca ||
+            Offset < 0 || static_cast<uint64_t>(Offset) > ByteSize ||
+            StoreSize.getFixedValue() >
+                ByteSize - static_cast<uint64_t>(Offset))
+          return false;
+        Stores.push_back(SI);
+        continue;
+      }
+      if (const auto *II = dyn_cast<IntrinsicInst>(I);
+          II && II->isLifetimeStartOrEnd()) {
+        Lifetimes.push_back(II);
+        continue;
+      }
+      if (const auto *CB = dyn_cast<CallBase>(I)) {
+        if (AllowGCLiveUses && V == &Alloca && isa<GCStatepointInst>(CB) &&
+            CB->isOperandBundleOfType(LLVMContext::OB_gc_live,
+                                      U.getOperandNo()))
+          continue;
+        if (!CB->isArgOperand(&U))
+          return false;
+        unsigned ArgNo = CB->getArgOperandNo(&U);
+        int64_t Offset = 0;
+        if (ByValCall || !CB->paramHasAttr(ArgNo, Attribute::ByVal) ||
+            GetPointerBaseWithConstantOffset(V, Offset, DL) != &Alloca ||
+            Offset != 0 ||
+            CB->getParamByValType(ArgNo) != Alloca.getAllocatedType())
+          return false;
+        if (std::optional<Align> ParamAlign = CB->getParamAlign(ArgNo);
+            !ParamAlign || Alloca.getAlign() < *ParamAlign)
+          return false;
+        ByValCall = CB;
+        continue;
+      }
+      return false;
+    }
+  }
+
+  if (!ByValCall || Stores.empty())
+    return false;
+
+  const BasicBlock *CallBB = ByValCall->getParent();
+  const StoreInst *FirstStore = Stores.front();
+  for (const StoreInst *SI : Stores)
+    if (SI->getParent() != CallBB || !SI->comesBefore(ByValCall))
+      return false;
+    else if (SI->comesBefore(FirstStore))
+      FirstStore = SI;
+  for (const Instruction *I : AddressInsts)
+    if (I->getParent() != CallBB || !I->comesBefore(ByValCall))
+      return false;
+  for (const IntrinsicInst *II : Lifetimes)
+    if (II->getParent() != CallBB || !II->comesBefore(ByValCall))
+      return false;
+
+  // A future call's outgoing argument area is not stable storage across an
+  // intervening call: that call can reuse it, and its stack map does not
+  // describe partially initialized arguments for a later call.
+  for (const Instruction *I = FirstStore->getNextNode(); I != ByValCall;
+       I = I->getNextNode())
+    if (isa<CallBase>(I) && !(isa<IntrinsicInst>(I) &&
+                              cast<IntrinsicInst>(I)->isLifetimeStartOrEnd()))
+      return false;
+  return true;
+}
 
 /// Compute the linearized index of a member in a nested aggregate/struct/array
 /// by recursing and accumulating CurIndex as long as there are indices in the
@@ -123,6 +244,9 @@ void llvm::ComputeValueVTs(const TargetLowering &TLI, const DataLayout &DL,
                            TypeSize StartingOffset) {
   SmallVector<Type *> Types;
   ComputeValueTypes(DL, Ty, Types, Offsets, StartingOffset);
+  ValueVTs.reserve(Types.size());
+  if (MemVTs)
+    MemVTs->reserve(Types.size());
   for (Type *Ty : Types) {
     ValueVTs.push_back(TLI.getValueType(DL, Ty));
     if (MemVTs)
@@ -139,6 +263,7 @@ void llvm::ComputeValueVTs(const TargetLowering &TLI, const DataLayout &DL,
   if (FixedOffsets) {
     SmallVector<TypeSize, 4> Offsets;
     ComputeValueVTs(TLI, DL, Ty, ValueVTs, MemVTs, &Offsets, Offset);
+    FixedOffsets->reserve(Offsets.size());
     for (TypeSize Offset : Offsets)
       FixedOffsets->push_back(Offset.getFixedValue());
   } else {
@@ -147,38 +272,30 @@ void llvm::ComputeValueVTs(const TargetLowering &TLI, const DataLayout &DL,
 }
 
 void llvm::computeValueLLTs(const DataLayout &DL, Type &Ty,
-                            SmallVectorImpl<LLT> &ValueTys,
-                            SmallVectorImpl<uint64_t> *Offsets,
-                            uint64_t StartingOffset) {
-  // Given a struct type, recursively traverse the elements.
-  if (StructType *STy = dyn_cast<StructType>(&Ty)) {
-    // If the Offsets aren't needed, don't query the struct layout. This allows
-    // us to support structs with scalable vectors for operations that don't
-    // need offsets.
-    const StructLayout *SL = Offsets ? DL.getStructLayout(STy) : nullptr;
-    for (unsigned I = 0, E = STy->getNumElements(); I != E; ++I) {
-      uint64_t EltOffset = SL ? SL->getElementOffset(I) : 0;
-      computeValueLLTs(DL, *STy->getElementType(I), ValueTys, Offsets,
-                       StartingOffset + EltOffset);
-    }
-    return;
+                            SmallVectorImpl<LLT> &ValueLLTs,
+                            SmallVectorImpl<TypeSize> *Offsets,
+                            TypeSize StartingOffset) {
+  SmallVector<Type *> ValTys;
+  ComputeValueTypes(DL, &Ty, ValTys, Offsets, StartingOffset);
+  ValueLLTs.reserve(ValTys.size());
+  for (Type *ValTy : ValTys)
+    ValueLLTs.push_back(getLLTForType(*ValTy, DL));
+}
+
+void llvm::computeValueLLTs(const DataLayout &DL, Type &Ty,
+                            SmallVectorImpl<LLT> &ValueLLTs,
+                            SmallVectorImpl<uint64_t> *FixedOffsets,
+                            uint64_t FixedStartingOffset) {
+  TypeSize StartingOffset = TypeSize::getFixed(FixedStartingOffset);
+  if (FixedOffsets) {
+    SmallVector<TypeSize, 4> Offsets;
+    computeValueLLTs(DL, Ty, ValueLLTs, &Offsets, StartingOffset);
+    FixedOffsets->reserve(Offsets.size());
+    for (TypeSize Offset : Offsets)
+      FixedOffsets->push_back(Offset.getFixedValue());
+  } else {
+    computeValueLLTs(DL, Ty, ValueLLTs, nullptr, StartingOffset);
   }
-  // Given an array type, recursively traverse the elements.
-  if (ArrayType *ATy = dyn_cast<ArrayType>(&Ty)) {
-    Type *EltTy = ATy->getElementType();
-    uint64_t EltSize = DL.getTypeAllocSize(EltTy).getFixedValue();
-    for (unsigned i = 0, e = ATy->getNumElements(); i != e; ++i)
-      computeValueLLTs(DL, *EltTy, ValueTys, Offsets,
-                       StartingOffset + i * EltSize);
-    return;
-  }
-  // Interpret void as zero return values.
-  if (Ty.isVoidTy())
-    return;
-  // Base case: we can get an LLT for this LLVM IR type.
-  ValueTys.push_back(getLLTForType(Ty, DL));
-  if (Offsets != nullptr)
-    Offsets->push_back(StartingOffset * 8);
 }
 
 /// ExtractTypeInfo - Returns the type info, possibly bitcast, encoded in V.
@@ -818,5 +935,13 @@ llvm::getEHScopeMembership(const MachineFunction &MF) {
        CatchRetSuccessors)
     collectEHScopeMembers(EHScopeMembership, CatchRetPair.second,
                           CatchRetPair.first);
+
+  // Add any remaining blocks in the function to the unreachable set, which
+  // might not otherwise have been identified as unreachable (such as infinite
+  // loops).
+  for (const MachineBasicBlock &MBB : MF)
+    if (!EHScopeMembership.count(&MBB))
+      collectEHScopeMembers(EHScopeMembership, EntryBBNumber, &MBB);
+
   return EHScopeMembership;
 }

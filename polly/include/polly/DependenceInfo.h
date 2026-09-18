@@ -22,11 +22,20 @@
 #ifndef POLLY_DEPENDENCE_INFO_H
 #define POLLY_DEPENDENCE_INFO_H
 
-#include "polly/ScopPass.h"
+#include "llvm/ADT/DenseMap.h"
 #include "isl/ctx.h"
 #include "isl/isl-noexceptions.h"
 
+namespace llvm {
+class raw_ostream;
+}
+
 namespace polly {
+class MemoryAccess;
+class Scop;
+class ScopStmt;
+
+using llvm::DenseMap;
 
 /// The accumulated dependence information for a SCoP.
 ///
@@ -110,11 +119,13 @@ public:
   /// @param MinDistancePtr If not nullptr, the minimal dependence distance will
   ///                       be returned at the address of that pointer
   ///
-  /// @return Returns true, if executing parallel the outermost dimension of
-  ///         @p Schedule is valid according to the dependences @p Deps.
-  bool isParallel(__isl_keep isl_union_map *Schedule,
-                  __isl_take isl_union_map *Deps,
-                  __isl_give isl_pw_aff **MinDistancePtr = nullptr) const;
+  /// @return isl::boolean::true if executing parallel the outermost dimension
+  ///         of @p Schedule is valid according to the dependences @p Deps,
+  ///         isl::boolean::false if it is not, and isl::boolean::error() if the
+  ///         result could not be computed (e.g. the ISL operation quota was
+  ///         exhausted during AST generation).
+  isl::boolean isKnownParallel(isl::union_map Schedule, isl::union_map Deps,
+                               isl::pw_aff *MinDistancePtr = nullptr) const;
 
   /// Check if a new schedule is valid.
   ///
@@ -193,8 +204,7 @@ private:
 
 extern Dependences::AnalysisLevel OptAnalysisLevel;
 
-struct DependenceAnalysis final : public AnalysisInfoMixin<DependenceAnalysis> {
-  static AnalysisKey Key;
+struct DependenceAnalysis final {
   struct Result {
     Scop &S;
     std::unique_ptr<Dependences> D[Dependences::NumAnalysisLevels];
@@ -219,18 +229,6 @@ struct DependenceAnalysis final : public AnalysisInfoMixin<DependenceAnalysis> {
     /// dependencies.
     void abandonDependences();
   };
-  Result run(Scop &S, ScopAnalysisManager &SAM,
-             ScopStandardAnalysisResults &SAR);
-};
-
-struct DependenceInfoPrinterPass final
-    : PassInfoMixin<DependenceInfoPrinterPass> {
-  DependenceInfoPrinterPass(raw_ostream &OS) : OS(OS) {}
-
-  PreservedAnalyses run(Scop &S, ScopAnalysisManager &,
-                        ScopStandardAnalysisResults &, SPMUpdater &);
-
-  raw_ostream &OS;
 };
 
 DependenceAnalysis::Result runDependenceAnalysis(Scop &S);
