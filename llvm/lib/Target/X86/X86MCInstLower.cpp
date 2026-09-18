@@ -18,6 +18,7 @@
 #include "MCTargetDesc/X86MCAsmInfo.h"
 #include "MCTargetDesc/X86ShuffleDecode.h"
 #include "MCTargetDesc/X86TargetStreamer.h"
+#include "X86.h"
 #include "X86AsmPrinter.h"
 #include "X86MachineFunctionInfo.h"
 #include "X86RegisterInfo.h"
@@ -835,6 +836,16 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
       // address is to far away. (TODO: support non-relative addressing)
       break;
     case MachineOperand::MO_Register:
+      if (IsGoObj && Subtarget->useRetpolineIndirectCalls()) {
+        // Statepoints already have their target register allocated. Use the
+        // corresponding Go runtime thunk without clobbering argument registers.
+        MCSymbol *Thunk = GetExternalSymbolSymbol(
+            getX86GoRetpolineSymbol(CallTarget.getReg()));
+        CallTargetMCOp =
+            MCOperand::createExpr(MCSymbolRefExpr::create(Thunk, OutContext));
+        CallOpcode = X86::CALL64pcrel32;
+        break;
+      }
       // FIXME: Add retpoline support and remove this.
       if (Subtarget->useIndirectThunkCalls())
         report_fatal_error("Lowering register statepoints with thunks not "

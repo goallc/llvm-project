@@ -42,6 +42,43 @@ using namespace llvm;
 
 #define DEBUG_TYPE "x86-retpoline-thunks"
 
+const char *llvm::getX86GoRetpolineSymbol(MCRegister Reg) {
+  switch (Reg.id()) {
+  case X86::RAX:
+    return "runtime.retpolineAX<ABI0>";
+  case X86::RCX:
+    return "runtime.retpolineCX<ABI0>";
+  case X86::RDX:
+    return "runtime.retpolineDX<ABI0>";
+  case X86::RBX:
+    return "runtime.retpolineBX<ABI0>";
+  case X86::RBP:
+    return "runtime.retpolineBP<ABI0>";
+  case X86::RSI:
+    return "runtime.retpolineSI<ABI0>";
+  case X86::RDI:
+    return "runtime.retpolineDI<ABI0>";
+  case X86::R8:
+    return "runtime.retpolineR8<ABI0>";
+  case X86::R9:
+    return "runtime.retpolineR9<ABI0>";
+  case X86::R10:
+    return "runtime.retpolineR10<ABI0>";
+  case X86::R11:
+    return "runtime.retpolineR11<ABI0>";
+  case X86::R12:
+    return "runtime.retpolineR12<ABI0>";
+  case X86::R13:
+    return "runtime.retpolineR13<ABI0>";
+  case X86::R14:
+    return "runtime.retpolineR14<ABI0>";
+  case X86::R15:
+    return "runtime.retpolineR15<ABI0>";
+  default:
+    llvm_unreachable("unexpected Go retpoline target register");
+  }
+}
+
 static const char RetpolineNamePrefix[] = "__llvm_retpoline_";
 static const char R11RetpolineName[] = "__llvm_retpoline_r11";
 static const char EAXRetpolineName[] = "__llvm_retpoline_eax";
@@ -59,7 +96,8 @@ struct RetpolineThunkInserter : ThunkInserter<RetpolineThunkInserter> {
     const auto &STI = MF.getSubtarget<X86Subtarget>();
     return (STI.useRetpolineIndirectCalls() ||
             STI.useRetpolineIndirectBranches()) &&
-           !STI.useRetpolineExternalThunk();
+           !STI.useRetpolineExternalThunk() &&
+           !STI.getTargetTriple().isOSBinFormatGoObj();
   }
   bool insertThunks(MachineModuleInfo &MMI, MachineFunction &MF,
                     bool ExistingThunks);

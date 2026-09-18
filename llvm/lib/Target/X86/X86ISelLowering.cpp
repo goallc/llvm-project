@@ -37714,6 +37714,11 @@ static unsigned getOpcodeForIndirectThunk(unsigned RPOpc) {
 
 static const char *getIndirectThunkSymbol(const X86Subtarget &Subtarget,
                                           Register Reg) {
+  if (Subtarget.getTargetTriple().isOSBinFormatGoObj() &&
+      (Subtarget.useRetpolineIndirectCalls() ||
+       Subtarget.useRetpolineIndirectBranches()))
+    return getX86GoRetpolineSymbol(Reg);
+
   if (Subtarget.useRetpolineExternalThunk()) {
     // When using an external thunk for retpolines, we pick names that match the
     // names GCC happens to use as well. This helps simplify the implementation
@@ -37795,15 +37800,23 @@ X86TargetLowering::EmitLoweredIndirectThunk(MachineInstr &MI,
   // are available, use EDI instead. EDI is chosen because EBX is the PIC base
   // register and ESI is the base pointer to realigned stack frames with VLAs.
   SmallVector<Register, 3> AvailableRegs;
-  if (Subtarget.is64Bit())
+  if (Subtarget.is64Bit()) {
     AvailableRegs.push_back(X86::R11);
-  else
+    // Go uses R11 for its ninth integer argument. R12 is neither an argument
+    // nor the closure context, and the runtime provides a matching thunk.
+    if (Subtarget.getTargetTriple().isOSBinFormatGoObj() &&
+        (Subtarget.useRetpolineIndirectCalls() ||
+         Subtarget.useRetpolineIndirectBranches()))
+      AvailableRegs.push_back(X86::R12);
+  } else
     AvailableRegs.append({X86::EAX, X86::ECX, X86::EDX, X86::EDI});
 
   // Zero out any registers that are already used.
   for (const auto &MO : MI.operands()) {
-    if (MO.isReg() && MO.isUse())
-      llvm::replace(AvailableRegs, MO.getReg(), Register());
+    if (MO.isReg() && MO.isUse() && MO.getReg().isPhysical())
+      for (Register &Reg : AvailableRegs)
+        if (Reg && Subtarget.getRegisterInfo()->regsOverlap(Reg, MO.getReg()))
+          Reg = Register();
   }
 
   // Choose the first remaining non-zero available register.
