@@ -172,7 +172,6 @@ void MCContext::reset() {
   GoObjStaticRODataType.reset();
   GoObjCgoPragmas.clear();
   GoObjNonPackageSymbols.clear();
-  GoObjAnonymousSymbols.clear();
   GoObjSymbolStackSizes.clear();
   GoObjSymbolArgSizes.clear();
   GoObjSymbolHasFramePointers.clear();

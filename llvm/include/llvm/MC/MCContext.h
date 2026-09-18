@@ -305,9 +305,6 @@ private:
   /// Go object definitions that are resolved by name instead of package index.
   DenseSet<const MCSymbol *> GoObjNonPackageSymbols;
 
-  /// Definitions whose LLVM-only names must not enter Go's symbol namespace.
-  DenseSet<const MCSymbol *> GoObjAnonymousSymbols;
-
   /// Go object symbol stack sizes keyed by MC symbol.
   DenseMap<const MCSymbol *, uint32_t> GoObjSymbolStackSizes;
 
@@ -811,14 +808,6 @@ public:
 
   bool isGoObjSymbolNonPackage(const MCSymbol *Sym) const {
     return GoObjNonPackageSymbols.contains(Sym);
-  }
-
-  void setGoObjSymbolAnonymous(const MCSymbol *Sym) {
-    GoObjAnonymousSymbols.insert(Sym);
-  }
-
-  bool isGoObjSymbolAnonymous(const MCSymbol *Sym) const {
-    return GoObjAnonymousSymbols.contains(Sym);
   }
 
   void setGoObjSymbolStackSize(const MCSymbol *Sym, uint32_t StackSize) {
