@@ -1642,6 +1642,12 @@ TargetLoweringBase::emitPatchPoint(MachineInstr &InitialMI,
       if (MO.isReg() && MO.isTied())
         TiedTo = MI->findTiedOperandIdx(i);
       MIB.add(MO);
+      // Expanding frame indices shifts later operands, including implicit
+      // return-register defs. Preserve instruction references to those defs.
+      if (MO.isReg() && MO.isDef() && MI->peekDebugInstrNum())
+        MF.makeDebugValueSubstitution(
+            {MI->peekDebugInstrNum(), i},
+            {MIB->getDebugInstrNum(MF), MIB->getNumOperands() - 1});
       if (TiedTo < i)
         MIB->tieOperands(TiedTo, MIB->getNumOperands() - 1);
       continue;
