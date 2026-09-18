@@ -238,6 +238,15 @@ void FastISel::flushLocalValueMap() {
 }
 
 Register FastISel::getRegForValue(const Value *V) {
+  // Go byval/goret arguments are homes in a movable stack. SelectionDAG
+  // rematerializes their FrameIndex at each use; FastISel would instead reuse
+  // the address exported from the entry block, possibly across a stack grow.
+  if (const auto *Arg = dyn_cast<Argument>(V);
+      Arg && (Arg->hasByValAttr() || Arg->hasGoRetAttr()) &&
+      FuncInfo.Fn->hasGC() &&
+      goabi::isGoCallingConv(FuncInfo.Fn->getCallingConv()))
+    return Register();
+
   EVT RealVT = TLI.getValueType(DL, V->getType(), /*AllowUnknown=*/true);
   // Don't handle non-simple values in FastISel.
   if (!RealVT.isSimple())
