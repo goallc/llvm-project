@@ -109,6 +109,7 @@ jobs:
             "$build/test/CodeGen/Generic/go-abi0-frame.ll"
             "$build/test/CodeGen/Generic/go-argument-homes.ll"
             "$build/test/CodeGen/Generic/go-goret.ll"
+            "$build/test/CodeGen/Generic/go-maymorestack.ll"
             "$build/test/CodeGen/Generic/go-softfloat-abi.ll"
             "$build/test/CodeGen/Generic/goobj-data-kinds.ll"
             "$build/test/CodeGen/Generic/goobj-pic-globals.ll"
