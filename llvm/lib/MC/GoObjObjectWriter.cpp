@@ -1892,8 +1892,6 @@ uint64_t GoObjObjectWriter::writeObject() {
 
   for (const MCSection &Section : *Asm) {
     uint64_t SectionSize = Asm->getSectionAddressSize(Section);
-    const size_t FirstSectionSymbol = Symbols.size();
-
     SmallString<0> Contents;
     if (!Section.isBssSection())
       appendSectionContents(Contents, *Asm, Section);
@@ -1904,9 +1902,16 @@ uint64_t GoObjObjectWriter::writeObject() {
     };
     std::vector<SectionSymbol> SectionSymbols;
     for (const MCSymbol &Symbol : Asm->symbols()) {
-      if (Symbol.isTemporary() || !Symbol.isInSection() ||
-          &Symbol.getSection() != &Section ||
+      if (!Symbol.isInSection() || &Symbol.getSection() != &Section ||
           &Symbol == Section.getBeginSymbol())
+        continue;
+      // Referenced read-only objects with known extents need independent
+      // carriers, including private globals and jump tables. A shared section
+      // carrier would couple their linker reachability through relocations.
+      if (Symbol.isTemporary() &&
+          (getGoObjSymbolType(&Section) != GoObj::SRODATA ||
+           !SeenPrivateRelocationTargets.contains(&Symbol) ||
+           !Asm->getContext().getGoObjSymbolSize(&Symbol)))
         continue;
       uint64_t Offset = Asm->getSymbolOffset(Symbol);
       if (Offset > SectionSize)
@@ -1945,7 +1950,7 @@ uint64_t GoObjObjectWriter::writeObject() {
       uint8_t Type = getGoObjSymbolType(&Section);
       std::string StaticName;
       uint16_t ABI;
-      if (MCSym) {
+      if (MCSym && !MCSym->isTemporary()) {
         ABI =
             GetSymbolABI(MCSym, Asm->getContext().isGoObjFunctionSymbol(MCSym));
       } else {
@@ -1968,7 +1973,8 @@ uint64_t GoObjObjectWriter::writeObject() {
             NameAfterPackage.starts_with("..dict"))
           Flag2 |= GoObj::SymFlagDict;
         Align = Asm->getContext().getGoObjSymbolAlignment(MCSym).value_or(0);
-      } else {
+      }
+      if (!MCSym || MCSym->isTemporary()) {
         Flag |= GoObj::SymFlagLocal;
       }
       GoObj::DefinedSymbolBlock DefinedBlock =
@@ -1977,7 +1983,7 @@ uint64_t GoObjObjectWriter::writeObject() {
               : Config.DefaultDefinedSymbolBlock;
       addDefinedSymbol(Symbols, MCSym, &Section, Begin, End, DefinedBlock, Name,
                        Type, Flag, Flag2, ABI, Size, Align, Data);
-      if (MCSym) {
+      if (MCSym && !MCSym->isTemporary()) {
         StringRef Hash = Asm->getContext().getGoObjSymbolContentHash(MCSym);
         bool ComputeContentHash =
             Asm->getContext().isGoObjSymbolContentAddressable(MCSym);
@@ -2044,62 +2050,6 @@ uint64_t GoObjObjectWriter::writeObject() {
         AddSectionSymbol(SectionSymbols[I].Symbol,
                          GetSymbolName(SectionSymbols[I].Symbol), Begin, End);
       }
-    }
-
-    // LLVM private constants are emitted as temporary MC symbols. Usually a
-    // surrounding section or global symbol is a sufficient GoObj carrier, but
-    // an exact-sized preceding global can leave a private constant in an
-    // uncovered section gap. Materialize only referenced, exact-sized,
-    // read-only temporaries. This includes zero-sized constants: their empty
-    // ranges can never be found by FindContainingSymbol, so relocations must
-    // refer to their directly indexed symbols.
-    //
-    // These constants are relocation targets, so external object emission
-    // needs a real local symbol for them even when their data is otherwise
-    // content-addressable. Use the same static carrier model as native Go
-    // lookup/jump tables. In particular, do not hash a relocated table using
-    // only its zero-filled fixup placeholders.
-    if (getGoObjSymbolType(&Section) != GoObj::SRODATA)
-      continue;
-    for (const MCSymbol *MCSym : PrivateRelocationTargets) {
-      if (&MCSym->getSection() != &Section)
-        continue;
-      uint64_t Begin = Asm->getSymbolOffset(*MCSym);
-      bool Covered = false;
-      for (size_t I = FirstSectionSymbol; I != Symbols.size(); ++I) {
-        const GoObjSymbol &Sym = Symbols[I];
-        if (Sym.Section == &Section && Sym.SectionBegin <= Begin &&
-            Begin < Sym.SectionEnd) {
-          Covered = true;
-          break;
-        }
-      }
-      if (Covered)
-        continue;
-
-      std::optional<uint64_t> ExactSize =
-          Asm->getContext().getGoObjSymbolSize(MCSym);
-      if (!ExactSize || *ExactSize > SectionSize - Begin)
-        continue;
-      uint64_t End = Begin + *ExactSize;
-      for (size_t I = FirstSectionSymbol; I != Symbols.size(); ++I) {
-        const GoObjSymbol &Sym = Symbols[I];
-        if (Sym.Section == &Section && Begin < Sym.SectionEnd &&
-            Sym.SectionBegin < End)
-          report_fatal_error(
-              "GoObj private constant overlaps an existing symbol carrier");
-      }
-
-      ArrayRef<char> Data;
-      if (*ExactSize != 0)
-        Data = ArrayRef<char>(Contents.data() + Begin, *ExactSize);
-      uint32_t Align =
-          Asm->getContext().getGoObjSymbolAlignment(MCSym).value_or(1);
-      std::string StaticName = MakeStaticDataSymbolName();
-      addDefinedSymbol(Symbols, MCSym, &Section, Begin, End,
-                       Config.DefaultDefinedSymbolBlock, StaticName,
-                       GoObj::SRODATA, GoObj::SymFlagLocal, 0,
-                       GoObj::SymABIstatic, *ExactSize, Align, Data);
     }
   }
 

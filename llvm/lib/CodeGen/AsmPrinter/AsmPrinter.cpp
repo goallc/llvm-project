@@ -3981,6 +3981,10 @@ void AsmPrinter::emitConstantPool() {
       Offset = NewOffset + CPE.getSizeInBytes(getDataLayout());
 
       OutStreamer->emitLabel(Sym);
+      if (TM.getTargetTriple().isOSBinFormatGoObj()) {
+        OutContext.setGoObjSymbolSize(Sym, CPE.getSizeInBytes(getDataLayout()));
+        OutContext.setGoObjSymbolAlignment(Sym, CPE.getAlign().value());
+      }
       if (CPE.isMachineConstantPoolEntry())
         emitMachineConstantPoolValue(CPE.Val.MachineCPVal);
       else
@@ -4097,6 +4101,11 @@ void AsmPrinter::emitJumpTableImpl(const MachineJumpTableInfo &MJTI,
 
     MCSymbol *JTISymbol = GetJTISymbol(JumpTableIndex);
     OutStreamer->emitLabel(JTISymbol);
+    if (TM.getTargetTriple().isOSBinFormatGoObj() && JTInDiffSection) {
+      OutContext.setGoObjSymbolSize(JTISymbol, uint64_t(MJTI.getEntrySize(DL)) *
+                                                   JTBBs.size());
+      OutContext.setGoObjSymbolAlignment(JTISymbol, MJTI.getEntryAlignment(DL));
+    }
 
     // Defer MCAssembler based constant folding due to a performance issue. The
     // label differences will be evaluated at write time.
