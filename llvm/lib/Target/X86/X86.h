@@ -42,6 +42,9 @@ public:
 
 FunctionPass *createX86ISelDag(X86TargetMachine &TM, CodeGenOptLevel OptLevel);
 
+/// Go runtime retpoline entry preserving the allocated target register.
+const char *getX86GoRetpolineSymbol(MCRegister Reg);
+
 /// This pass initializes a global base register for PIC on x86-32.
 class X86GlobalBaseRegPass
     : public OptionalPassInfoMixin<X86GlobalBaseRegPass> {
