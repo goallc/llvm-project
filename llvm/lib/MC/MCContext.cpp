@@ -184,6 +184,7 @@ void MCContext::reset() {
   GoObjContentAddressableEnds.clear();
   GoObjRelocOverrides.clear();
   GoObjWeakRelocs.clear();
+  GoObjWeakCalls.clear();
   GoObjKeepTargets.clear();
   GoObjMarkerRelocs.clear();
   GoObjImports.clear();

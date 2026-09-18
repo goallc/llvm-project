@@ -1135,6 +1135,23 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
     AP.OutContext.setGoObjImportedSymbolRef(AP.getSymbol(&GO), std::move(Ref));
   }
 
+  if (const NamedMDNode *Calls = M.getNamedMetadata("goobj.weak_calls")) {
+    for (const MDNode *Entry : Calls->operands()) {
+      if (Entry->getNumOperands() != 2)
+        report_fatal_error(
+            "expected !goobj.weak_calls entries to have two operands");
+      const GlobalValue *Source =
+          getGoObjMetadataGlobal(Entry->getOperand(0), "goobj.weak_calls");
+      const GlobalValue *Target =
+          getGoObjMetadataGlobal(Entry->getOperand(1), "goobj.weak_calls");
+      if (!isa<Function>(Source) || Source->isDeclaration() ||
+          !isa<Function>(Target))
+        report_fatal_error("expected !goobj.weak_calls to name a defined "
+                           "caller and a function callee");
+      AP.OutContext.addGoObjWeakCall(AP.getSymbol(Source), AP.getSymbol(Target));
+    }
+  }
+
   if (const NamedMDNode *Keep = M.getNamedMetadata("goobj.keep")) {
     DenseMap<const GlobalValue *, std::vector<const MCSymbol *>> Targets;
     for (const MDNode *Entry : Keep->operands()) {

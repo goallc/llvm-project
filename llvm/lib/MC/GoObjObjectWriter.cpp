@@ -3389,6 +3389,21 @@ uint64_t GoObjObjectWriter::writeObject() {
         RelocType |= GoObj::R_WEAK;
     }
 
+    // Weakness belongs to a particular caller/callee edge, not to the callee
+    // symbol. Address references and calls from other functions stay strong.
+    switch (RelocType) {
+    case GoObj::R_CALL:
+    case GoObj::R_CALLARM:
+    case GoObj::R_CALLARM64:
+    case GoObj::R_CALLPOWER:
+    case GoObj::R_CALLMIPS:
+      if (Asm->getContext().isGoObjWeakCall(Source.Symbol, Reloc.Symbol))
+        RelocType |= GoObj::R_WEAK;
+      break;
+    default:
+      break;
+    }
+
     // Native x86 Go objects intentionally leave the TLS relocation target
     // empty. The linker resolves R_TLS_LE and R_TLS_IE against its
     // synthetic runtime.tlsg symbol and supplies that symbol itself when it
