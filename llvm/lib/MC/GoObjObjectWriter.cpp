@@ -1835,6 +1835,11 @@ uint64_t GoObjObjectWriter::writeObject() {
       return GoObj::SymABIstatic;
     if (Identity.IsABI0)
       return GoObj::SymABI0;
+    // Internal data definitions belong to this compilation unit.
+    if (!IsFunction)
+      if (auto Flags = Asm->getContext().getGoObjSymbolFlags(Sym);
+          Flags && (Flags->first & GoObj::SymFlagLocal))
+        return GoObj::SymABIstatic;
     return IsFunction ? GoObj::SymABIInternal : GoObj::SymABI0;
   };
 
@@ -2253,9 +2258,18 @@ uint64_t GoObjObjectWriter::writeObject() {
       GoObjFuncDebugLines &Info = FuncDebugLines[I];
       if (DebugInfo->StartLine != 0)
         Info.StartLine = static_cast<int32_t>(DebugInfo->StartLine);
-      if (!DebugInfo->File.empty())
-        recordFunctionFile(
-            Info, getOrAddFileIndex(FileIndexes, FilePaths, DebugInfo->File));
+      if (!DebugInfo->File.empty()) {
+        uint32_t FileIndex =
+            getOrAddFileIndex(FileIndexes, FilePaths, DebugInfo->File);
+        recordFunctionFile(Info, FileIndex);
+        // Instructions in the prologue have no source location. Attribute
+        // them to the function declaration, not to the first body location
+        // (which may even belong to an inlined function in another file).
+        // A real location at PC zero supersedes this initial state below.
+        Info.PCFile.push_back({0, static_cast<int32_t>(FileIndex)});
+        Info.PCLine.push_back({0, Info.StartLine});
+        Info.PCInline.push_back({0, -1});
+      }
 
       for (const MCContext::GoObjDebugLocation &Location :
            DebugInfo->Locations) {
@@ -2634,6 +2648,20 @@ uint64_t GoObjObjectWriter::writeObject() {
         appendUvarint(InfoCarrier.Data, LineInfo.StartLine);
         InfoCarrier.Data.push_back((Symbols[I].Flag & GoObj::SymFlagLocal) ? 0
                                                                            : 1);
+
+        // Like Go's dwarfgen, retain concrete interface-conversion types even
+        // when they occur only in compiler temporaries, not named DWARF vars.
+        // The linker's DWARF pass reads R_USETYPE from the info carrier.
+        if (const auto *Markers =
+                Asm->getContext().getGoObjMarkerRelocs(Symbols[I].Symbol))
+          for (const auto &Marker : *Markers)
+            if (Marker.Type == GoObj::R_USEIFACE &&
+                !GetSymbolName(Marker.Target).starts_with("go:itab.")) {
+              GoObjSymbol::Relocation UseType;
+              UseType.Type = GoObj::R_USETYPE;
+              UseType.TargetSymbol = Marker.Target;
+              InfoCarrier.Relocations.push_back(UseType);
+            }
 
         uint32_t DwarfInfoIndex = checkedUint32(Symbols.size(), "symbol count");
         DenseMap<uint16_t, uint32_t> ParametricTypeOffsets =
