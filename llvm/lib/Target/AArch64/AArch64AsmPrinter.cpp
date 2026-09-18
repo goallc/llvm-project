@@ -1393,7 +1393,12 @@ void AArch64AsmPrinter::emitJumpTableImpl(const MachineJumpTableInfo &MJTI,
 
     unsigned Size = AFI->getJumpTableEntrySize(JTI);
     emitAlignment(Align(Size));
-    OutStreamer->emitLabel(GetJTISymbol(JTI));
+    MCSymbol *JTISymbol = GetJTISymbol(JTI);
+    OutStreamer->emitLabel(JTISymbol);
+    if (TM.getTargetTriple().isOSBinFormatGoObj()) {
+      OutContext.setGoObjSymbolSize(JTISymbol, uint64_t(Size) * JTBBs.size());
+      OutContext.setGoObjSymbolAlignment(JTISymbol, Size);
+    }
 
     const MCSymbol *BaseSym = AArch64FI->getJumpTableEntryPCRelSymbol(JTI);
     const MCExpr *Base = MCSymbolRefExpr::create(BaseSym, OutContext);
