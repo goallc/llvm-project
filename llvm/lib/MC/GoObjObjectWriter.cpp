@@ -26,6 +26,7 @@
 #include "llvm/MC/MCFixup.h"
 #include "llvm/MC/MCGoObjObjectWriter.h"
 #include "llvm/MC/MCSection.h"
+#include "llvm/MC/MCSymbolGoObj.h"
 #include "llvm/MC/MCValue.h"
 #include "llvm/Support/Alignment.h"
 #include "llvm/Support/EndianStream.h"
@@ -1835,8 +1836,9 @@ uint64_t GoObjObjectWriter::writeObject() {
       return GoObj::SymABIstatic;
     if (Identity.IsABI0)
       return GoObj::SymABI0;
-    // Internal data definitions belong to this compilation unit.
-    if (!IsFunction)
+    // Go's LOCAL flag alone does not make a symbol object-private: assembly
+    // objects can still refer to named LOCAL data such as argument maps.
+    if (!IsFunction && !static_cast<const MCSymbolGoObj *>(Sym)->isExternal())
       if (auto Flags = Asm->getContext().getGoObjSymbolFlags(Sym);
           Flags && (Flags->first & GoObj::SymFlagLocal))
         return GoObj::SymABIstatic;

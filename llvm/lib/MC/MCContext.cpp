@@ -38,6 +38,7 @@
 #include "llvm/MC/MCSymbolCOFF.h"
 #include "llvm/MC/MCSymbolELF.h"
 #include "llvm/MC/MCSymbolGOFF.h"
+#include "llvm/MC/MCSymbolGoObj.h"
 #include "llvm/MC/MCSymbolMachO.h"
 #include "llvm/MC/MCSymbolWasm.h"
 #include "llvm/MC/MCSymbolXCOFF.h"
@@ -334,7 +335,7 @@ MCSymbol *MCContext::createSymbolImpl(const MCSymbolTableEntry *Name,
   case MCContext::IsGOFF:
     return new (Name, *this) MCSymbolGOFF(Name, IsTemporary);
   case MCContext::IsGoObj:
-    return new (Name, *this) MCSymbol(Name, IsTemporary);
+    return new (Name, *this) MCSymbolGoObj(Name, IsTemporary);
   case MCContext::IsMachO:
     return new (Name, *this) MCSymbolMachO(Name, IsTemporary);
   case MCContext::IsWasm:
