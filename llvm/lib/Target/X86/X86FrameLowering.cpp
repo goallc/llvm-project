@@ -504,6 +504,11 @@ static void emitGoStackCheck(MachineFunction &MF,
 
   bool IsSystemStack = MF.getFunction().hasFnAttribute(goabi::SystemStackAttr);
 
+  // ABI0 does not establish R14. Reload g before reading its stack guard,
+  // including after a maymorestack hook and on retries from morestack.
+  if (goabi::isGoABI0CallingConv(MF.getFunction().getCallingConv()))
+    TII.emitGoLoadG(*CheckMBB, CheckMBB->end(), DL);
+
   unsigned ScratchReg = X86::R12;
   if (StackSize <= GoStackSmall) {
     ScratchReg = X86::RSP;
