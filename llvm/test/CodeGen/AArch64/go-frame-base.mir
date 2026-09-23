@@ -1,0 +1,71 @@
+# RUN: llc -mtriple=aarch64-unknown-linux-goobj -run-pass=localstackalloc -verify-machineinstrs -o - %s | FileCheck %s
+# RUN: llc -mtriple=aarch64-unknown-linux-goobj -passes=localstackalloc -verify-machineinstrs -o - %s | FileCheck %s
+
+# An unaligned vector access outside the unscaled-offset range would normally
+# share an entry-block frame base. Go can copy the stack during the call, so
+# that base would be stale after returning. Keep the frame indices for PEI.
+# The C calling convention must still be allowed to share a virtual base.
+--- |
+  define goabiinternal void @go_internal() { ret void }
+  define goabi0 void @go_stack() { ret void }
+  define void @c_frame() { ret void }
+  declare goabiinternal void @grow()
+...
+---
+name: go_internal
+tracksRegLiveness: true
+stack:
+  - { id: 0, size: 80, alignment: 8 }
+  - { id: 1, size: 4096, alignment: 8 }
+  - { id: 2, size: 8, alignment: 8 }
+# CHECK-LABEL: name: go_internal
+# CHECK: body:
+# CHECK-NOT: ADDXri
+# CHECK: BL @grow
+# CHECK-NEXT: %0:fpr128 = LDRQui %stack.0, 0
+# CHECK-NEXT: %1:fpr128 = LDRQui %stack.0, 1
+body: |
+  bb.0:
+    BL @grow, csr_aarch64_go, implicit-def $lr, implicit $sp
+    %0:fpr128 = LDRQui %stack.0, 0
+    %1:fpr128 = LDRQui %stack.0, 1
+    RET_ReallyLR
+...
+---
+name: go_stack
+tracksRegLiveness: true
+stack:
+  - { id: 0, size: 80, alignment: 8 }
+  - { id: 1, size: 4096, alignment: 8 }
+  - { id: 2, size: 8, alignment: 8 }
+# CHECK-LABEL: name: go_stack
+# CHECK: body:
+# CHECK-NOT: ADDXri
+# CHECK: BL @grow
+# CHECK-NEXT: %0:fpr128 = LDRQui %stack.0, 0
+# CHECK-NEXT: %1:fpr128 = LDRQui %stack.0, 1
+body: |
+  bb.0:
+    BL @grow, csr_aarch64_go, implicit-def $lr, implicit $sp
+    %0:fpr128 = LDRQui %stack.0, 0
+    %1:fpr128 = LDRQui %stack.0, 1
+    RET_ReallyLR
+...
+---
+name: c_frame
+tracksRegLiveness: true
+stack:
+  - { id: 0, size: 80, alignment: 8 }
+  - { id: 1, size: 4096, alignment: 8 }
+  - { id: 2, size: 8, alignment: 8 }
+# CHECK-LABEL: name: c_frame
+# CHECK: body:
+# CHECK: [[BASE:%[0-9]+]]:gpr64sp = ADDXri %stack.0, 0, 0
+# CHECK: %0:fpr128 = LDRQui [[BASE]], 0
+# CHECK-NEXT: %1:fpr128 = LDRQui [[BASE]], 1
+body: |
+  bb.0:
+    %0:fpr128 = LDRQui %stack.0, 0
+    %1:fpr128 = LDRQui %stack.0, 1
+    RET_ReallyLR
+...
