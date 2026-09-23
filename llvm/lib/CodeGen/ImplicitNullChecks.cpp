@@ -746,9 +746,12 @@ bool ImplicitNullChecks::analyzeBlockForNullChecks(
       return true;
     }
 
-    // If MI re-defines the PointerReg in a way that changes the value of
-    // PointerReg if it was null, then we cannot move further.
-    if (!TII->preservesZeroValueInReg(&MI, PointerReg, TRI))
+    // An instruction that leaves PointerReg untouched cannot affect whether
+    // a later access through it faults. In particular, AArch64 commonly
+    // materializes a store value before the store; it does not implement
+    // preservesZeroValueInReg for that unrelated instruction.
+    if (MI.modifiesRegister(PointerReg, TRI) &&
+        !TII->preservesZeroValueInReg(&MI, PointerReg, TRI))
       return false;
     InstsSeenSoFar.push_back(&MI);
   }
