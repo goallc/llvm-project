@@ -2024,6 +2024,14 @@ InstrRefBasedLDV::isSpillInstruction(const MachineInstr &MI,
   if (!MI.hasOneMemOperand())
     return std::nullopt;
 
+  // GC spills are stack temporaries rather than register-allocation spill
+  // slots. The collector may relocate their contents, but the slot continues
+  // to describe the same source variable across the statepoint.
+  int FI;
+  if (TII->isStoreToStackSlotPostFE(MI, FI) &&
+      MFI->isStatepointSpillSlotObjectIndex(FI))
+    return extractSpillBaseRegAndOffset(MI);
+
   // Reject any memory operand that's aliased -- we can't guarantee its value.
   auto MMOI = MI.memoperands_begin();
   const PseudoSourceValue *PVal = (*MMOI)->getPseudoValue();
@@ -2052,6 +2060,11 @@ InstrRefBasedLDV::isRestoreInstruction(const MachineInstr &MI,
                                        MachineFunction *MF, unsigned &Reg) {
   if (!MI.hasOneMemOperand())
     return std::nullopt;
+
+  int FI;
+  Reg = TII->isLoadFromStackSlotPostFE(MI, FI);
+  if (Reg && MFI->isStatepointSpillSlotObjectIndex(FI))
+    return extractSpillBaseRegAndOffset(MI);
 
   // FIXME: Handle folded restore instructions with more than one memory
   // operand.
