@@ -16,7 +16,9 @@ define goabiinternal i64 @main.zero_line() "frame-pointer"="non-leaf" !dbg !10 {
   ret i64 %sum, !dbg !22
 }
 
-; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=pcline target= pc=[
+; The unlocated prologue belongs to the declaration, not line 17.
+; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=pcfile target= pc=[0-{{[0-9]+}}:0,{{[0-9]+}}-{{[0-9]+}}:1,
+; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=pcline target= pc=[0-{{[0-9]+}}:16,
 ; CHECK-SAME: :17
 ; CHECK-SAME: :16
 ; CHECK-SAME: :18
@@ -30,6 +32,8 @@ define goabiinternal i64 @main.zero_line() "frame-pointer"="non-leaf" !dbg !10 {
 !5 = !{i32 7, !"Dwarf Version", i32 4}
 !6 = !{i32 2, !"Debug Info Version", i32 3}
 !10 = distinct !DISubprogram(name: "main.zero_line", linkageName: "main.zero_line", scope: !1, file: !1, line: 16, type: !3, scopeLine: 16, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
-!20 = !DILocation(line: 17, column: 2, scope: !10)
+!18 = !DIFile(filename: "included.go", directory: "/src")
+!19 = !DILexicalBlockFile(scope: !10, file: !18, discriminator: 0)
+!20 = !DILocation(line: 17, column: 2, scope: !19)
 !21 = !DILocation(line: 0, scope: !10)
 !22 = !DILocation(line: 18, column: 2, scope: !10)
