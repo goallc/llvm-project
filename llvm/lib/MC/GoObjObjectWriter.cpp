@@ -1838,10 +1838,9 @@ uint64_t GoObjObjectWriter::writeObject() {
       return GoObj::SymABI0;
     // Go's LOCAL flag alone does not make a symbol object-private: assembly
     // objects can still refer to named LOCAL data such as argument maps.
-    if (!IsFunction && !static_cast<const MCSymbolGoObj *>(Sym)->isExternal())
-      if (auto Flags = Asm->getContext().getGoObjSymbolFlags(Sym);
-          Flags && (Flags->first & GoObj::SymFlagLocal))
-        return GoObj::SymABIstatic;
+    if (!IsFunction && Sym->isDefined() &&
+        !static_cast<const MCSymbolGoObj *>(Sym)->isExternal())
+      return GoObj::SymABIstatic;
     return IsFunction ? GoObj::SymABIInternal : GoObj::SymABI0;
   };
 

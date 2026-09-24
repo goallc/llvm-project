@@ -833,7 +833,10 @@ getGoObjSymbolFlags(const GlobalObject *GO) {
   uint8_t Flag = 0;
   uint8_t Flag2 = 0;
 
-  if (GO->hasLocalLinkage())
+  // Internal data has Go's STATIC identity, but not necessarily its LOCAL
+  // flag: writable static temporaries may be shared by multiple plugins.
+  if (GO->hasPrivateLinkage() ||
+      (isa<Function>(GO) && GO->hasLocalLinkage()))
     Flag |= GoObj::SymFlagLocal;
   else if (GO->isWeakForLinker())
     Flag |= GoObj::SymFlagDupok;
