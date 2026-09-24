@@ -1836,6 +1836,8 @@ uint64_t GoObjObjectWriter::writeObject() {
       return GoObj::SymABIstatic;
     if (Identity.IsABI0)
       return GoObj::SymABI0;
+    if (auto ABI = static_cast<const MCSymbolGoObj *>(Sym)->getGoABI())
+      return *ABI;
     // Go's LOCAL flag alone does not make a symbol object-private: assembly
     // objects can still refer to named LOCAL data such as argument maps.
     if (!IsFunction && Sym->isDefined() &&
