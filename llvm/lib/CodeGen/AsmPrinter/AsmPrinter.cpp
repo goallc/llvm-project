@@ -112,6 +112,7 @@
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCSymbolELF.h"
+#include "llvm/MC/MCSymbolGoObj.h"
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/MC/MCValue.h"
 #include "llvm/MC/SectionKind.h"
@@ -1071,13 +1072,23 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
     if (!MD)
       continue;
     const auto *Index =
-        MD->getNumOperands() == 1
+        (MD->getNumOperands() == 1 || MD->getNumOperands() == 2)
             ? mdconst::dyn_extract<ConstantInt>(MD->getOperand(0))
             : nullptr;
     if (!Index || Index->getValue().ugt(UINT32_MAX) || GO.isDeclaration())
       report_fatal_error("invalid !goobj.symbol.index attachment");
     AP.OutContext.setGoObjPackageSymbolIndex(
         AP.getSymbol(&GO), static_cast<uint32_t>(Index->getZExtValue()));
+    // Go's STATIC identity is independent of dynamic symbol binding. In PIC
+    // code an indexed static temporary can require external linkage and GOT
+    // addressing so plugins share its storage.
+    if (MD->getNumOperands() == 2) {
+      const auto *ABI = mdconst::dyn_extract<ConstantInt>(MD->getOperand(1));
+      if (!ABI || !ABI->getType()->isIntegerTy(16))
+        report_fatal_error("invalid ABI in !goobj.symbol.index attachment");
+      static_cast<MCSymbolGoObj *>(AP.getSymbol(&GO))
+          ->setGoABI(static_cast<uint16_t>(ABI->getZExtValue()));
+    }
   }
 
   for (const GlobalObject &GO : M.global_objects()) {
