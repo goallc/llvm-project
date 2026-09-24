@@ -84,6 +84,30 @@ notnil:
   ret i64 %value
 }
 
+; Materializing a store value does not change the checked pointer. AArch64
+; must scan past that instruction and hoist the store as the faulting check.
+; AARCH64-MIR-LABEL: name: fold_store_constant
+; AARCH64-MIR: STRXui
+; AARCH64-ASM-LABEL: fold_store_constant:
+; AARCH64-ASM-NOT: cbz
+; AARCH64-ASM-NOT: runtime.panicmem
+; AARCH64-ASM: str
+; AARCH64-ASM-NOT: runtime.panicmem
+; AARCH64-ASM: ret
+define goabiinternal void @fold_store_constant(ptr %p) #0 {
+entry:
+  %isnil = icmp eq ptr %p, null
+  br i1 %isnil, label %nil, label %notnil, !make.implicit !0
+
+nil:
+  call goabiinternal void @runtime.panicmem()
+  unreachable
+
+notnil:
+  store i64 42, ptr %p, align 8
+  ret void
+}
+
 ; A defer callbr indirect destination has no physical branch, but it is a
 ; required Machine CFG recovery entry. Removing the folded nil path with the
 ; standard reachability pass must preserve this target.
