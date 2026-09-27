@@ -212,6 +212,8 @@ public:
     std::string File;
     uint32_t DeclLine = 0;
     uint32_t ArgNo = 0;
+    // Source declaration identity, independent of final machine scope ranges.
+    unsigned DeclScope = 0;
     unsigned Scope = 0;
     uint16_t DictIndex = 0;
     bool IsReturn = false;

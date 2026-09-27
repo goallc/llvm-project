@@ -129,6 +129,7 @@ class GoObjDebugHandler final : public DebugHandlerBase {
     for (auto [Index, Candidate] : enumerate(Info->Variables))
       if (Candidate.Name == Key.Name && Candidate.TypeName == Key.TypeName &&
           Candidate.File == Key.File && Candidate.DeclLine == Key.DeclLine &&
+          Candidate.DeclScope == Key.DeclScope &&
           Candidate.ArgNo == Key.ArgNo && Candidate.DictIndex == Key.DictIndex)
         return Index;
     return std::nullopt;
@@ -455,6 +456,7 @@ public:
 
     DenseMap<const DISubprogram *, std::vector<MCContext::GoObjDebugVariable>>
         Variables;
+    DenseMap<const DILocalScope *, unsigned> DeclarationScopes;
     if (const NamedMDNode *Vars = M->getNamedMetadata("goobj.debug.vars")) {
       if (DwarfVersion == 0)
         report_fatal_error(
@@ -492,6 +494,14 @@ public:
         Result.File = filePath(Var->getFile());
         Result.DeclLine = Var->getLine();
         Result.ArgNo = Var->getArg();
+        // Keep distinct lexical declarations even when their names and source
+        // lines match. Assign IDs in manifest order, never pointer-hash order.
+        // Subprogram-scoped variables still merge across inline instances.
+        const auto *Scope = Var->getScope()->getNonLexicalBlockFileScope();
+        if (!isa<DISubprogram>(Scope))
+          Result.DeclScope = DeclarationScopes
+                                 .try_emplace(Scope, DeclarationScopes.size() + 1)
+                                 .first->second;
         if (DictIndex) {
           uint64_t Value = DictIndex->getZExtValue();
           if (Value > std::numeric_limits<uint16_t>::max())
@@ -540,6 +550,8 @@ public:
             return LHS.TypeName < RHS.TypeName;
           if (LHS.File != RHS.File)
             return LHS.File < RHS.File;
+          if (LHS.DeclScope != RHS.DeclScope)
+            return LHS.DeclScope < RHS.DeclScope;
           return LHS.IsReturn > RHS.IsReturn;
         });
         SPVariables.erase(llvm::unique(SPVariables,
@@ -548,6 +560,7 @@ public:
                                                 LHS.TypeName == RHS.TypeName &&
                                                 LHS.File == RHS.File &&
                                                 LHS.DeclLine == RHS.DeclLine &&
+                                                LHS.DeclScope == RHS.DeclScope &&
                                                 LHS.ArgNo == RHS.ArgNo &&
                                                 LHS.DictIndex == RHS.DictIndex;
                                        }),

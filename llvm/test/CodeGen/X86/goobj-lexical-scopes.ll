@@ -6,6 +6,10 @@
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.d4.o | FileCheck %s
 ; RUN: sed 's/!"dwarf5"/!"dwarf4"/' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.arm64.d4.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.arm64.d4.o | FileCheck %s
+; RUN: sed 's/line: 3/line: 2/g' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.same-line.x86.o
+; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.same-line.x86.o | FileCheck %s --check-prefix=SAME-LINE
+; RUN: sed 's/line: 3/line: 2/g' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.same-line.arm64.o
+; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.same-line.arm64.o | FileCheck %s --check-prefix=SAME-LINE
 
 ; The two i variables have the same name and type, but different lexical
 ; parents. The address ranges come from LLVM's final LexicalScopes analysis.
@@ -53,3 +57,7 @@ attributes #0 = { "frame-pointer"="all" }
 ; each containing its own i (28 6900), then three end-of-children markers.
 ; CHECK: type=dwarf_info target= data={{[0-9a-f]+}}2e7800000100000000000c000000002869000200000000000c00000000286900030000000000000000
 ; CHECK: type=dwarf_ranges target=
+
+; Declarations on the same line must also retain both variables and their
+; distinct scopes. Deduplicating by name/type/line loses one of the i DIEs.
+; SAME-LINE: type=dwarf_info target= data={{[0-9a-f]+}}2e7800000100000000000c000000002869000200000000000c00000000286900020000000000000000
