@@ -10,6 +10,10 @@
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.same-line.x86.o | FileCheck %s --check-prefix=SAME-LINE
 ; RUN: sed 's/line: 3/line: 2/g' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.same-line.arm64.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.same-line.arm64.o | FileCheck %s --check-prefix=SAME-LINE
+; RUN: sed -e 's/line: 3/line: 2/g' -e 's/!"dwarf5"/!"dwarf4"/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.same-line.d4.o
+; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.same-line.d4.o | FileCheck %s --check-prefix=SAME-LINE
+; RUN: sed -e 's/line: 3/line: 2/g' -e 's/!"dwarf5"/!"dwarf4"/' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.same-line.arm64.d4.o
+; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.same-line.arm64.d4.o | FileCheck %s --check-prefix=SAME-LINE
 
 ; The two i variables have the same name and type, but different lexical
 ; parents. The address ranges come from LLVM's final LexicalScopes analysis.
