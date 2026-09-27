@@ -2522,27 +2522,22 @@ uint64_t GoObjObjectWriter::writeObject() {
         }
 
         GoObjDwarfCarrierData RangeCarrier;
-        std::vector<uint32_t> RangeOffsets(LineInfo.InlineTree.size());
-        for (size_t Node = 0; Node < InlineRanges.size(); ++Node) {
-          if (InlineRanges[Node].empty())
-            continue;
-          if (DwarfVersion == 4 && InlineRanges[Node].size() == 1)
-            continue;
-          RangeOffsets[Node] =
+        auto AppendRanges = [&](ArrayRef<GoObjDwarfRange> Ranges) {
+          uint32_t Offset =
               checkedUint32(RangeCarrier.Data.size(), "DWARF range offset");
           if (DwarfVersion == 5) {
             // DW_RLE_base_addressx, followed by DW_RLE_offset_pair entries.
             RangeCarrier.Data.push_back(dwarf::DW_RLE_base_addressx);
             appendDwarfRelocation(RangeCarrier.Data, RangeCarrier.Relocations,
                                   4, GoObj::R_DWTXTADDR_U4, 0, I);
-            for (const GoObjDwarfRange &Range : InlineRanges[Node]) {
+            for (const GoObjDwarfRange &Range : Ranges) {
               RangeCarrier.Data.push_back(dwarf::DW_RLE_offset_pair);
               appendUvarint(RangeCarrier.Data, Range.Begin);
               appendUvarint(RangeCarrier.Data, Range.End);
             }
             RangeCarrier.Data.push_back(dwarf::DW_RLE_end_of_list);
           } else {
-            for (const GoObjDwarfRange &Range : InlineRanges[Node]) {
+            for (const GoObjDwarfRange &Range : Ranges) {
               appendDwarfRelocation(RangeCarrier.Data, RangeCarrier.Relocations,
                                     PointerSize, GoObj::R_ADDRCUOFF,
                                     Range.Begin, I);
@@ -2553,6 +2548,40 @@ uint64_t GoObjObjectWriter::writeObject() {
             RangeCarrier.Data.resize(RangeCarrier.Data.size() + 2 * PointerSize,
                                      0);
           }
+          return Offset;
+        };
+        std::vector<uint32_t> RangeOffsets(LineInfo.InlineTree.size());
+        for (size_t Node = 0; Node < InlineRanges.size(); ++Node)
+          if (!InlineRanges[Node].empty() &&
+              (DwarfVersion == 5 || InlineRanges[Node].size() > 1))
+            RangeOffsets[Node] = AppendRanges(InlineRanges[Node]);
+
+        const auto &Scopes = FunctionDebugInfo->Scopes;
+        std::vector<SmallVector<unsigned, 4>> ScopeVariables(
+            std::max(size_t(1), Scopes.size()));
+        for (auto [Index, Var] : enumerate(FunctionDebugInfo->Variables))
+          ScopeVariables.at(Var.Scope).push_back(Index);
+        std::vector<uint32_t> ScopeRangeOffsets(Scopes.size());
+        for (unsigned Scope = 1; Scope < Scopes.size(); ++Scope) {
+          if (ScopeVariables[Scope].empty())
+            continue;
+          SmallVector<GoObjDwarfRange, 4> Ranges;
+          for (const auto &[BeginLabel, EndLabel] : Scopes[Scope].Ranges) {
+            if (!BeginLabel || !EndLabel || !BeginLabel->isInSection() ||
+                !EndLabel->isInSection() ||
+                &BeginLabel->getSection() != Symbols[I].Section ||
+                &EndLabel->getSection() != Symbols[I].Section)
+              report_fatal_error("invalid GoObj lexical scope range");
+            uint64_t Begin = Asm->getSymbolOffset(*BeginLabel);
+            uint64_t End = Asm->getSymbolOffset(*EndLabel);
+            if (Begin < Symbols[I].SectionBegin ||
+                End > Symbols[I].SectionEnd || Begin > End)
+              report_fatal_error("GoObj lexical scope is outside function");
+            if (Begin != End)
+              Ranges.push_back({Begin - Symbols[I].SectionBegin,
+                                End - Symbols[I].SectionBegin});
+          }
+          ScopeRangeOffsets[Scope] = AppendRanges(Ranges);
         }
         std::optional<uint32_t> DwarfRangeSym;
         if (!RangeCarrier.Data.empty())
@@ -2671,7 +2700,8 @@ uint64_t GoObjObjectWriter::writeObject() {
             AppendDwarfParametricTypes(InfoCarrier,
                                        FunctionDebugInfo->Variables);
 
-        for (auto [VarIndex, Var] : enumerate(FunctionDebugInfo->Variables)) {
+        auto EmitVariable = [&](unsigned VarIndex) {
+          const auto &Var = FunctionDebugInfo->Variables[VarIndex];
           // DW_ABRV_PUTVAR_START+6/+12 use a location list; +7/+13 use
           // block1 (empty for unavailable variables).
           bool HasLocation = LocationOffsets[VarIndex].has_value();
@@ -2690,7 +2720,26 @@ uint64_t GoObjObjectWriter::writeObject() {
                                   *DwarfLocationSym);
           else
             InfoCarrier.Data.push_back(0);
-        }
+        };
+        std::function<void(unsigned)> EmitScope = [&](unsigned Scope) {
+          for (unsigned Var : ScopeVariables[Scope])
+            EmitVariable(Var);
+          for (unsigned Child = Scope + 1; Child < Scopes.size(); ++Child) {
+            if (Scopes[Child].Parent != Scope)
+              continue;
+            bool HasVariables = !ScopeVariables[Child].empty();
+            if (HasVariables) {
+              appendUvarint(InfoCarrier.Data, 12); // DW_ABRV_LEXICAL_BLOCK_RANGES.
+              appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations, 4,
+                                    GoObj::R_DWARFSECREF,
+                                    ScopeRangeOffsets[Child], *DwarfRangeSym);
+            }
+            EmitScope(Child);
+            if (HasVariables)
+              InfoCarrier.Data.push_back(0);
+          }
+        };
+        EmitScope(0);
 
         std::function<void(int32_t)> EmitInline = [&](int32_t Node) {
           const auto &Ranges = InlineRanges[Node];
