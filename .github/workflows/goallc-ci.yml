@@ -142,6 +142,7 @@ jobs:
             "$build/test/CodeGen/X86/goobj-package-symbol-index.ll"
             "$build/test/CodeGen/X86/goobj-package-symbol-index-invalid.ll"
             "$build/test/CodeGen/X86/goobj-static-pic.ll"
+            "$build/test/CodeGen/X86/goobj-lexical-scopes.ll"
             "$build/test/CodeGen/X86/goobj-weak-calls.ll"
             "$build/test/CodeGen/X86/goobj-weak-calls-invalid.ll"
             "$build/test/CodeGen/X86/soft-float-memops.ll"

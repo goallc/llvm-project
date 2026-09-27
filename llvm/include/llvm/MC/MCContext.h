@@ -212,6 +212,7 @@ public:
     std::string File;
     uint32_t DeclLine = 0;
     uint32_t ArgNo = 0;
+    unsigned Scope = 0;
     uint16_t DictIndex = 0;
     bool IsReturn = false;
     std::vector<GoObjVariableLocation> Locations;
@@ -222,12 +223,18 @@ public:
     std::string Name;
   };
 
+  struct GoObjDebugScope {
+    unsigned Parent = 0;
+    std::vector<std::pair<const MCSymbol *, const MCSymbol *>> Ranges;
+  };
+
   struct GoObjFunctionDebugInfo {
     std::string Name;
     std::string File;
     uint32_t StartLine = 0;
     std::vector<GoObjDebugLocation> Locations;
     std::vector<GoObjDebugVariable> Variables;
+    std::vector<GoObjDebugScope> Scopes;
   };
 
 private:
@@ -1122,6 +1129,16 @@ public:
     GoObjFunctionDebugInfos[Sym]
         .Variables.at(VariableIndex)
         .Locations.push_back(std::move(Location));
+  }
+
+  void setGoObjDebugScopes(const MCSymbol *Sym,
+                           std::vector<GoObjDebugScope> Scopes) {
+    GoObjFunctionDebugInfos[Sym].Scopes = std::move(Scopes);
+  }
+
+  void setGoObjVariableScope(const MCSymbol *Sym, unsigned Variable,
+                             unsigned Scope) {
+    GoObjFunctionDebugInfos[Sym].Variables.at(Variable).Scope = Scope;
   }
 
   void addGoObjDebugGlobal(GoObjDebugGlobal Global) {

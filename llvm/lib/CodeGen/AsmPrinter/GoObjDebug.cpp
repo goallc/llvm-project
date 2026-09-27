@@ -265,6 +265,44 @@ class GoObjDebugHandler final : public DebugHandlerBase {
     return HasLocation ? Bytes : std::vector<uint8_t>();
   }
 
+  void collectLexicalScopes(const MachineFunction &MF) {
+    LexicalScope *Root = LScopes.getCurrentFunctionScope();
+    if (!CurrentFunction || !Root || Asm.OutContext.getGoObjDwarfVersion() == 0)
+      return;
+    std::vector<MCContext::GoObjDebugScope> Scopes(1);
+    DenseMap<const DILocalScope *, unsigned> Indexes;
+    Indexes[Root->getScopeNode()] = 0;
+    // Reuse LLVM's final-machine scope tree and the labels requested by
+    // DebugHandlerBase. Inlined scopes have their own GoObj inline carriers.
+    std::function<void(LexicalScope *, unsigned)> Visit =
+        [&](LexicalScope *Parent, unsigned ParentIndex) {
+          for (LexicalScope *Child : Parent->getChildren()) {
+            if (Child->getInlinedAt() || Child->isAbstractScope())
+              continue;
+            unsigned Index = Scopes.size();
+            Indexes[Child->getScopeNode()] = Index;
+            MCContext::GoObjDebugScope Scope;
+            Scope.Parent = ParentIndex;
+            for (const InsnRange &Range : Child->getRanges())
+              Scope.Ranges.emplace_back(getLabelBeforeInsn(Range.first),
+                                        getLabelAfterInsn(Range.second));
+            Scopes.push_back(std::move(Scope));
+            Visit(Child, Index);
+          }
+        };
+    Visit(Root, 0);
+    Asm.OutContext.setGoObjDebugScopes(CurrentFunction, std::move(Scopes));
+    for (const auto &[Var, Info] : VariableInfo) {
+      if (Var->getScope()->getSubprogram() != MF.getFunction().getSubprogram())
+        continue;
+      auto Scope = Indexes.find(Var->getScope()->getNonLexicalBlockFileScope());
+      if (Scope != Indexes.end())
+        if (auto Index = variableIndex(Var))
+          Asm.OutContext.setGoObjVariableScope(CurrentFunction, *Index,
+                                               Scope->second);
+    }
+  }
+
   void collectVariableLocations(const MachineFunction &MF) {
     if (!CurrentFunction || Asm.OutContext.getGoObjDwarfVersion() == 0)
       return;
@@ -566,6 +604,7 @@ public:
   }
 
   void endFunctionImpl(const MachineFunction *MF) override {
+    collectLexicalScopes(*MF);
     collectVariableLocations(*MF);
     CurrentFunction = nullptr;
     PreviousLocation = DebugLoc();
