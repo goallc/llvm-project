@@ -2182,6 +2182,10 @@ uint64_t GoObjObjectWriter::writeObject() {
       DenseMap<uint16_t, uint32_t> ParametricTypeOffsets =
           AppendDwarfParametricTypes(Carrier, DebugInfo->Variables);
       for (const MCContext::GoObjDebugVariable &Var : DebugInfo->Variables) {
+        // Match Go's IsInAbstract policy: lowering temporaries and blank
+        // parameters are not declarations in the source inline function.
+        if (StringRef(Var.Name).starts_with("~") || Var.Name == "_")
+          continue;
         if (Var.ArgNo != 0) {
           appendUvarint(Carrier.Data, 34); // Abstract formal parameter.
           appendCString(Carrier.Data, Var.Name);
