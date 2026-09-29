@@ -1756,6 +1756,11 @@ void GoObjObjectWriter::recordRelocation(const MCFragment &F,
 }
 
 uint64_t GoObjObjectWriter::writeObject() {
+  MCGoObjObjectWriterConfig Config = this->Config;
+  if (Asm->getContext().isGoObjFromAssembly()) {
+    Config.SourceKind = GoObj::SourceKind::Assembly;
+    Config.DefaultDefinedSymbolBlock = GoObj::DefinedSymbolBlock::Nonpkgdef;
+  }
   const uint64_t StartOffset = OS.tell();
 
   StringRef ABI0Suffix = GoObj::ABI0SymbolSuffix;
@@ -1833,6 +1838,12 @@ uint64_t GoObjObjectWriter::writeObject() {
                              ? "Go FMV suffix requires a function symbol"
                              : "Go ABI0 suffix requires a function symbol");
     if (Identity.IsFMVImplementation)
+      return GoObj::SymABIstatic;
+    // Plan 9's static TEXT identity is independent of its calling convention.
+    // Keep an object-private ABI0 body private even though its IR name carries
+    // the ABI0 suffix used for lowering calls.
+    if (Asm->getContext().getGoObjAsmFunction(Sym) && Sym->isDefined() &&
+        !static_cast<const MCSymbolGoObj *>(Sym)->isExternal())
       return GoObj::SymABIstatic;
     if (Identity.IsABI0)
       return GoObj::SymABI0;
@@ -2210,7 +2221,8 @@ uint64_t GoObjObjectWriter::writeObject() {
     return Index;
   };
 
-  if (Config.SourceKind == GoObj::SourceKind::Compiler) {
+  if (Config.SourceKind == GoObj::SourceKind::Compiler ||
+      Asm->getContext().isGoObjFromAssembly()) {
     auto GetInlineIndex =
         [&](GoObjFuncDebugLines &Info,
             ArrayRef<MCContext::GoObjDebugInlineFrame> Frames) {
@@ -2368,6 +2380,9 @@ uint64_t GoObjObjectWriter::writeObject() {
          I != E; ++I) {
       if (Symbols[I].Type != GoObj::STEXT || Symbols[I].Size == 0 ||
           !Symbols[I].Symbol)
+        continue;
+
+      if (Asm->getContext().getGoObjAsmFunction(Symbols[I].Symbol))
         continue;
 
       uint32_t StackSize = Asm->getContext()
@@ -2970,6 +2985,71 @@ uint64_t GoObjObjectWriter::writeObject() {
     }
   }
 
+  // Explicit assembly metadata replaces compiler-generated frame/stack maps.
+  // In particular, absent FUNCDATA must stay absent, rather than becoming an
+  // empty compiler stack map which would hide assembly liveness errors.
+  for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
+       I != E; ++I) {
+    const auto *Info = Asm->getContext().getGoObjAsmFunction(Symbols[I].Symbol);
+    if (!Info)
+      continue;
+    uint64_t CodeSize = Symbols[I].Size;
+    DenseMap<int32_t, SmallVector<GoObjPCTabEntry, 8>> Tables;
+    SmallVector<uint32_t, 4> Files;
+    unsigned PCDataCount = 0;
+    for (const auto &Event : Info->Events) {
+      if (!Event.Label->isInSection() ||
+          &Event.Label->getSection() != &Symbols[I].Symbol->getSection())
+        report_fatal_error("GoObj assembly PC label is outside its function");
+      uint64_t Offset = Asm->getSymbolOffset(*Event.Label);
+      if (Offset < Symbols[I].SectionBegin ||
+          Offset > Symbols[I].SectionBegin + CodeSize)
+        report_fatal_error("GoObj assembly PC event exceeds function size");
+      uint64_t PC = Offset - Symbols[I].SectionBegin;
+      int32_t Value = Event.Value;
+      if (Event.Kind == -2) {
+        uint32_t File = getOrAddFileIndex(FileIndexes, FilePaths, Event.File);
+        if (!llvm::is_contained(Files, File))
+          Files.push_back(File);
+        Tables[-4].push_back({PC, static_cast<int32_t>(File)});
+      }
+      Tables[Event.Kind].push_back({PC, Value});
+      if (Event.Kind >= 0)
+        PCDataCount = std::max(PCDataCount, unsigned(Event.Kind) + 1);
+    }
+    auto EmitTable = [&](int32_t Kind, uint8_t AuxKind) {
+      auto &Events = Tables[Kind];
+      llvm::stable_sort(
+          Events, [](const auto &A, const auto &B) { return A.PC < B.PC; });
+      SmallVector<GoObjPCTabEntry, 8> Normalized;
+      int32_t Initial = Kind == -3 ? 0 : -1;
+      for (const auto &Event : Events) {
+        if (Event.PC >= CodeSize)
+          continue;
+        if (Event.PC == 0)
+          Initial = Event.Value;
+        else if (!Normalized.empty() && Normalized.back().PC == Event.PC)
+          Normalized.back().Value = Event.Value;
+        else
+          Normalized.push_back(Event);
+      }
+      uint32_t Carrier = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'P',
+          makePCTab(Initial, Normalized, CodeSize, PCQuantum));
+      Symbols[I].Auxiliaries.emplace_back(AuxKind, Carrier);
+    };
+    uint32_t FuncInfo = addAuxCarrierSymbol(
+        Symbols, GoObj::DefinedSymbolBlock::Symdef,
+        makeFuncInfoData(Info->Args, Info->Locals, Info->FuncID, Info->FuncFlag,
+                         Files, Info->StartLine, {}));
+    Symbols[I].Auxiliaries.emplace_back(GoObj::AuxFuncInfo, FuncInfo);
+    EmitTable(-3, GoObj::AuxPcsp);
+    EmitTable(-4, GoObj::AuxPcfile);
+    EmitTable(-2, GoObj::AuxPcline);
+    for (unsigned PCData = 0; PCData < PCDataCount; ++PCData)
+      EmitTable(PCData, GoObj::AuxPcdata);
+  }
+
   if (DwarfVersion != 0) {
     uint32_t PointerSize = Asm->getContext().getAsmInfo().getCodePointerSize();
     StringRef PackageName = Asm->getContext().getGoObjDwarfPackageName();
@@ -3042,7 +3122,8 @@ uint64_t GoObjObjectWriter::writeObject() {
   // Preserve physical kinds while building function metadata, then apply the
   // semantic kinds carried by explicit frontend sections. Read-only static
   // symbols synthesized after IR lowering use the module-level fallback.
-  if (Config.SourceKind == GoObj::SourceKind::Compiler) {
+  if (Config.SourceKind == GoObj::SourceKind::Compiler ||
+      Asm->getContext().isGoObjFromAssembly()) {
     for (GoObjSymbol &Symbol : Symbols) {
       std::optional<uint8_t> ExplicitType;
       ExplicitType = getGoObjExplicitSectionSymbolType(Symbol.Section);
@@ -3362,6 +3443,23 @@ uint64_t GoObjObjectWriter::writeObject() {
         " in-section=" + Twine(static_cast<unsigned>(Target->isInSection())) +
         " undefined=" + Twine(static_cast<unsigned>(Target->isUndefined())));
   };
+
+  for (GoObjSymbol &Symbol : Symbols) {
+    const auto *Info = Asm->getContext().getGoObjAsmFunction(Symbol.Symbol);
+    if (!Info)
+      continue;
+    for (const MCSymbol *Target : Info->Funcdata) {
+      GoObjSymRef Ref;
+      if (Target) {
+        int64_t Addend = 0;
+        Ref = GetTargetSymRef(Target, GoObj::R_ADDR, Addend);
+        if (Addend)
+          report_fatal_error(
+              "GoObj assembly FUNCDATA must name a whole symbol");
+      }
+      Symbol.Auxiliaries.emplace_back(GoObj::AuxFuncdata, Ref);
+    }
+  }
 
   SmallVector<GoObjRelocationEntry> MergedRelocations;
   for (const GoObjRelocationEntry &Reloc : Relocations) {

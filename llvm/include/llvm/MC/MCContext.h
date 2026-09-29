@@ -115,6 +115,22 @@ public:
     }
   };
 
+  // Plan 9 assembly owns its complete frame and PC tables. Labels are resolved
+  // only after MC relaxation; no frontend instruction sizes are assumed.
+  struct GoObjAsmEvent {
+    const MCSymbol *Label;
+    int32_t Kind; // -3: SP, -2: file/line, >=0: PCDATA index.
+    int32_t Value;
+    std::string File;
+  };
+  struct GoObjAsmFunction {
+    uint32_t Args = 0, Locals = 0;
+    uint8_t FuncID = 0, FuncFlag = 0;
+    int32_t StartLine = 0;
+    std::vector<GoObjAsmEvent> Events;
+    std::vector<const MCSymbol *> Funcdata;
+  };
+
   struct GoObjPCSPEntry {
     const MCSymbol *Label;
     int32_t Value;
@@ -303,6 +319,8 @@ private:
   DenseSet<const MCSymbol *> GoObjFunctionSymbols;
 
   /// Package-local indices assigned to Go object definitions by the frontend.
+  bool GoObjFromAssembly = false;
+  DenseMap<const MCSymbol *, GoObjAsmFunction> GoObjAsmFunctions;
   DenseMap<const MCSymbol *, uint32_t> GoObjPackageSymbolIndexes;
 
   /// Semantic type for static read-only symbols synthesized after IR lowering.
@@ -863,6 +881,16 @@ public:
     if (It == GoObjSymbolFlags.end())
       return std::nullopt;
     return It->second;
+  }
+
+  void setGoObjFromAssembly() { GoObjFromAssembly = true; }
+  bool isGoObjFromAssembly() const { return GoObjFromAssembly; }
+  GoObjAsmFunction &getOrCreateGoObjAsmFunction(const MCSymbol *Sym) {
+    return GoObjAsmFunctions[Sym];
+  }
+  const GoObjAsmFunction *getGoObjAsmFunction(const MCSymbol *Sym) const {
+    auto It = GoObjAsmFunctions.find(Sym);
+    return It == GoObjAsmFunctions.end() ? nullptr : &It->second;
   }
 
   void setGoObjFunctionInfo(const MCSymbol *Sym, uint8_t FuncID,
