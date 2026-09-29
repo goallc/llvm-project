@@ -3007,6 +3007,12 @@ uint64_t GoObjObjectWriter::writeObject() {
         report_fatal_error("GoObj assembly PC event exceeds function size");
       uint64_t PC = Offset - Symbols[I].SectionBegin;
       int32_t Value = Event.Value;
+      if (Event.Kind == -4) {
+        if (PC != static_cast<uint64_t>(Event.Value))
+          report_fatal_error(
+              "GoObj assembly interior address changed during encoding");
+        continue;
+      }
       if (Event.Kind == -2) {
         uint32_t File = getOrAddFileIndex(FileIndexes, FilePaths, Event.File);
         if (!llvm::is_contained(Files, File))
@@ -3472,8 +3478,9 @@ uint64_t GoObjObjectWriter::writeObject() {
       SameSource =
           PreviousSource && CurrentSource && *PreviousSource == *CurrentSource;
     }
-    if (!SameSource ||
-        !TargetObjectWriter->mergeRelocations(MergedRelocations.back(), Reloc))
+    if (!SameSource || !TargetObjectWriter->mergeRelocations(
+                           MergedRelocations.back(), Reloc,
+                           Asm->getContext().isGoObjFromAssembly()))
       MergedRelocations.push_back(Reloc);
   }
 

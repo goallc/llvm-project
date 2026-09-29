@@ -119,7 +119,7 @@ public:
   // only after MC relaxation; no frontend instruction sizes are assumed.
   struct GoObjAsmEvent {
     const MCSymbol *Label;
-    int32_t Kind; // -3: SP, -2: file/line, >=0: PCDATA index.
+    int32_t Kind; // -4: fixed offset, -3: SP, -2: file/line, >=0: PCDATA.
     int32_t Value;
     std::string File;
   };

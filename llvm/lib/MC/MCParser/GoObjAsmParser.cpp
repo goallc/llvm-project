@@ -155,7 +155,7 @@ class GoObjAsmParser : public MCAsmParserExtension {
         parseInteger(ID) || parseInteger(Flags) || parseInteger(Line) ||
         parseEOL())
       return true;
-    if (Args < INT32_MIN || Args > UINT32_MAX || Locals < 0 ||
+    if (Args < INT32_MIN || Args > UINT32_MAX || Locals < INT32_MIN ||
         Locals > INT32_MAX || ID < 0 || ID > UINT8_MAX || Flags < 0 ||
         Flags > UINT8_MAX || Line < 0 || Line > INT32_MAX)
       return TokError("invalid GoObj assembly function metadata");
@@ -175,8 +175,8 @@ class GoObjAsmParser : public MCAsmParserExtension {
     if (parseSymbol(Sym) || getParser().parseToken(AsmToken::Comma) ||
         parseSymbol(Label) || parseInteger(Kind) || parseInteger(Value))
       return true;
-    if (Kind < -5 || Kind == -4 || Kind == -1 || Kind > 65535 ||
-        Value < INT32_MIN || Value > INT32_MAX)
+    if (Kind < -5 || Kind == -1 || Kind > 65535 || Value < INT32_MIN ||
+        Value > INT32_MAX || (Kind == -4 && Value < 0))
       return TokError("invalid GoObj assembly PC event");
     if (Kind == -2 && (getParser().parseToken(AsmToken::Comma) ||
                        getParser().parseEscapedString(File)))
