@@ -183,6 +183,8 @@ uint8_t getGoObjSymbolType(const MCSection *Section) {
     return GoObj::STEXT;
 
   StringRef Name = Section->getName();
+  if (Name == ".tbss" || Name.starts_with(".tbss."))
+    return GoObj::STLSBSS;
   if (Name.starts_with(".noptrdata"))
     return GoObj::SNOPTRDATA;
   if (Name.starts_with(".noptrbss"))
