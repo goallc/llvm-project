@@ -1723,6 +1723,7 @@ void GoObjObjectWriter::setAssembler(MCAssembler *Asm) {
 void GoObjObjectWriter::reset() {
   MCObjectWriter::reset();
   Relocations.clear();
+  AssemblyRelocations.clear();
 }
 
 bool GoObjObjectWriter::isSymbolRefDifferenceFullyResolvedImpl(
@@ -1886,6 +1887,8 @@ uint64_t GoObjObjectWriter::writeObject() {
   };
   for (const GoObjRelocationEntry &Reloc : Relocations)
     AddPrivateTarget(Reloc.Symbol);
+  for (const auto &Reloc : AssemblyRelocations)
+    AddPrivateTarget(Reloc.Target);
   // Go linker edges have no MC fixup, but their private targets need the same
   // independent carriers as ordinary relocation targets.
   for (const MCSymbol &Symbol : Asm->symbols()) {
@@ -3665,6 +3668,20 @@ uint64_t GoObjObjectWriter::writeObject() {
     if (Addend != 0)
       report_fatal_error("GoObj gotype auxiliary target has an addend");
     Source.Auxiliaries.emplace_back(GoObj::AuxGotype, TargetSymRef);
+  }
+
+  for (const auto &Reloc : AssemblyRelocations) {
+    auto It = DefinedSymbolIndexes.find(Reloc.Source);
+    if (It == DefinedSymbolIndexes.end() ||
+        uint64_t(Reloc.Offset) + Reloc.Size > Symbols[It->second].Size)
+      report_fatal_error("invalid Plan 9 assembly relocation extent");
+    int64_t Addend = Reloc.Addend;
+    GoObjSymRef Target = Reloc.Target
+                            ? GetTargetSymRef(Reloc.Target, Reloc.Type, Addend)
+                            : GoObjSymRef{};
+    Symbols[It->second].Relocations.push_back(
+        {Reloc.Offset, Reloc.Size, Reloc.Type, Addend, Target.PkgIdx,
+         Target.SymIdx, std::nullopt});
   }
 
   // FuncInfo stores inline callees as final Go SymRefs rather than

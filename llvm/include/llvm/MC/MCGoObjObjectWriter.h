@@ -99,7 +99,23 @@ class GoObjObjectWriter final : public MCObjectWriter {
 
   std::vector<GoObjRelocationEntry> Relocations;
 
+  struct AssemblyRelocation {
+    const MCSymbol *Source, *Target;
+    uint32_t Offset;
+    uint8_t Size;
+    uint16_t Type;
+    int64_t Addend;
+  };
+  std::vector<AssemblyRelocation> AssemblyRelocations;
+
 public:
+  // Already encoded Go assembly retains the native Go relocation contract.
+  // These records do not pass through target MC fixup conversion or relaxation.
+  void recordAssemblyRelocation(const MCSymbol *Source, const MCSymbol *Target,
+                                uint32_t Offset, uint8_t Size, uint16_t Type,
+                                int64_t Addend) {
+    AssemblyRelocations.push_back({Source, Target, Offset, Size, Type, Addend});
+  }
   GoObjObjectWriter(std::unique_ptr<MCGoObjObjectTargetWriter> MOTW,
                     raw_pwrite_stream &OS,
                     MCGoObjObjectWriterConfig Config = {});

@@ -21,6 +21,7 @@ add_llvm_component_library(LLVMAsmPrinter
   EHStreamer.cpp
   ErlangGCPrinter.cpp
   GoObjDebug.cpp
+  GoPlan9InlineAsm.cpp
   OcamlGCPrinter.cpp
   PseudoProbePrinter.cpp
   WinCFGuard.cpp
