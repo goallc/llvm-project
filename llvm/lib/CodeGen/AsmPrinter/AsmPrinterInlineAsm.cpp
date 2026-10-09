@@ -15,6 +15,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/CodeGen/AsmPrinter.h"
+#include "GoPlan9InlineAsm.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
@@ -337,6 +338,9 @@ static void EmitInlineAsmStr(const char *AsmStr, const MachineInstr *MI,
 /// inline asm.
 void AsmPrinter::emitInlineAsm(const MachineInstr *MI) {
   assert(MI->isInlineAsm() && "printInlineAsm only works on inline asms");
+  if (emitGoPlan9InlineAsm(*this, *MI, MF->getFunction(), CurrentFnSym,
+                          OutContext, *OutStreamer))
+    return;
 
   // Disassemble the AsmStr, printing out the literal pieces, the operands, etc.
   const char *AsmStr = MI->getOperand(0).getSymbolName();

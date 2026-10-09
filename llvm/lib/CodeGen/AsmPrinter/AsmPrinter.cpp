@@ -230,7 +230,10 @@ public:
 
 static uint32_t getGoObjArgSize(const MachineFunction &MF) {
   const Function &F = MF.getFunction();
-  if (!goabi::isGoCallingConv(F.getCallingConv()))
+  // Naked Go assembly has no lowered formal arguments. Its real frame and
+  // argument size are supplied by .goobj.asmfunc after instruction emission.
+  if (!goabi::isGoCallingConv(F.getCallingConv()) ||
+      F.hasFnAttribute(Attribute::Naked))
     return 0;
   const MachineFrameInfo &MFI = MF.getFrameInfo();
   if (!MFI.hasGoABIArgSizes())
@@ -3826,7 +3829,7 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
     // that do not return to this frame. MachineFrameInfo::hasCalls excludes
     // both ordinary leaf functions and genuine tail calls, matching the native
     // assembler's definition rather than the IR-level presence of a call.
-    if (!MF.getFrameInfo().hasCalls())
+    if (!F.hasFnAttribute(Attribute::Naked) && !MF.getFrameInfo().hasCalls())
       Flag |= GoObj::SymFlagLeaf;
     if (MF.getFrameInfo().isGoObjNoSplit())
       Flag |= GoObj::SymFlagNoSplit;

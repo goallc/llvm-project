@@ -4,6 +4,11 @@
 # RUN: llvm-mc -triple=aarch64-apple-darwin-goobj -filetype=obj %s -o %t.split
 # RUN: %python %S/Inputs/dump-goobj.py %t.split | FileCheck %s --check-prefix=SPLIT
 
+# RUN: echo .goobj.assembly > %t.asm.s
+# RUN: cat %s >> %t.asm.s
+# RUN: llvm-mc -triple=aarch64-apple-darwin-goobj -filetype=obj %t.asm.s -o %t.asm
+# RUN: %python %S/Inputs/dump-goobj.py %t.asm | FileCheck %s --check-prefix=ASM
+
 # CHECK: header: go object darwin arm64
 # CHECK: nonpkgdef 0: caller abi=0 type=1 size=80
 # CHECK: nonpkgdef 1: callee abi=0 type=1 size=4
@@ -30,6 +35,12 @@
 # CHECK: reloc 3.14: off=0 size=4 type=36 add=0 target=data
 # CHECK: reloc 4.15: off=0 size=8 type=1 add=0 target=callee
 # CHECK: reloc 4.16: off=8 size=8 type=1 add=8 target=external.data
+
+# ASM: reloc {{[0-9]+}}.2: off=8 size=8 type=3 add=0 target=data
+# ASM-NEXT: reloc {{[0-9]+}}.3: off=16 size=8 type=37 add=0 target=data
+# ASM-NEXT: reloc {{[0-9]+}}.4: off=24 size=8 type=38 add=0 target=data
+# ASM-NEXT: reloc {{[0-9]+}}.5: off=32 size=8 type=39 add=0 target=data
+# ASM-NEXT: reloc {{[0-9]+}}.6: off=40 size=8 type=40 add=0 target=data
 
 # SPLIT: reloc 0.2: off=8 size=4 type=36 add=0 target=data
 # SPLIT-NEXT: reloc 0.3: off=12 size=4 type=36 add=0 target=data
