@@ -20,6 +20,7 @@ define goabi0 void @"test<ABI0>"() naked noinline {
 ; CHECK-NEXT: {{.*}}type=pcsp target= pc=[0-1:0,1-7:8,7-8:0]
 ; CHECK-NEXT: {{.*}}type=pcfile target= pc=[0-1:-1,1-8:0]
 ; CHECK-NEXT: {{.*}}type=pcline target= pc=[0-1:-1,1-8:11]
+; CHECK-NEXT: {{.*}}type=pcinline target= pc=[0-8:-1]
 ; CHECK-NEXT: {{.*}}type=pcdata target= pc=[0-8:-1]
 ; CHECK-NEXT: {{.*}}type=funcdata target=args
 ; CHECK-NEXT: reloc {{.*}} off=4 size=0 type=10 add=0 target=:0 kind=R_CALLIND

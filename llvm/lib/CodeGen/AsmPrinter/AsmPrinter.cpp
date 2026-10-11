@@ -858,7 +858,16 @@ getGoObjSymbolFlags(const GlobalObject *GO) {
       F && F->hasFnAttribute(goabi::NoSplitAttr))
     Flag |= GoObj::SymFlagNoSplit;
 
-  if (const MDNode *MD = GO->getMetadata("goobj.symbol.flags")) {
+  const MDNode *MD = GO->getMetadata("goobj.symbol.flags");
+  if (const MDNode *Exact = GO->getMetadata("goobj.symbol.flags.exact")) {
+    if (MD)
+      report_fatal_error("conflicting GoObj symbol flag metadata");
+    // Frontend-encoded assembly owns these flags. LLVM's private linkage is
+    // an object identity, not Go's independent LOCAL semantic attribute.
+    Flag = Flag2 = 0;
+    MD = Exact;
+  }
+  if (MD) {
     if (MD->getNumOperands() != 2)
       report_fatal_error("expected !goobj.symbol.flags to have two operands");
 

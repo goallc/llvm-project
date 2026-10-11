@@ -193,6 +193,44 @@ class GoObjAsmParser : public MCAsmParserExtension {
     return false;
   }
 
+  bool parseDirectiveAsmDebug(StringRef, SMLoc) {
+    const MCSymbol *Sym;
+    int64_t Version, Wrapper, External;
+    std::string File;
+    if (parseSymbol(Sym) || parseInteger(Version) || parseInteger(Wrapper) ||
+        parseInteger(External) || getParser().parseToken(AsmToken::Comma) ||
+        getParser().parseEscapedString(File) || parseEOL())
+      return true;
+    if ((Version != 4 && Version != 5) || (Wrapper != 0 && Wrapper != 1) ||
+        (External != 0 && External != 1) || File.empty())
+      return TokError("invalid GoObj assembly debug metadata");
+    auto &Info = getContext().getOrCreateGoObjAsmFunction(Sym);
+    if (Info.DwarfVersion)
+      return TokError("duplicate GoObj assembly debug metadata");
+    Info.DwarfVersion = Version;
+    Info.IsWrapper = Wrapper;
+    Info.IsExternal = External;
+    Info.DeclFile = std::move(File);
+    return false;
+  }
+
+  bool parseDirectiveAsmLine(StringRef, SMLoc) {
+    const MCSymbol *Sym, *Label;
+    int64_t Line, Flags;
+    std::string File;
+    if (parseSymbol(Sym) || getParser().parseToken(AsmToken::Comma) ||
+        parseSymbol(Label) || parseInteger(Line) || parseInteger(Flags) ||
+        getParser().parseToken(AsmToken::Comma) ||
+        getParser().parseEscapedString(File) || parseEOL())
+      return true;
+    if (Line <= 0 || Line > INT32_MAX || Flags < 0 || Flags > 3 || File.empty())
+      return TokError("invalid GoObj assembly debug line");
+    getContext().getOrCreateGoObjAsmFunction(Sym).DebugLines.push_back(
+        {Label, static_cast<uint32_t>(Line), bool(Flags & 1), bool(Flags & 2),
+         std::move(File)});
+    return false;
+  }
+
   bool parseDirectiveAsmFuncdata(StringRef, SMLoc) {
     const MCSymbol *Sym, *Target;
     int64_t Index;
@@ -229,6 +267,10 @@ public:
     addDirectiveHandler<&GoObjAsmParser::parseDirectiveAsmFunction>(
         ".goobj.asmfunc");
     addDirectiveHandler<&GoObjAsmParser::parseDirectiveAsmPC>(".goobj.asmpc");
+    addDirectiveHandler<&GoObjAsmParser::parseDirectiveAsmDebug>(
+        ".goobj.asmdebug");
+    addDirectiveHandler<&GoObjAsmParser::parseDirectiveAsmLine>(
+        ".goobj.asmline");
     addDirectiveHandler<&GoObjAsmParser::parseDirectiveAsmFuncdata>(
         ".goobj.asmfuncdata");
   }

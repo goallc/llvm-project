@@ -123,10 +123,20 @@ public:
     int32_t Value;
     std::string File;
   };
+  struct GoObjAsmDebugLine {
+    const MCSymbol *Label;
+    uint32_t Line;
+    bool IsStmt, PrologueEnd;
+    std::string File;
+  };
   struct GoObjAsmFunction {
     uint32_t Args = 0, Locals = 0;
     uint8_t FuncID = 0, FuncFlag = 0;
     int32_t StartLine = 0;
+    unsigned DwarfVersion = 0;
+    bool IsWrapper = false, IsExternal = false;
+    std::string DeclFile;
+    std::vector<GoObjAsmDebugLine> DebugLines;
     std::vector<GoObjAsmEvent> Events;
     std::vector<const MCSymbol *> Funcdata;
   };

@@ -3057,8 +3057,100 @@ uint64_t GoObjObjectWriter::writeObject() {
     EmitTable(-3, GoObj::AuxPcsp);
     EmitTable(-4, GoObj::AuxPcfile);
     EmitTable(-2, GoObj::AuxPcline);
+    EmitTable(-1, GoObj::AuxPcinline);
     for (unsigned PCData = 0; PCData < PCDataCount; ++PCData)
       EmitTable(PCData, GoObj::AuxPcdata);
+
+    if (Info->DwarfVersion) {
+      // Assembly supplies source rows for its fixed layout. Keep its DWARF
+      // independent from compiler-generated stack maps and DILocations.
+      unsigned PointerSize =
+          Asm->getContext().getAsmInfo().getCodePointerSize();
+      uint32_t DeclFile =
+          getOrAddFileIndex(FileIndexes, FilePaths, Info->DeclFile);
+      constexpr unsigned FunctionAbbrev = 3, WrapperAbbrev = 4;
+      GoObjDwarfCarrierData DIE;
+      appendUvarint(DIE.Data, Info->IsWrapper ? WrapperAbbrev : FunctionAbbrev);
+      appendCString(DIE.Data, Symbols[I].Name);
+      if (Info->DwarfVersion == 5) {
+        appendDwarfRelocation(DIE.Data, DIE.Relocations, 4,
+                              GoObj::R_DWTXTADDR_U4, 0, I);
+        appendUvarint(DIE.Data, CodeSize);
+      } else {
+        appendDwarfRelocation(DIE.Data, DIE.Relocations, PointerSize,
+                              GoObj::R_ADDR, 0, I);
+        appendDwarfRelocation(DIE.Data, DIE.Relocations, PointerSize,
+                              GoObj::R_ADDR, CodeSize, I);
+      }
+      DIE.Data.push_back(1);
+      DIE.Data.push_back(dwarf::DW_OP_call_frame_cfa);
+      if (Info->IsWrapper) {
+        DIE.Data.push_back(1); // DW_AT_artificial.
+      } else {
+        appendUint32LE(DIE.Data, DeclFile + 1);
+        appendUvarint(DIE.Data, Info->StartLine);
+        DIE.Data.push_back(Info->IsExternal);
+      }
+      DIE.Data.push_back(0); // End of children.
+      uint32_t DebugInfo = addDwarfCarrierSymbol(Symbols, "", GoObj::SDWARFFCN,
+                                                 0, std::move(DIE));
+      Symbols[I].Auxiliaries.emplace_back(GoObj::AuxDwarfInfo, DebugInfo);
+
+      GoObjDwarfCarrierData Lines;
+      Lines.Data.push_back(0);
+      appendUvarint(Lines.Data, 1 + PointerSize);
+      Lines.Data.push_back(dwarf::DW_LNE_set_address);
+      appendDwarfRelocation(Lines.Data, Lines.Relocations, PointerSize,
+                            GoObj::R_ADDR, 0, I);
+      uint32_t File = 1, Line = 1;
+      uint64_t PC = 0, PreviousRowPC = 0;
+      bool IsStmt = true;
+      for (const auto &Row : Info->DebugLines) {
+        if (!Row.Label->isInSection() ||
+            &Row.Label->getSection() != &Symbols[I].Symbol->getSection())
+          report_fatal_error("GoObj assembly debug label is outside function");
+        uint64_t Offset = Asm->getSymbolOffset(*Row.Label);
+        if (Offset < Symbols[I].SectionBegin ||
+            Offset > Symbols[I].SectionBegin + CodeSize)
+          report_fatal_error("GoObj assembly debug row exceeds function size");
+        uint64_t RowPC = Offset - Symbols[I].SectionBegin;
+        if (RowPC < PreviousRowPC)
+          report_fatal_error("GoObj assembly debug rows are not ordered");
+        PreviousRowPC = RowPC;
+        uint32_t RowFile =
+            getOrAddFileIndex(FileIndexes, FilePaths, Row.File) + 1;
+        bool Wrote = false;
+        if (File != RowFile) {
+          Lines.Data.push_back(dwarf::DW_LNS_set_file);
+          appendUvarint(Lines.Data, RowFile);
+          File = RowFile;
+          Wrote = true;
+        }
+        if (Row.PrologueEnd) {
+          Lines.Data.push_back(dwarf::DW_LNS_set_prologue_end);
+          Wrote = true;
+        }
+        if (IsStmt != Row.IsStmt) {
+          Lines.Data.push_back(dwarf::DW_LNS_negate_stmt);
+          IsStmt = Row.IsStmt;
+          Wrote = true;
+        }
+        if (Line != Row.Line || Wrote) {
+          appendDwarfPCLineDelta(Lines.Data, RowPC - PC,
+                                 int64_t(Row.Line) - Line);
+          PC = RowPC;
+          Line = Row.Line;
+        }
+      }
+      Lines.Data.push_back(dwarf::DW_LNS_advance_pc);
+      appendUvarint(Lines.Data, CodeSize - PC);
+      Lines.Data.push_back(0);
+      appendUvarint(Lines.Data, 1);
+      Lines.Data.push_back(dwarf::DW_LNE_end_sequence);
+      uint32_t DebugLines = addDwarfCarrierSymbol(
+          Symbols, "", GoObj::SDWARFLINES, 0, std::move(Lines));
+      Symbols[I].Auxiliaries.emplace_back(GoObj::AuxDwarfLines, DebugLines);
+    }
   }
 
   if (DwarfVersion != 0) {
