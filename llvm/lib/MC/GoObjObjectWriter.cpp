@@ -183,6 +183,8 @@ uint8_t getGoObjSymbolType(const MCSection *Section) {
     return GoObj::STEXT;
 
   StringRef Name = Section->getName();
+  if (Name == ".tbss" || Name.starts_with(".tbss."))
+    return GoObj::STLSBSS;
   if (Name.starts_with(".noptrdata"))
     return GoObj::SNOPTRDATA;
   if (Name.starts_with(".noptrbss"))
@@ -1721,6 +1723,7 @@ void GoObjObjectWriter::setAssembler(MCAssembler *Asm) {
 void GoObjObjectWriter::reset() {
   MCObjectWriter::reset();
   Relocations.clear();
+  AssemblyRelocations.clear();
 }
 
 bool GoObjObjectWriter::isSymbolRefDifferenceFullyResolvedImpl(
@@ -1756,6 +1759,11 @@ void GoObjObjectWriter::recordRelocation(const MCFragment &F,
 }
 
 uint64_t GoObjObjectWriter::writeObject() {
+  MCGoObjObjectWriterConfig Config = this->Config;
+  if (Asm->getContext().isGoObjFromAssembly()) {
+    Config.SourceKind = GoObj::SourceKind::Assembly;
+    Config.DefaultDefinedSymbolBlock = GoObj::DefinedSymbolBlock::Nonpkgdef;
+  }
   const uint64_t StartOffset = OS.tell();
 
   StringRef ABI0Suffix = GoObj::ABI0SymbolSuffix;
@@ -1834,6 +1842,12 @@ uint64_t GoObjObjectWriter::writeObject() {
                              : "Go ABI0 suffix requires a function symbol");
     if (Identity.IsFMVImplementation)
       return GoObj::SymABIstatic;
+    // Plan 9's static TEXT identity is independent of its calling convention.
+    // Keep an object-private ABI0 body private even though its IR name carries
+    // the ABI0 suffix used for lowering calls.
+    if (Asm->getContext().getGoObjAsmFunction(Sym) && Sym->isDefined() &&
+        !static_cast<const MCSymbolGoObj *>(Sym)->isExternal())
+      return GoObj::SymABIstatic;
     if (Identity.IsABI0)
       return GoObj::SymABI0;
     if (auto ABI = static_cast<const MCSymbolGoObj *>(Sym)->getGoABI())
@@ -1873,6 +1887,8 @@ uint64_t GoObjObjectWriter::writeObject() {
   };
   for (const GoObjRelocationEntry &Reloc : Relocations)
     AddPrivateTarget(Reloc.Symbol);
+  for (const auto &Reloc : AssemblyRelocations)
+    AddPrivateTarget(Reloc.Target);
   // Go linker edges have no MC fixup, but their private targets need the same
   // independent carriers as ordinary relocation targets.
   for (const MCSymbol &Symbol : Asm->symbols()) {
@@ -2210,7 +2226,8 @@ uint64_t GoObjObjectWriter::writeObject() {
     return Index;
   };
 
-  if (Config.SourceKind == GoObj::SourceKind::Compiler) {
+  if (Config.SourceKind == GoObj::SourceKind::Compiler ||
+      Asm->getContext().isGoObjFromAssembly()) {
     auto GetInlineIndex =
         [&](GoObjFuncDebugLines &Info,
             ArrayRef<MCContext::GoObjDebugInlineFrame> Frames) {
@@ -2368,6 +2385,9 @@ uint64_t GoObjObjectWriter::writeObject() {
          I != E; ++I) {
       if (Symbols[I].Type != GoObj::STEXT || Symbols[I].Size == 0 ||
           !Symbols[I].Symbol)
+        continue;
+
+      if (Asm->getContext().getGoObjAsmFunction(Symbols[I].Symbol))
         continue;
 
       uint32_t StackSize = Asm->getContext()
@@ -2970,6 +2990,165 @@ uint64_t GoObjObjectWriter::writeObject() {
     }
   }
 
+  // Explicit assembly metadata replaces compiler-generated frame/stack maps.
+  // In particular, absent FUNCDATA must stay absent, rather than becoming an
+  // empty compiler stack map which would hide assembly liveness errors.
+  for (uint32_t I = 0, E = checkedUint32(Symbols.size(), "symbol count");
+       I != E; ++I) {
+    const auto *Info = Asm->getContext().getGoObjAsmFunction(Symbols[I].Symbol);
+    if (!Info)
+      continue;
+    uint64_t CodeSize = Symbols[I].Size;
+    if (Info->ExpectedSize && CodeSize != *Info->ExpectedSize)
+      report_fatal_error("GoObj assembly function size differs from metadata");
+    DenseMap<int32_t, SmallVector<GoObjPCTabEntry, 8>> Tables;
+    SmallVector<uint32_t, 4> Files;
+    unsigned PCDataCount = 0;
+    for (const auto &Event : Info->Events) {
+      if (!Event.Label->isInSection() ||
+          &Event.Label->getSection() != &Symbols[I].Symbol->getSection())
+        report_fatal_error("GoObj assembly PC label is outside its function");
+      uint64_t Offset = Asm->getSymbolOffset(*Event.Label);
+      if (Offset < Symbols[I].SectionBegin ||
+          Offset > Symbols[I].SectionBegin + CodeSize)
+        report_fatal_error("GoObj assembly PC event exceeds function size");
+      uint64_t PC = Offset - Symbols[I].SectionBegin;
+      int32_t Value = Event.Value;
+      if (Event.Kind == -2) {
+        uint32_t File = getOrAddFileIndex(FileIndexes, FilePaths, Event.File);
+        if (!llvm::is_contained(Files, File))
+          Files.push_back(File);
+        Tables[-4].push_back({PC, static_cast<int32_t>(File)});
+      }
+      Tables[Event.Kind].push_back({PC, Value});
+      if (Event.Kind >= 0)
+        PCDataCount = std::max(PCDataCount, unsigned(Event.Kind) + 1);
+    }
+    auto EmitTable = [&](int32_t Kind, uint8_t AuxKind) {
+      auto &Events = Tables[Kind];
+      llvm::stable_sort(
+          Events, [](const auto &A, const auto &B) { return A.PC < B.PC; });
+      SmallVector<GoObjPCTabEntry, 8> Normalized;
+      int32_t Initial = Kind == -3 ? 0 : -1;
+      for (const auto &Event : Events) {
+        if (Event.PC >= CodeSize)
+          continue;
+        if (Event.PC == 0)
+          Initial = Event.Value;
+        else if (!Normalized.empty() && Normalized.back().PC == Event.PC)
+          Normalized.back().Value = Event.Value;
+        else
+          Normalized.push_back(Event);
+      }
+      uint32_t Carrier = getOrAddHashedAuxCarrierSymbol(
+          Symbols, AuxCarrierIndexes, 'P',
+          makePCTab(Initial, Normalized, CodeSize, PCQuantum));
+      Symbols[I].Auxiliaries.emplace_back(AuxKind, Carrier);
+    };
+    uint32_t FuncInfo = addAuxCarrierSymbol(
+        Symbols, GoObj::DefinedSymbolBlock::Symdef,
+        makeFuncInfoData(Info->Args, Info->Locals, Info->FuncID, Info->FuncFlag,
+                         Files, Info->StartLine, {}));
+    Symbols[I].Auxiliaries.emplace_back(GoObj::AuxFuncInfo, FuncInfo);
+    EmitTable(-3, GoObj::AuxPcsp);
+    EmitTable(-4, GoObj::AuxPcfile);
+    EmitTable(-2, GoObj::AuxPcline);
+    EmitTable(-1, GoObj::AuxPcinline);
+    for (unsigned PCData = 0; PCData < PCDataCount; ++PCData)
+      EmitTable(PCData, GoObj::AuxPcdata);
+
+    if (Info->DwarfVersion) {
+      // Assembly supplies source rows for its fixed layout. Keep its DWARF
+      // independent from compiler-generated stack maps and DILocations.
+      unsigned PointerSize =
+          Asm->getContext().getAsmInfo().getCodePointerSize();
+      uint32_t DeclFile =
+          getOrAddFileIndex(FileIndexes, FilePaths, Info->DeclFile);
+      constexpr unsigned FunctionAbbrev = 3, WrapperAbbrev = 4;
+      GoObjDwarfCarrierData DIE;
+      appendUvarint(DIE.Data, Info->IsWrapper ? WrapperAbbrev : FunctionAbbrev);
+      appendCString(DIE.Data, Symbols[I].Name);
+      if (Info->DwarfVersion == 5) {
+        appendDwarfRelocation(DIE.Data, DIE.Relocations, 4,
+                              GoObj::R_DWTXTADDR_U4, 0, I);
+        appendUvarint(DIE.Data, CodeSize);
+      } else {
+        appendDwarfRelocation(DIE.Data, DIE.Relocations, PointerSize,
+                              GoObj::R_ADDR, 0, I);
+        appendDwarfRelocation(DIE.Data, DIE.Relocations, PointerSize,
+                              GoObj::R_ADDR, CodeSize, I);
+      }
+      DIE.Data.push_back(1);
+      DIE.Data.push_back(dwarf::DW_OP_call_frame_cfa);
+      if (Info->IsWrapper) {
+        DIE.Data.push_back(1); // DW_AT_artificial.
+      } else {
+        appendUint32LE(DIE.Data, DeclFile + 1);
+        appendUvarint(DIE.Data, Info->StartLine);
+        DIE.Data.push_back(Info->IsExternal);
+      }
+      DIE.Data.push_back(0); // End of children.
+      uint32_t DebugInfo = addDwarfCarrierSymbol(Symbols, "", GoObj::SDWARFFCN,
+                                                 0, std::move(DIE));
+      Symbols[I].Auxiliaries.emplace_back(GoObj::AuxDwarfInfo, DebugInfo);
+
+      GoObjDwarfCarrierData Lines;
+      Lines.Data.push_back(0);
+      appendUvarint(Lines.Data, 1 + PointerSize);
+      Lines.Data.push_back(dwarf::DW_LNE_set_address);
+      appendDwarfRelocation(Lines.Data, Lines.Relocations, PointerSize,
+                            GoObj::R_ADDR, 0, I);
+      uint32_t File = 1, Line = 1;
+      uint64_t PC = 0, PreviousRowPC = 0;
+      bool IsStmt = true;
+      for (const auto &Row : Info->DebugLines) {
+        if (!Row.Label->isInSection() ||
+            &Row.Label->getSection() != &Symbols[I].Symbol->getSection())
+          report_fatal_error("GoObj assembly debug label is outside function");
+        uint64_t Offset = Asm->getSymbolOffset(*Row.Label);
+        if (Offset < Symbols[I].SectionBegin ||
+            Offset > Symbols[I].SectionBegin + CodeSize)
+          report_fatal_error("GoObj assembly debug row exceeds function size");
+        uint64_t RowPC = Offset - Symbols[I].SectionBegin;
+        if (RowPC < PreviousRowPC)
+          report_fatal_error("GoObj assembly debug rows are not ordered");
+        PreviousRowPC = RowPC;
+        uint32_t RowFile =
+            getOrAddFileIndex(FileIndexes, FilePaths, Row.File) + 1;
+        bool Wrote = false;
+        if (File != RowFile) {
+          Lines.Data.push_back(dwarf::DW_LNS_set_file);
+          appendUvarint(Lines.Data, RowFile);
+          File = RowFile;
+          Wrote = true;
+        }
+        if (Row.PrologueEnd) {
+          Lines.Data.push_back(dwarf::DW_LNS_set_prologue_end);
+          Wrote = true;
+        }
+        if (IsStmt != Row.IsStmt) {
+          Lines.Data.push_back(dwarf::DW_LNS_negate_stmt);
+          IsStmt = Row.IsStmt;
+          Wrote = true;
+        }
+        if (Line != Row.Line || Wrote) {
+          appendDwarfPCLineDelta(Lines.Data, RowPC - PC,
+                                 int64_t(Row.Line) - Line);
+          PC = RowPC;
+          Line = Row.Line;
+        }
+      }
+      Lines.Data.push_back(dwarf::DW_LNS_advance_pc);
+      appendUvarint(Lines.Data, CodeSize - PC);
+      Lines.Data.push_back(0);
+      appendUvarint(Lines.Data, 1);
+      Lines.Data.push_back(dwarf::DW_LNE_end_sequence);
+      uint32_t DebugLines = addDwarfCarrierSymbol(
+          Symbols, "", GoObj::SDWARFLINES, 0, std::move(Lines));
+      Symbols[I].Auxiliaries.emplace_back(GoObj::AuxDwarfLines, DebugLines);
+    }
+  }
+
   if (DwarfVersion != 0) {
     uint32_t PointerSize = Asm->getContext().getAsmInfo().getCodePointerSize();
     StringRef PackageName = Asm->getContext().getGoObjDwarfPackageName();
@@ -3042,7 +3221,8 @@ uint64_t GoObjObjectWriter::writeObject() {
   // Preserve physical kinds while building function metadata, then apply the
   // semantic kinds carried by explicit frontend sections. Read-only static
   // symbols synthesized after IR lowering use the module-level fallback.
-  if (Config.SourceKind == GoObj::SourceKind::Compiler) {
+  if (Config.SourceKind == GoObj::SourceKind::Compiler ||
+      Asm->getContext().isGoObjFromAssembly()) {
     for (GoObjSymbol &Symbol : Symbols) {
       std::optional<uint8_t> ExplicitType;
       ExplicitType = getGoObjExplicitSectionSymbolType(Symbol.Section);
@@ -3363,6 +3543,23 @@ uint64_t GoObjObjectWriter::writeObject() {
         " undefined=" + Twine(static_cast<unsigned>(Target->isUndefined())));
   };
 
+  for (GoObjSymbol &Symbol : Symbols) {
+    const auto *Info = Asm->getContext().getGoObjAsmFunction(Symbol.Symbol);
+    if (!Info)
+      continue;
+    for (const MCSymbol *Target : Info->Funcdata) {
+      GoObjSymRef Ref;
+      if (Target) {
+        int64_t Addend = 0;
+        Ref = GetTargetSymRef(Target, GoObj::R_ADDR, Addend);
+        if (Addend)
+          report_fatal_error(
+              "GoObj assembly FUNCDATA must name a whole symbol");
+      }
+      Symbol.Auxiliaries.emplace_back(GoObj::AuxFuncdata, Ref);
+    }
+  }
+
   SmallVector<GoObjRelocationEntry> MergedRelocations;
   for (const GoObjRelocationEntry &Reloc : Relocations) {
     bool SameSource = false;
@@ -3374,8 +3571,9 @@ uint64_t GoObjObjectWriter::writeObject() {
       SameSource =
           PreviousSource && CurrentSource && *PreviousSource == *CurrentSource;
     }
-    if (!SameSource ||
-        !TargetObjectWriter->mergeRelocations(MergedRelocations.back(), Reloc))
+    if (!SameSource || !TargetObjectWriter->mergeRelocations(
+                           MergedRelocations.back(), Reloc,
+                           Asm->getContext().isGoObjFromAssembly()))
       MergedRelocations.push_back(Reloc);
   }
 
@@ -3558,6 +3756,20 @@ uint64_t GoObjObjectWriter::writeObject() {
     if (Addend != 0)
       report_fatal_error("GoObj gotype auxiliary target has an addend");
     Source.Auxiliaries.emplace_back(GoObj::AuxGotype, TargetSymRef);
+  }
+
+  for (const auto &Reloc : AssemblyRelocations) {
+    auto It = DefinedSymbolIndexes.find(Reloc.Source);
+    if (It == DefinedSymbolIndexes.end() ||
+        uint64_t(Reloc.Offset) + Reloc.Size > Symbols[It->second].Size)
+      report_fatal_error("invalid Plan 9 assembly relocation extent");
+    int64_t Addend = Reloc.Addend;
+    GoObjSymRef Target = Reloc.Target
+                            ? GetTargetSymRef(Reloc.Target, Reloc.Type, Addend)
+                            : GoObjSymRef{};
+    Symbols[It->second].Relocations.push_back(
+        {Reloc.Offset, Reloc.Size, Reloc.Type, Addend, Target.PkgIdx,
+         Target.SymIdx, std::nullopt});
   }
 
   // FuncInfo stores inline callees as final Go SymRefs rather than

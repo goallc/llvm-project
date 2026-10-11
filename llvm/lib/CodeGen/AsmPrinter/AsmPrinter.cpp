@@ -230,7 +230,10 @@ public:
 
 static uint32_t getGoObjArgSize(const MachineFunction &MF) {
   const Function &F = MF.getFunction();
-  if (!goabi::isGoCallingConv(F.getCallingConv()))
+  // Naked Go assembly has no lowered formal arguments. Its real frame and
+  // argument size are supplied by its structured assembly metadata.
+  if (!goabi::isGoCallingConv(F.getCallingConv()) ||
+      F.hasFnAttribute(Attribute::Naked))
     return 0;
   const MachineFrameInfo &MFI = MF.getFrameInfo();
   if (!MFI.hasGoABIArgSizes())
@@ -855,7 +858,16 @@ getGoObjSymbolFlags(const GlobalObject *GO) {
       F && F->hasFnAttribute(goabi::NoSplitAttr))
     Flag |= GoObj::SymFlagNoSplit;
 
-  if (const MDNode *MD = GO->getMetadata("goobj.symbol.flags")) {
+  const MDNode *MD = GO->getMetadata("goobj.symbol.flags");
+  if (const MDNode *Exact = GO->getMetadata("goobj.symbol.flags.exact")) {
+    if (MD)
+      report_fatal_error("conflicting GoObj symbol flag metadata");
+    // Frontend-encoded assembly owns these flags. LLVM's private linkage is
+    // an object identity, not Go's independent LOCAL semantic attribute.
+    Flag = Flag2 = 0;
+    MD = Exact;
+  }
+  if (MD) {
     if (MD->getNumOperands() != 2)
       report_fatal_error("expected !goobj.symbol.flags to have two operands");
 
@@ -987,7 +999,141 @@ static StringRef getGoObjMetadataString(const MDOperand &Operand,
   return S->getString();
 }
 
+// A fixed-layout assembly carrier has one versioned function attachment:
+// {version, size, frame, PC events, FUNCDATA, debug info, indirect-call PCs}.
+// Symbol operands remain LLVM references, and all PCs are function offsets.
+static const MDNode &
+goObjAsmNode(const Metadata *MD, std::optional<unsigned> Arity = std::nullopt) {
+  const auto *N = dyn_cast_or_null<MDNode>(MD);
+  if (!N || (Arity && N->getNumOperands() != *Arity))
+    report_fatal_error("invalid !goobj.asm tuple");
+  return *N;
+}
+
+static const ConstantInt &goObjAsmInt(const Metadata *MD, unsigned Bits) {
+  const auto *V = mdconst::dyn_extract_or_null<ConstantInt>(MD);
+  if (!V || V->getBitWidth() != Bits)
+    report_fatal_error("invalid !goobj.asm integer width");
+  return *V;
+}
+
+static uint64_t goObjAsmUnsigned(const Metadata *MD, unsigned Bits,
+                                 uint64_t Max) {
+  uint64_t V = goObjAsmInt(MD, Bits).getZExtValue();
+  if (V > Max)
+    report_fatal_error("!goobj.asm integer out of range");
+  return V;
+}
+
+static void collectGoObjAssemblyMetadata(AsmPrinter &AP, const Module &M) {
+  constexpr unsigned Version = 1;
+  if (const NamedMDNode *Marker = M.getNamedMetadata("goobj.assembly")) {
+    // Linking modules concatenates identical version records.
+    if (!Marker->getNumOperands())
+      report_fatal_error("missing !goobj.assembly version");
+    for (const MDNode *Entry : Marker->operands()) {
+      const auto &N = goObjAsmNode(Entry, 1);
+      if (goObjAsmUnsigned(N.getOperand(0), 32, UINT32_MAX) != Version)
+        report_fatal_error("unsupported !goobj.assembly version");
+    }
+    AP.OutContext.setGoObjFromAssembly();
+  }
+  for (const Function &F : M) {
+    const MDNode *MD = F.getMetadata("goobj.asm");
+    if (!MD)
+      continue;
+    if (F.isDeclaration() || !F.hasFnAttribute(Attribute::Naked))
+      report_fatal_error("!goobj.asm requires a defined naked function");
+    const auto &N = goObjAsmNode(MD, 7);
+    if (goObjAsmUnsigned(N.getOperand(0), 32, UINT32_MAX) != Version)
+      report_fatal_error("unsupported !goobj.asm version");
+    uint64_t Size = goObjAsmUnsigned(N.getOperand(1), 64, INT64_MAX);
+    const MCSymbol *Sym = AP.getSymbol(&F);
+    auto &Info = AP.OutContext.getOrCreateGoObjAsmFunction(Sym);
+    Info.ExpectedSize = Size;
+    // The function attachment also identifies assembly in mixed IR modules.
+    AP.OutContext.setGoObjFromAssembly();
+    DenseMap<uint64_t, MCSymbol *> Labels;
+    auto LabelAt = [&](const Metadata *Offset, bool AllowEnd = true) {
+      uint64_t PC = goObjAsmUnsigned(Offset, 64, Size);
+      if (!AllowEnd && PC == Size)
+        report_fatal_error("!goobj.asm call offset is outside function");
+      auto [It, Inserted] = Labels.try_emplace(PC, nullptr);
+      if (Inserted) {
+        It->second = AP.OutContext.createTempSymbol("goasm_pc");
+        AP.OutStreamer->emitAssignment(
+            It->second,
+            MCBinaryExpr::createAdd(MCSymbolRefExpr::create(Sym, AP.OutContext),
+                                    MCConstantExpr::create(PC, AP.OutContext),
+                                    AP.OutContext));
+      }
+      return It->second;
+    };
+    const auto &Frame = goObjAsmNode(N.getOperand(2), 5);
+    Info.Args = goObjAsmUnsigned(Frame.getOperand(0), 32, UINT32_MAX);
+    Info.Locals = goObjAsmInt(Frame.getOperand(1), 32).getSExtValue();
+    Info.FuncID = goObjAsmUnsigned(Frame.getOperand(2), 32, UINT8_MAX);
+    Info.FuncFlag = goObjAsmUnsigned(Frame.getOperand(3), 32, UINT8_MAX);
+    Info.StartLine = goObjAsmUnsigned(Frame.getOperand(4), 32, INT32_MAX);
+    for (const MDOperand &Operand : goObjAsmNode(N.getOperand(3)).operands()) {
+      const auto &Event = goObjAsmNode(Operand, 4);
+      int64_t Kind = goObjAsmInt(Event.getOperand(1), 32).getSExtValue();
+      if (Kind != MCContext::GoObjAsmPCSP &&
+          Kind != MCContext::GoObjAsmPCLine && (Kind < 0 || Kind > UINT16_MAX))
+        report_fatal_error("invalid !goobj.asm PC event kind");
+      int32_t Value = goObjAsmInt(Event.getOperand(2), 32).getSExtValue();
+      StringRef File = getGoObjMetadataString(Event.getOperand(3), "goobj.asm");
+      if (Kind == MCContext::GoObjAsmPCLine && File.empty())
+        report_fatal_error("empty !goobj.asm PC file");
+      Info.Events.push_back(
+          {LabelAt(Event.getOperand(0)), int32_t(Kind), Value, File.str()});
+    }
+    for (const MDOperand &Operand : goObjAsmNode(N.getOperand(4)).operands()) {
+      const auto &Data = goObjAsmNode(Operand, 2);
+      unsigned Index = goObjAsmUnsigned(Data.getOperand(0), 32, UINT8_MAX);
+      const GlobalValue *Target =
+          getGoObjMetadataGlobal(Data.getOperand(1), "goobj.asm");
+      if (Info.Funcdata.size() <= Index)
+        Info.Funcdata.resize(Index + 1);
+      if (Info.Funcdata[Index])
+        report_fatal_error("duplicate !goobj.asm FUNCDATA index");
+      Info.Funcdata[Index] = AP.getSymbol(Target);
+    }
+    const auto &Debug = goObjAsmNode(N.getOperand(5));
+    if (Debug.getNumOperands()) {
+      goObjAsmNode(&Debug, 5);
+      Info.DwarfVersion = goObjAsmUnsigned(Debug.getOperand(0), 32, 5);
+      if (Info.DwarfVersion != 4 && Info.DwarfVersion != 5)
+        report_fatal_error("invalid !goobj.asm DWARF version");
+      Info.IsWrapper = goObjAsmUnsigned(Debug.getOperand(1), 32, 1);
+      Info.IsExternal = goObjAsmUnsigned(Debug.getOperand(2), 32, 1);
+      Info.DeclFile = getGoObjMetadataString(Debug.getOperand(3), "goobj.asm");
+      if (Info.DeclFile.empty())
+        report_fatal_error("empty !goobj.asm declaration file");
+      uint64_t PreviousPC = 0;
+      for (const MDOperand &Operand :
+           goObjAsmNode(Debug.getOperand(4)).operands()) {
+        const auto &Row = goObjAsmNode(Operand, 4);
+        uint64_t PC = goObjAsmUnsigned(Row.getOperand(0), 64, Size);
+        if (PC < PreviousPC)
+          report_fatal_error("!goobj.asm debug rows are not ordered");
+        PreviousPC = PC;
+        uint32_t Line = goObjAsmUnsigned(Row.getOperand(1), 32, INT32_MAX);
+        unsigned Flags = goObjAsmUnsigned(Row.getOperand(2), 32, 3);
+        StringRef File = getGoObjMetadataString(Row.getOperand(3), "goobj.asm");
+        if (!Line || File.empty())
+          report_fatal_error("invalid !goobj.asm debug row");
+        Info.DebugLines.push_back({LabelAt(Row.getOperand(0)), Line,
+                                   bool(Flags & 1), bool(Flags & 2),
+                                   File.str()});
+      }
+    }
+    for (const MDOperand &PC : goObjAsmNode(N.getOperand(6)).operands())
+      AP.OutContext.addGoObjSymbolIndirectCallLabel(Sym, LabelAt(PC, false));
+  }
+}
 static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
+  collectGoObjAssemblyMetadata(AP, M);
   if (const NamedMDNode *Imports = M.getNamedMetadata("goobj.imports")) {
     DenseSet<StringRef> Paths;
     DenseSet<StringRef> Prefixes;
@@ -3826,7 +3972,7 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
     // that do not return to this frame. MachineFrameInfo::hasCalls excludes
     // both ordinary leaf functions and genuine tail calls, matching the native
     // assembler's definition rather than the IR-level presence of a call.
-    if (!MF.getFrameInfo().hasCalls())
+    if (!F.hasFnAttribute(Attribute::Naked) && !MF.getFrameInfo().hasCalls())
       Flag |= GoObj::SymFlagLeaf;
     if (MF.getFrameInfo().isGoObjNoSplit())
       Flag |= GoObj::SymFlagNoSplit;

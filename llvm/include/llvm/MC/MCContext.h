@@ -115,6 +115,35 @@ public:
     }
   };
 
+  // Go assembly owns its frame and PC tables. Structured fixed-layout IR
+  // metadata supplies function-relative offsets; codegen materializes them as
+  // MC symbol expressions and the writer checks the final function size.
+  enum GoObjAsmPCKind { GoObjAsmPCSP = -3, GoObjAsmPCLine = -2 };
+  struct GoObjAsmEvent {
+    const MCSymbol *Label;
+    int32_t Kind; // GoObjAsmPCKind, or a nonnegative PCDATA index.
+    int32_t Value;
+    std::string File;
+  };
+  struct GoObjAsmDebugLine {
+    const MCSymbol *Label;
+    uint32_t Line;
+    bool IsStmt, PrologueEnd;
+    std::string File;
+  };
+  struct GoObjAsmFunction {
+    std::optional<uint64_t> ExpectedSize;
+    uint32_t Args = 0, Locals = 0;
+    uint8_t FuncID = 0, FuncFlag = 0;
+    int32_t StartLine = 0;
+    unsigned DwarfVersion = 0;
+    bool IsWrapper = false, IsExternal = false;
+    std::string DeclFile;
+    std::vector<GoObjAsmDebugLine> DebugLines;
+    std::vector<GoObjAsmEvent> Events;
+    std::vector<const MCSymbol *> Funcdata;
+  };
+
   struct GoObjPCSPEntry {
     const MCSymbol *Label;
     int32_t Value;
@@ -303,6 +332,8 @@ private:
   DenseSet<const MCSymbol *> GoObjFunctionSymbols;
 
   /// Package-local indices assigned to Go object definitions by the frontend.
+  bool GoObjFromAssembly = false;
+  DenseMap<const MCSymbol *, GoObjAsmFunction> GoObjAsmFunctions;
   DenseMap<const MCSymbol *, uint32_t> GoObjPackageSymbolIndexes;
 
   /// Semantic type for static read-only symbols synthesized after IR lowering.
@@ -863,6 +894,16 @@ public:
     if (It == GoObjSymbolFlags.end())
       return std::nullopt;
     return It->second;
+  }
+
+  void setGoObjFromAssembly() { GoObjFromAssembly = true; }
+  bool isGoObjFromAssembly() const { return GoObjFromAssembly; }
+  GoObjAsmFunction &getOrCreateGoObjAsmFunction(const MCSymbol *Sym) {
+    return GoObjAsmFunctions[Sym];
+  }
+  const GoObjAsmFunction *getGoObjAsmFunction(const MCSymbol *Sym) const {
+    auto It = GoObjAsmFunctions.find(Sym);
+    return It == GoObjAsmFunctions.end() ? nullptr : &It->second;
   }
 
   void setGoObjFunctionInfo(const MCSymbol *Sym, uint8_t FuncID,

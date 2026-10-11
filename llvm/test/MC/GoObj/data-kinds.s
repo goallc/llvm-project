@@ -6,6 +6,7 @@
 # CHECK-DAG: nonpkgdef {{[0-9]+}}: data abi=0 type=7 size=8
 # CHECK-DAG: nonpkgdef {{[0-9]+}}: bss abi=0 type=9 size=8
 # CHECK-DAG: nonpkgdef {{[0-9]+}}: noptrbss abi=0 type=10 size=8
+# CHECK-DAG: nonpkgdef {{[0-9]+}}: tls abi=0 type=11 size=8
 
 .section .noptrdata
 .globl noptrdata
@@ -25,4 +26,9 @@ bss:
 .section .noptrbss
 .globl noptrbss
 noptrbss:
+  .zero 8
+
+.section .tbss
+.globl tls
+tls:
   .zero 8
