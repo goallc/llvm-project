@@ -4,11 +4,12 @@
 ;
 ; Assembly owns the frame: no synthesized empty stack maps or compiler frame
 ; facts may replace its explicit FUNCDATA and post-instruction SP transitions.
-module asm ".goobj.assembly"
+!goobj.assembly = !{!0}
+!0 = !{i32 1}
 @args = external global i8
 
-define goabi0 void @"test<ABI0>"() naked noinline {
-  call void asm sideeffect "pushq %rbp\0A.Lpush:\0Amovq %rsp,%rbp\0A.Lcall:\0Acallq *%rax\0Apopq %rbp\0A.Lpop:\0Aretq\0A.goobj.asmfunc ${0:c}, 16, 8, 0, 4, 10\0A.goobj.asmpc ${0:c}, .Lpush, -3, 8\0A.goobj.asmpc ${0:c}, .Lpop, -3, 0\0A.goobj.asmpc ${0:c}, .Lpush, -2, 11, \22input.s\22\0A.goobj.asmpc ${0:c}, .Lpush, 0, -2\0A.goobj.asmpc ${0:c}, .Lpush, 0, -1\0A.goobj.asmpc ${0:c}, .Lcall, -5, 0\0A.goobj.asmfuncdata ${0:c}, 0, ${1:c}", "Ws,Ws,~{memory}"(ptr @"test<ABI0>", ptr @args)
+define goabi0 void @"test<ABI0>"() naked noinline !goobj.asm !1 {
+  call void asm sideeffect "pushq %rbp\0Amovq %rsp,%rbp\0Acallq *%rax\0Apopq %rbp\0Aretq", "Ws,~{memory}"(ptr @args)
   unreachable
 }
 
@@ -24,3 +25,16 @@ define goabi0 void @"test<ABI0>"() naked noinline {
 ; CHECK-NEXT: {{.*}}type=pcdata target= pc=[0-8:-1]
 ; CHECK-NEXT: {{.*}}type=funcdata target=args
 ; CHECK-NEXT: reloc {{.*}} off=4 size=0 type=10 add=0 target=:0 kind=R_CALLIND
+
+!1 = !{i32 1, i64 8, !2, !3, !9, !12, !11}
+!2 = !{i32 16, i32 8, i32 0, i32 4, i32 10}
+!3 = !{!4, !5, !6, !7, !8}
+!4 = !{i64 1, i32 -3, i32 8, !""}
+!5 = !{i64 7, i32 -3, i32 0, !""}
+!6 = !{i64 1, i32 -2, i32 11, !"input.s"}
+!7 = !{i64 1, i32 0, i32 -2, !""}
+!8 = !{i64 1, i32 0, i32 -1, !""}
+!9 = !{!10}
+!10 = !{i32 0, ptr @args}
+!11 = !{i64 4}
+!12 = !{}

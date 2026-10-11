@@ -2999,6 +2999,8 @@ uint64_t GoObjObjectWriter::writeObject() {
     if (!Info)
       continue;
     uint64_t CodeSize = Symbols[I].Size;
+    if (Info->ExpectedSize && CodeSize != *Info->ExpectedSize)
+      report_fatal_error("GoObj assembly function size differs from metadata");
     DenseMap<int32_t, SmallVector<GoObjPCTabEntry, 8>> Tables;
     SmallVector<uint32_t, 4> Files;
     unsigned PCDataCount = 0;
@@ -3012,12 +3014,6 @@ uint64_t GoObjObjectWriter::writeObject() {
         report_fatal_error("GoObj assembly PC event exceeds function size");
       uint64_t PC = Offset - Symbols[I].SectionBegin;
       int32_t Value = Event.Value;
-      if (Event.Kind == -4) {
-        if (PC != static_cast<uint64_t>(Event.Value))
-          report_fatal_error(
-              "GoObj assembly interior address changed during encoding");
-        continue;
-      }
       if (Event.Kind == -2) {
         uint32_t File = getOrAddFileIndex(FileIndexes, FilePaths, Event.File);
         if (!llvm::is_contained(Files, File))

@@ -115,11 +115,13 @@ public:
     }
   };
 
-  // Plan 9 assembly owns its complete frame and PC tables. Labels are resolved
-  // only after MC relaxation; no frontend instruction sizes are assumed.
+  // Go assembly owns its frame and PC tables. Structured fixed-layout IR
+  // metadata supplies function-relative offsets; codegen materializes them as
+  // MC symbol expressions and the writer checks the final function size.
+  enum GoObjAsmPCKind { GoObjAsmPCSP = -3, GoObjAsmPCLine = -2 };
   struct GoObjAsmEvent {
     const MCSymbol *Label;
-    int32_t Kind; // -4: fixed offset, -3: SP, -2: file/line, >=0: PCDATA.
+    int32_t Kind; // GoObjAsmPCKind, or a nonnegative PCDATA index.
     int32_t Value;
     std::string File;
   };
@@ -130,6 +132,7 @@ public:
     std::string File;
   };
   struct GoObjAsmFunction {
+    std::optional<uint64_t> ExpectedSize;
     uint32_t Args = 0, Locals = 0;
     uint8_t FuncID = 0, FuncFlag = 0;
     int32_t StartLine = 0;
