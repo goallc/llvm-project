@@ -54,6 +54,33 @@ class GoObjDebugHandler final : public DebugHandlerBase {
   uint64_t NextInlineSiteID = 1;
   DenseMap<const DILocalVariable *, MCContext::GoObjDebugVariable> VariableInfo;
 
+  using DwarfEmission = MCContext::GoObjDwarfEmission;
+
+  DwarfEmission getDwarfEmission(const DICompileUnit *CU) const {
+    // The module configuration selects the Go DWARF encoding, not the
+    // emission policy of every CU. LTO can combine FullDebug CUs with
+    // LineTablesOnly CUs. Like the native Go compiler with -dwarf=false,
+    // the latter need minimal function DIEs and line tables for the linker,
+    // while retaining inline source locations for runtime PCDATA.
+    if (Asm.OutContext.getGoObjDwarfVersion() == 0 || !CU)
+      return DwarfEmission::None;
+    if (CU->getEmissionKind() == DICompileUnit::FullDebug)
+      return DwarfEmission::Full;
+    if (CU->getEmissionKind() == DICompileUnit::LineTablesOnly)
+      return DwarfEmission::Minimal;
+    return DwarfEmission::None;
+  }
+
+  DwarfEmission getDwarfEmission(const DISubprogram *SP) const {
+    return SP ? getDwarfEmission(SP->getUnit()) : DwarfEmission::None;
+  }
+
+  bool emitsFunctionDwarf() const {
+    const auto *Info =
+        Asm.OutContext.getGoObjFunctionDebugInfo(CurrentFunction);
+    return Info && Info->DwarfEmission == DwarfEmission::Full;
+  }
+
   static std::string filePath(const DIFile *File) {
     if (!File)
       return "llvm-ir";
@@ -268,7 +295,7 @@ class GoObjDebugHandler final : public DebugHandlerBase {
 
   void collectLexicalScopes(const MachineFunction &MF) {
     LexicalScope *Root = LScopes.getCurrentFunctionScope();
-    if (!CurrentFunction || !Root || Asm.OutContext.getGoObjDwarfVersion() == 0)
+    if (!CurrentFunction || !Root || !emitsFunctionDwarf())
       return;
     std::vector<MCContext::GoObjDebugScope> Scopes(1);
     DenseMap<const DILocalScope *, unsigned> Indexes;
@@ -305,7 +332,7 @@ class GoObjDebugHandler final : public DebugHandlerBase {
   }
 
   void collectVariableLocations(const MachineFunction &MF) {
-    if (!CurrentFunction || Asm.OutContext.getGoObjDwarfVersion() == 0)
+    if (!CurrentFunction || !emitsFunctionDwarf())
       return;
     auto Add = [&](unsigned Index, const MCSymbol *Begin, const MCSymbol *End,
                    std::vector<uint8_t> Bytes) {
@@ -487,6 +514,8 @@ public:
         if (!SP || !SubprogramSymbols.contains(SP))
           report_fatal_error(
               "GoObj debug variable has no exact subprogram symbol");
+        if (getDwarfEmission(SP) != DwarfEmission::Full)
+          continue;
 
         MCContext::GoObjDebugVariable Result;
         Result.Name = Var->getName().str();
@@ -515,7 +544,7 @@ public:
       }
     }
 
-    if (DwarfVersion != 0) {
+    {
       // Multiple inline instances can describe the same emitted function.
       // Merge their variable manifests instead of overwriting one another in
       // pointer-hash order, which loses variables and makes DWARF unstable.
@@ -525,7 +554,7 @@ public:
           SymbolDebugInfo;
       for (const auto &[SP, Symbol] : SubprogramSymbols) {
         auto &Info = SymbolDebugInfo[Symbol];
-        if (!Info.first)
+        if (!Info.first || getDwarfEmission(Info.first) < getDwarfEmission(SP))
           Info.first = SP;
         auto &Vars = Variables[SP];
         Info.second.insert(Info.second.end(),
@@ -567,7 +596,7 @@ public:
                           SPVariables.end());
         Asm.OutStreamer->getContext().setGoObjSubprogramDebugInfo(
             Symbol, SP->getName(), filePath(SP->getFile()), SP->getLine(),
-            std::move(SPVariables));
+            getDwarfEmission(SP), std::move(SPVariables));
       }
     }
 
@@ -580,6 +609,18 @@ public:
           const DIGlobalVariable *Variable = Expression->getVariable();
           if (!Variable)
             report_fatal_error("GoObj global debug attachment has no variable");
+          const DIScope *Scope = Variable->getScope();
+          while (Scope && !isa<DICompileUnit>(Scope)) {
+            if (const auto *SP = dyn_cast<DISubprogram>(Scope)) {
+              Scope = SP->getUnit();
+              break;
+            }
+            Scope = Scope->getScope();
+          }
+          // Native Go retains global-variable DIEs with -dwarf=false.
+          if (getDwarfEmission(dyn_cast_or_null<DICompileUnit>(Scope)) ==
+              DwarfEmission::None)
+            continue;
           MCContext::GoObjDebugGlobal Result;
           Result.Symbol = Asm.getSymbol(&GV);
           Result.Name = Variable->getName().str();
@@ -608,12 +649,14 @@ public:
     PreviousLocation = DebugLoc();
     CurrentFunction = nullptr;
     const DISubprogram *SP = MF->getFunction().getSubprogram();
-    if (!SP || SP->getUnit()->getEmissionKind() == DICompileUnit::NoDebug)
+    if (!SP || !SP->getUnit() ||
+        SP->getUnit()->getEmissionKind() == DICompileUnit::NoDebug)
       return;
 
     CurrentFunction = Asm.getSymbol(&MF->getFunction());
     Asm.OutStreamer->getContext().setGoObjFunctionSource(
-        CurrentFunction, filePath(SP->getFile()), SP->getLine());
+        CurrentFunction, filePath(SP->getFile()), SP->getLine(),
+        getDwarfEmission(SP));
   }
 
   void endFunctionImpl(const MachineFunction *MF) override {

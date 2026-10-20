@@ -2484,6 +2484,8 @@ uint64_t GoObjObjectWriter::writeObject() {
       const auto *FunctionDebugInfo =
           Asm->getContext().getGoObjFunctionDebugInfo(Symbols[I].Symbol);
       if (DwarfVersion != 0 && FunctionDebugInfo &&
+          FunctionDebugInfo->DwarfEmission !=
+              MCContext::GoObjDwarfEmission::None &&
           !FunctionDebugInfo->Name.empty()) {
         // Derive inline DIE ranges from the same final-layout transitions that
         // feed PCDATA_InlTreeIndex. This keeps runtime traceback and debugger
@@ -2491,6 +2493,9 @@ uint64_t GoObjObjectWriter::writeObject() {
         std::vector<std::vector<GoObjDwarfRange>> InlineRanges(
             LineInfo.InlineTree.size());
         for (size_t Event = 0; Event < LineInfo.PCInline.size(); ++Event) {
+          if (FunctionDebugInfo->DwarfEmission !=
+              MCContext::GoObjDwarfEmission::Full)
+            break;
           uint64_t Begin = LineInfo.PCInline[Event].PC;
           uint64_t End = Event + 1 < LineInfo.PCInline.size()
                              ? LineInfo.PCInline[Event + 1].PC
@@ -2520,6 +2525,12 @@ uint64_t GoObjObjectWriter::writeObject() {
           // that range to every ancestor above, so an empty node cannot hide a
           // non-empty subtree.
           if (InlineRanges[Node].empty())
+            continue;
+          const auto *InlineDebugInfo =
+              Asm->getContext().getGoObjFunctionDebugInfo(
+                  LineInfo.InlineTree[Node].Callee);
+          if (InlineDebugInfo && InlineDebugInfo->DwarfEmission !=
+                                     MCContext::GoObjDwarfEmission::Full)
             continue;
           AbstractSymbols[Node] =
               GetOrAddDwarfAbstract(LineInfo.InlineTree[Node].Callee);
@@ -2556,7 +2567,7 @@ uint64_t GoObjObjectWriter::writeObject() {
         };
         std::vector<uint32_t> RangeOffsets(LineInfo.InlineTree.size());
         for (size_t Node = 0; Node < InlineRanges.size(); ++Node)
-          if (!InlineRanges[Node].empty() &&
+          if (AbstractSymbols[Node] && !InlineRanges[Node].empty() &&
               (DwarfVersion == 5 || InlineRanges[Node].size() > 1))
             RangeOffsets[Node] = AppendRanges(InlineRanges[Node]);
 
@@ -2691,7 +2702,9 @@ uint64_t GoObjObjectWriter::writeObject() {
         if (const auto *Markers =
                 Asm->getContext().getGoObjMarkerRelocs(Symbols[I].Symbol))
           for (const auto &Marker : *Markers)
-            if (Marker.Type == GoObj::R_USEIFACE &&
+            if (FunctionDebugInfo->DwarfEmission ==
+                    MCContext::GoObjDwarfEmission::Full &&
+                Marker.Type == GoObj::R_USEIFACE &&
                 !GetSymbolName(Marker.Target).starts_with("go:itab.")) {
               GoObjSymbol::Relocation UseType;
               UseType.Type = GoObj::R_USETYPE;
@@ -2749,6 +2762,16 @@ uint64_t GoObjObjectWriter::writeObject() {
           const auto &Ranges = InlineRanges[Node];
           if (Ranges.empty())
             return;
+          if (!AbstractSymbols[Node]) {
+            // Keep runtime-only inline frames in PCDATA, but omit their
+            // DWARF DIEs. Debug-enabled descendants still belong to the
+            // nearest emitted ancestor.
+            for (uint32_t Child = 0; Child < LineInfo.InlineTree.size();
+                 ++Child)
+              if (LineInfo.InlineTree[Child].Parent == Node)
+                EmitInline(static_cast<int32_t>(Child));
+            return;
+          }
           bool UseRanges = DwarfVersion == 5 || Ranges.size() > 1;
           appendUvarint(InfoCarrier.Data, UseRanges ? 9 : 8);
           appendDwarfRelocation(InfoCarrier.Data, InfoCarrier.Relocations, 4,
