@@ -230,7 +230,12 @@ public:
     std::vector<std::pair<const MCSymbol *, const MCSymbol *>> Ranges;
   };
 
+  enum class GoObjDwarfEmission { None, Minimal, Full };
+
   struct GoObjFunctionDebugInfo {
+    // Source locations are also required by runtime PCDATA. Their presence
+    // does not imply that this function should have DWARF carriers.
+    GoObjDwarfEmission DwarfEmission = GoObjDwarfEmission::None;
     std::string Name;
     std::string File;
     uint32_t StartLine = 0;
@@ -1100,16 +1105,20 @@ public:
   }
 
   void setGoObjFunctionSource(const MCSymbol *Sym, StringRef File,
-                              uint32_t StartLine) {
+                              uint32_t StartLine,
+                              GoObjDwarfEmission DwarfEmission) {
     GoObjFunctionDebugInfo &Info = GoObjFunctionDebugInfos[Sym];
+    Info.DwarfEmission = DwarfEmission;
     Info.File = File.str();
     Info.StartLine = StartLine;
   }
 
   void setGoObjSubprogramDebugInfo(const MCSymbol *Sym, StringRef Name,
                                    StringRef File, uint32_t StartLine,
+                                   GoObjDwarfEmission DwarfEmission,
                                    std::vector<GoObjDebugVariable> Variables) {
     GoObjFunctionDebugInfo &Info = GoObjFunctionDebugInfos[Sym];
+    Info.DwarfEmission = DwarfEmission;
     Info.Name = Name.str();
     Info.File = File.str();
     Info.StartLine = StartLine;
