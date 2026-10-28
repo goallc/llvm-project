@@ -2,9 +2,9 @@
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.x86.o | FileCheck %s
 ; RUN: llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj %s -o %t.arm64.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.arm64.o | FileCheck %s
-; RUN: sed 's/!"dwarf4"/!"dwarf5"/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.v5.o
+; RUN: sed 's/!"Dwarf Version", i32 4/!"Dwarf Version", i32 5/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.v5.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.v5.o | FileCheck %s
-; RUN: sed 's/!"dwarf4"/!"dwarf5"/' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.arm64v5.o
+; RUN: sed 's/!"Dwarf Version", i32 4/!"Dwarf Version", i32 5/' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.arm64v5.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.arm64v5.o | FileCheck %s
 
 ; Optimizers can clone a function and its DISubprogram without adding entries
