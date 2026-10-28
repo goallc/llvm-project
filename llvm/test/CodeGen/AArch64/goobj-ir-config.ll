@@ -3,12 +3,15 @@
 ; RUN: llc -filetype=obj < %t/legacy.ll -o %t.legacy.o
 ; RUN: llc -filetype=obj < %t/native.ll -o %t.native.o
 ; RUN: cmp %t.legacy.o %t.native.o
+; RUN: sed 's/0000000000000000/0102030405060708/' %t/native.ll | llc -filetype=obj -o %t.fingerprint.o
+; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.fingerprint.o | FileCheck %s --check-prefix=FINGERPRINT
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.native.o | FileCheck %s
 ; RUN: sed 's/!llvm.module.flags = !{!2}//' %t/native.ll | not llc -filetype=obj -o /dev/null 2>&1 | FileCheck %s --check-prefix=MISSING
 ; RUN: llvm-link -S %t/native.ll %t/compatible.ll -o - | FileCheck %s --check-prefix=MERGE
 ; RUN: not llvm-link %t/native.ll %t/incompatible.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONFLICT
 ; RUN: not llvm-link %t/incompatible.ll %t/native.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONFLICT
 
+; FINGERPRINT: fingerprint: 0102030405060708
 ; MISSING: goobj.abi module flag must contain eight fields
 ; MERGE: !llvm.module.flags = !{![[FLAG:[0-9]+]]}
 ; MERGE: ![[FLAG]] = !{i32 1, !"goobj.abi", ![[ABI:[0-9]+]]}
