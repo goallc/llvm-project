@@ -41,7 +41,7 @@ attributes #0 = { "frame-pointer"="all" }
 !4 = !{null, !2}
 !5 = !{i32 2, !"Dwarf Version", i32 5}
 !6 = !{i32 2, !"Debug Info Version", i32 3}
-!7 = !{!"pcln-v1", !"dwarf-v1", !"dwarf5", !"main"}
+!7 = !{!"pcln-v1", !"main"}
 !8 = !{!10, ptr @nested}
 !10 = distinct !DISubprogram(name: "nested", linkageName: "nested", file: !1, line: 1, type: !3, scopeLine: 1, spFlags: DISPFlagDefinition, unit: !0, retainedNodes: !11)
 !11 = !{!12, !15, !16}

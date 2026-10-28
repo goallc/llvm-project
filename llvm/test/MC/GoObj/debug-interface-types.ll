@@ -28,7 +28,7 @@ define goabiinternal void @main.main() !dbg !10 {
 !3 = !DISubroutineType(types: !2)
 !5 = !{i32 7, !"Dwarf Version", i32 4}
 !6 = !{i32 2, !"Debug Info Version", i32 3}
-!7 = !{!"pcln-v1", !"dwarf-v1", !"dwarf4", !"main"}
+!7 = !{!"pcln-v1", !"main"}
 !8 = !{!10, ptr @main.main}
 !10 = distinct !DISubprogram(name: "main.main", linkageName: "main.main", scope: !1, file: !1, line: 3, type: !3, scopeLine: 3, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
 !11 = !DILocation(line: 4, column: 2, scope: !10)

@@ -2,9 +2,9 @@
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.dwarf4.o | FileCheck %s --check-prefixes=COMMON,DWARF4
 ; RUN: opt -passes='default<O2>' < %s | llc -mtriple=x86_64-unknown-linux-goobj -goobj-package-path=main -filetype=obj -o %t.o2.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o2.o | FileCheck %s --check-prefixes=COMMON,DWARF4
-; RUN: sed 's/!"dwarf4"/!"dwarf5"/' %s | llc -mtriple=x86_64-unknown-linux-goobj -goobj-package-path=main -filetype=obj -o %t.dwarf5.o
+; RUN: sed 's/!"Dwarf Version", i32 4/!"Dwarf Version", i32 5/' %s | llc -mtriple=x86_64-unknown-linux-goobj -goobj-package-path=main -filetype=obj -o %t.dwarf5.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.dwarf5.o | FileCheck %s --check-prefixes=COMMON,DWARF5
-; RUN: sed '/^!goobj.gotype =/d' %s | not --crash llc -mtriple=x86_64-unknown-linux-goobj -goobj-package-path=main -filetype=obj -o /dev/null 2>&1 | FileCheck %s --check-prefix=MISSING-GOTYPE
+; RUN: sed 's/, !goobj.gotype ![0-9][0-9]*//g' %s | not --crash llc -mtriple=x86_64-unknown-linux-goobj -goobj-package-path=main -filetype=obj -o /dev/null 2>&1 | FileCheck %s --check-prefix=MISSING-GOTYPE
 
 ; The frontend sends source semantics in standard LLVM DI metadata plus exact
 ; GoObj identity/configuration metadata. The GoObj backend must retain its
@@ -14,9 +14,9 @@
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-linux-goobj"
 
-@"main.global" = global i64 0, !dbg !40, !dbg !42
+@"main.global" = global i64 0, !dbg !40, !dbg !42, !goobj.gotype !44
 @"type:int" = constant [1 x i8] zeroinitializer, section ".rodata"
-@"main.pointer" = global ptr null, !dbg !45
+@"main.pointer" = global ptr null, !dbg !45, !goobj.gotype !49
 @"type:unsafe.Pointer<builtin.287>" = external global i8
 @llvm.compiler.used = appending global [1 x ptr] [ptr @"type:unsafe.Pointer<builtin.287>"], section "llvm.metadata"
 @"main..dict.testfn[main.CustomInt]" = constant [8 x i8] zeroinitializer
@@ -38,7 +38,6 @@ entry:
 !goobj.debug.config = !{!7}
 !goobj.debug.funcs = !{!8, !9}
 !goobj.debug.vars = !{!15, !25}
-!goobj.gotype = !{!44, !49}
 
 !0 = distinct !DICompileUnit(language: DW_LANG_Go, file: !1, producer: "Go compiler", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug)
 !1 = !DIFile(filename: "debug.go", directory: "/tmp/goobj-debug")
@@ -47,7 +46,7 @@ entry:
 !4 = !{!2, !2}
 !5 = !{i32 2, !"Dwarf Version", i32 4}
 !6 = !{i32 2, !"Debug Info Version", i32 3}
-!7 = !{!"pcln-v1", !"dwarf-v1", !"dwarf4", !"main"}
+!7 = !{!"pcln-v1", !"main"}
 !8 = !{!10, ptr @"main.debug"}
 !9 = !{!20, ptr @"main.inline"}
 
@@ -68,11 +67,11 @@ entry:
 !41 = distinct !DIGlobalVariable(name: "main.global", linkageName: "main.global", scope: !0, file: !1, line: 2, type: !2, isLocal: false, isDefinition: true)
 !42 = !DIGlobalVariableExpression(var: !43, expr: !DIExpression())
 !43 = distinct !DIGlobalVariable(name: "main.global.alias", linkageName: "main.global", scope: !0, file: !1, line: 2, type: !2, isLocal: false, isDefinition: true)
-!44 = !{ptr @"main.global", ptr @"type:int"}
+!44 = !{ptr @"type:int"}
 !45 = !DIGlobalVariableExpression(var: !46, expr: !DIExpression())
 !46 = distinct !DIGlobalVariable(name: "main.pointer", linkageName: "main.pointer", scope: !0, file: !1, line: 3, type: !47, isLocal: false, isDefinition: true)
 !47 = !DIBasicType(name: "unsafe.Pointer", size: 64, encoding: DW_ATE_address)
-!49 = !{ptr @"main.pointer", ptr @"type:unsafe.Pointer<builtin.287>"}
+!49 = !{ptr @"type:unsafe.Pointer<builtin.287>"}
 
 ; COMMON: symdef {{[0-9]+}}: main.inline abi=1 type=1 {{.*}} kind=STEXT
 ; COMMON: symdef {{[0-9]+}}: main.debug abi=1 type=1 {{.*}} kind=STEXT

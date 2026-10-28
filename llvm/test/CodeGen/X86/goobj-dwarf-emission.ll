@@ -6,18 +6,12 @@
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.min.o | FileCheck %s --check-prefixes=COMMON,MINIMAL --implicit-check-not=SDWARFABSFCN
 ; RUN: sed 's/FullDebug/LineTablesOnly/g' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.min.arm64.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.min.arm64.o | FileCheck %s --check-prefixes=COMMON,MINIMAL --implicit-check-not=SDWARFABSFCN
-; RUN: sed 's/!"dwarf5"/!"dwarf4"/; s/i32 5}/i32 4}/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.v4.o
+; RUN: sed 's/i32 5}/i32 4}/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.v4.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.v4.o | FileCheck %s --check-prefixes=COMMON,MIXED
-; RUN: sed '/^!goobj.debug.vars =/d; s/!"pcln-v1", !"dwarf-v1", !"dwarf5", !"main"/!"pcln-v1"/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.pcln.o
+; RUN: sed '/^!goobj.debug.vars =/d; /^!goobj.debug.config =/d' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.pcln.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.pcln.o | FileCheck %s --check-prefix=PCLN --implicit-check-not=SDWARF --implicit-check-not=type=dwarf_
 
-; RUN: sed 's/!"dwarf-v1", !"dwarf5", //' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.native.x86.o
-; RUN: cmp %t.x86.o %t.native.x86.o
-; RUN: sed 's/!"dwarf-v1", !"dwarf5", //' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.native.arm64.o
-; RUN: cmp %t.arm64.o %t.native.arm64.o
-; RUN: sed 's/!"dwarf-v1", !"dwarf5", //; s/i32 5}/i32 4}/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.native.v4.o
-; RUN: cmp %t.v4.o %t.native.v4.o
-; RUN: sed 's/!"dwarf-v1", !"dwarf5", //; s/!llvm.module.flags = !{!5, !6}/!llvm.module.flags = !{!6}/' %s | not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o /dev/null 2>&1 | FileCheck %s --check-prefix=VERSION
+; RUN: sed 's/!llvm.module.flags = !{!5, !6}/!llvm.module.flags = !{!6}/' %s | not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o /dev/null 2>&1 | FileCheck %s --check-prefix=VERSION
 ; VERSION: GoObj debug config requires Dwarf Version 4 or 5 and a package name
 
 ; LTO may combine FullDebug and LineTablesOnly CUs. The module config only
@@ -25,8 +19,8 @@
 ; function needs a minimal DIE and line table, but no variables or inline DIEs.
 ; Runtime PC tables must survive all three emission modes.
 
-@"main.full.global" = global i64 0, !dbg !50
-@"main.minimal.global" = global i64 0, !dbg !52
+@"main.full.global" = global i64 0, !dbg !50, !goobj.gotype !54
+@"main.minimal.global" = global i64 0, !dbg !52, !goobj.gotype !55
 @"type:int" = constant i8 0
 
 define goabiinternal i64 @full(i64 %x) !dbg !10 {
@@ -45,7 +39,6 @@ define goabiinternal i64 @minimal(i64 %x) !dbg !20 {
 !goobj.debug.config = !{!7}
 !goobj.debug.funcs = !{!8, !9}
 !goobj.debug.vars = !{!16, !26}
-!goobj.gotype = !{!54, !55}
 
 !0 = distinct !DICompileUnit(language: DW_LANG_Go, file: !2, producer: "Go compiler", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug)
 !1 = distinct !DICompileUnit(language: DW_LANG_Go, file: !3, producer: "Go compiler", isOptimized: true, runtimeVersion: 0, emissionKind: LineTablesOnly)
@@ -54,7 +47,7 @@ define goabiinternal i64 @minimal(i64 %x) !dbg !20 {
 !4 = !DISubroutineType(types: !17)
 !5 = !{i32 2, !"Dwarf Version", i32 5}
 !6 = !{i32 2, !"Debug Info Version", i32 3}
-!7 = !{!"pcln-v1", !"dwarf-v1", !"dwarf5", !"main"}
+!7 = !{!"pcln-v1", !"main"}
 !8 = !{!10, ptr @full}
 !9 = !{!20, ptr @minimal}
 !10 = distinct !DISubprogram(name: "full", linkageName: "full", file: !2, line: 10, type: !4, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0, retainedNodes: !14)
@@ -73,8 +66,8 @@ define goabiinternal i64 @minimal(i64 %x) !dbg !20 {
 !51 = distinct !DIGlobalVariable(name: "main.full.global", linkageName: "main.full.global", scope: !0, file: !2, line: 2, type: !18, isLocal: false, isDefinition: true)
 !52 = !DIGlobalVariableExpression(var: !53, expr: !DIExpression())
 !53 = distinct !DIGlobalVariable(name: "main.minimal.global", linkageName: "main.minimal.global", scope: !1, file: !3, line: 2, type: !18, isLocal: false, isDefinition: true)
-!54 = !{ptr @"main.full.global", ptr @"type:int"}
-!55 = !{ptr @"main.minimal.global", ptr @"type:int"}
+!54 = !{ptr @"type:int"}
+!55 = !{ptr @"type:int"}
 
 ; COMMON: symdef [[FULL:[0-9]+]]: full abi=1
 ; COMMON: symdef [[MIN:[0-9]+]]: minimal abi=1

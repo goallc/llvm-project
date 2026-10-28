@@ -1,8 +1,6 @@
 ; REQUIRES: aarch64-registered-target
 ; RUN: split-file %s %t
-; RUN: llc -filetype=obj < %t/legacy.ll -o %t.legacy.o
 ; RUN: llc -filetype=obj < %t/native.ll -o %t.native.o
-; RUN: cmp %t.legacy.o %t.native.o
 ; RUN: sed 's/0000000000000000/0102030405060708/' %t/native.ll | llc -filetype=obj -o %t.fingerprint.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.fingerprint.o | FileCheck %s --check-prefix=FINGERPRINT
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.native.o | FileCheck %s
@@ -17,20 +15,6 @@
 ; MERGE: ![[FLAG]] = !{i32 1, !"goobj.abi", ![[ABI:[0-9]+]]}
 ; MERGE: ![[ABI]] = !{!"goallc.goobj", !"darwin", !"arm64", !"go1.27",
 ; CONFLICT: linking module flags 'goobj.abi': IDs have conflicting values
-
-;--- legacy.ll
-; The Go frontend embeds the complete Go object text header and GoObj binary
-; settings in the IR. llc must not need a matching set of -goobj-* flags.
-target triple = "aarch64-apple-darwin-goobj"
-
-define goabiinternal void @main.main() {
-entry:
-  ret void
-}
-
-!goobj.config = !{!0}
-!0 = !{!"goallc.goobj", !"darwin", !"arm64", !"go1.27", !"GOARM64", !"v8.0", !"metadata-build", !"main", !"1", !"1", !"1", !1}
-!1 = !{!"metadata-test"}
 
 ; CHECK: header: go object darwin arm64 go1.27 GOARM64=v8.0 X:metadata-test\nbuild id "metadata-build"\nmain\n\n!\n
 ; CHECK: flags: 17

@@ -25,7 +25,7 @@ define goabiinternal i64 @"main.shared"(i64 %x) !dbg !10 {
 !4 = !{!2, !2}
 !5 = !{i32 2, !"Dwarf Version", i32 4}
 !6 = !{i32 2, !"Debug Info Version", i32 3}
-!7 = !{!"pcln-v1", !"dwarf-v1", !"dwarf4", !"main"}
+!7 = !{!"pcln-v1", !"main"}
 !8 = !{!10, ptr @"main.shared"}
 !9 = !{!20, ptr @"main.shared"}
 !10 = distinct !DISubprogram(name: "main.shared", linkageName: "main.shared", file: !1, line: 3, type: !3, scopeLine: 3, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0, retainedNodes: !11)

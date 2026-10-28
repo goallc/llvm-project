@@ -1,6 +1,6 @@
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -goobj-package-path=main -filetype=obj < %s -o %t.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | FileCheck %s --check-prefixes=COMMON,DWARF4
-; RUN: sed 's/!"dwarf4"/!"dwarf5"/' %s | llc -mtriple=x86_64-unknown-linux-goobj -goobj-package-path=main -filetype=obj -o %t.d5.o
+; RUN: sed 's/!"Dwarf Version", i32 4/!"Dwarf Version", i32 5/' %s | llc -mtriple=x86_64-unknown-linux-goobj -goobj-package-path=main -filetype=obj -o %t.d5.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.d5.o | FileCheck %s --check-prefixes=COMMON,DWARF5
 ; RUN: llc -mtriple=aarch64-unknown-linux-goobj -goobj-package-path=main -filetype=obj < %s -o %t.arm64.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.arm64.o | FileCheck %s --check-prefix=ARM64
@@ -64,7 +64,7 @@ define goabiinternal i64 @"main.pieces"(i64 %x, i64 %y) !dbg !50 {
 !4 = !{!2, !2}
 !5 = !{i32 2, !"Dwarf Version", i32 4}
 !6 = !{i32 2, !"Debug Info Version", i32 3}
-!7 = !{!"pcln-v1", !"dwarf-v1", !"dwarf4", !"main"}
+!7 = !{!"pcln-v1", !"main"}
 !8 = !{!10, ptr @"main.stack"}
 !9 = !{!20, ptr @"main.register"}
 !14 = !{!30, ptr @"main.unavailable"}

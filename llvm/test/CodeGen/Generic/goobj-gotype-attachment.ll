@@ -9,13 +9,13 @@
 ; RUN: opt -passes='default<O2>' %t.forward.bc -o %t.opt.bc
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t.opt.bc -o %t.opt.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.opt.o | FileCheck %s
-; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/duplicate.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=DUPLICATE
+; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/declaration.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=DECLARATION
 ; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/invalid.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=INVALID
 
 ; The type belongs to the prevailing definition, not to the first input.
 ; CHECK: aux {{[0-9]+}}.{{[0-9]+}}: type=gotype target=type.strong
 ; CHECK-NOT: type=gotype target=type.weak
-; DUPLICATE: duplicate !goobj.gotype source
+; DECLARATION: invalid !goobj.gotype attachment
 ; INVALID: invalid !goobj.gotype attachment
 
 ;--- weak.ll
@@ -30,12 +30,10 @@
 !0 = !{ptr @type.strong}
 @llvm.compiler.used = appending global [2 x ptr] [ptr @shared, ptr @type.strong], section "llvm.metadata"
 
-;--- duplicate.ll
-@shared = global i64 0, !goobj.gotype !0
+;--- declaration.ll
+@shared = external global i64, !goobj.gotype !0
 @type = external global i8
 !0 = !{ptr @type}
-!goobj.gotype = !{!1}
-!1 = !{ptr @shared, ptr @type}
 
 ;--- invalid.ll
 @shared = global i64 0, !goobj.gotype !0

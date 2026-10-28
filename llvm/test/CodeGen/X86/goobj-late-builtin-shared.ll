@@ -18,5 +18,9 @@ entry:
 ; CHECK-NOT: <builtin.
 
 !goobj.config = !{!0}
-!0 = !{!"goallc.goobj", !"linux", !"amd64", !"go1.27", !"", !"", !"", !"test/pkg", !"0", !"1", !"0", !1}
+!0 = !{!"", !"test/pkg", !"0", !"0", !"0000000000000000"}
 !1 = !{}
+
+!llvm.module.flags = !{!2}
+!2 = !{i32 1, !"goobj.abi", !3}
+!3 = !{!"goallc.goobj", !"linux", !"amd64", !"go1.27", !"", !"", !"1", !1}

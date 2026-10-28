@@ -421,43 +421,21 @@ public:
       if (Config->getNumOperands() != 1)
         report_fatal_error("expected one !goobj.debug.config entry");
       const MDNode *Entry = Config->getOperand(0);
-      if (Entry->getNumOperands() == 0 ||
+      if (Entry->getNumOperands() != 2 ||
           !isa_and_nonnull<MDString>(Entry->getOperand(0)) ||
           cast<MDString>(Entry->getOperand(0))->getString() != "pcln-v1")
         report_fatal_error("unsupported GoObj debug configuration");
-      if (Entry->getNumOperands() == 2) {
-        // New producers use LLVM's standard module flag for the encoding;
-        // the Go-specific record only identifies PCLN and the package name.
-        const auto *Version = mdconst::dyn_extract_or_null<ConstantInt>(
-            M->getModuleFlag("Dwarf Version"));
-        const auto *Name = dyn_cast_or_null<MDString>(Entry->getOperand(1));
-        if (!Version || (!Version->equalsInt(4) && !Version->equalsInt(5)) ||
-            !Name)
-          report_fatal_error("GoObj debug config requires Dwarf Version 4 or 5 "
-                             "and a package name");
-        DwarfVersion = Version->getZExtValue();
-        PackageName = Name->getString();
-      } else if (Entry->getNumOperands() != 1) {
-        if ((Entry->getNumOperands() != 3 && Entry->getNumOperands() != 4) ||
-            !isa_and_nonnull<MDString>(Entry->getOperand(1)) ||
-            cast<MDString>(Entry->getOperand(1))->getString() != "dwarf-v1" ||
-            !isa_and_nonnull<MDString>(Entry->getOperand(2)))
-          report_fatal_error("unsupported GoObj DWARF configuration");
-        StringRef Version = cast<MDString>(Entry->getOperand(2))->getString();
-        if (Version == "dwarf4")
-          DwarfVersion = 4;
-        else if (Version == "dwarf5")
-          DwarfVersion = 5;
-        else
-          report_fatal_error("unsupported GoObj DWARF version");
-        if (Entry->getNumOperands() == 4) {
-          const auto *Name = dyn_cast_or_null<MDString>(Entry->getOperand(3));
-          if (!Name)
-            report_fatal_error("invalid GoObj DWARF package name");
-          PackageName = Name->getString();
-        }
-      }
+      const auto *Version = mdconst::dyn_extract_or_null<ConstantInt>(
+          M->getModuleFlag("Dwarf Version"));
+      const auto *Name = dyn_cast_or_null<MDString>(Entry->getOperand(1));
+      if (!Version || (!Version->equalsInt(4) && !Version->equalsInt(5)) ||
+          !Name)
+        report_fatal_error("GoObj debug config requires Dwarf Version 4 or 5 "
+                           "and a package name");
+      DwarfVersion = Version->getZExtValue();
+      PackageName = Name->getString();
     }
+
     MCContext &Context = Asm.OutStreamer->getContext();
     Context.setGoObjDwarfVersion(DwarfVersion);
     Context.setGoObjDwarfPackageName(PackageName);
