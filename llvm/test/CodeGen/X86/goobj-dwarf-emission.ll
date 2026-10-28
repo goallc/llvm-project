@@ -11,6 +11,15 @@
 ; RUN: sed '/^!goobj.debug.vars =/d; s/!"pcln-v1", !"dwarf-v1", !"dwarf5", !"main"/!"pcln-v1"/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.pcln.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.pcln.o | FileCheck %s --check-prefix=PCLN --implicit-check-not=SDWARF --implicit-check-not=type=dwarf_
 
+; RUN: sed 's/!"dwarf-v1", !"dwarf5", //' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.native.x86.o
+; RUN: cmp %t.x86.o %t.native.x86.o
+; RUN: sed 's/!"dwarf-v1", !"dwarf5", //' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.native.arm64.o
+; RUN: cmp %t.arm64.o %t.native.arm64.o
+; RUN: sed 's/!"dwarf-v1", !"dwarf5", //; s/i32 5}/i32 4}/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.native.v4.o
+; RUN: cmp %t.v4.o %t.native.v4.o
+; RUN: sed 's/!"dwarf-v1", !"dwarf5", //; s/!llvm.module.flags = !{!5, !6}/!llvm.module.flags = !{!6}/' %s | not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o /dev/null 2>&1 | FileCheck %s --check-prefix=VERSION
+; VERSION: GoObj debug config requires Dwarf Version 4 or 5 and a package name
+
 ; LTO may combine FullDebug and LineTablesOnly CUs. The module config only
 ; selects the Go DWARF encoding. Like native Go -dwarf=false, a LineTablesOnly
 ; function needs a minimal DIE and line table, but no variables or inline DIEs.

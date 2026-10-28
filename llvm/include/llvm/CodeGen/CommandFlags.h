@@ -18,6 +18,7 @@
 #include "llvm/ADT/FloatingPointMode.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/Compiler.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Target/TargetOptions.h"
 #include <array>
 #include <cstdint>
@@ -35,7 +36,7 @@ class TargetMachine;
 
 namespace codegen {
 
-// GoObjConfig is decoded from !goobj.config in a Go frontend's LLVM module.
+// GoObjConfig is decoded from !goobj.config and the goobj.abi module flag.
 // It is intentionally distinct from command-line flags: the IR is the
 // reproducible handoff between the frontend and llc.
 struct GoObjConfig {
@@ -53,6 +54,7 @@ struct GoObjConfig {
   bool IsStd = false;
 };
 
+LLVM_ABI Error configureGoObjFromModule(const Module &M);
 LLVM_ABI void setGoObjConfig(GoObjConfig Config);
 LLVM_ABI std::optional<GoObjConfig> getGoObjConfig();
 

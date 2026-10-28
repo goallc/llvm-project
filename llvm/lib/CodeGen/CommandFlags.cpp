@@ -49,6 +49,131 @@ std::optional<codegen::GoObjConfig> codegen::getGoObjConfig() {
   return IRGoObjConfig;
 }
 
+static Expected<std::string> getGoObjConfigField(const MDNode &Node,
+                                                 unsigned Index) {
+  if (const auto *Value = dyn_cast<MDString>(Node.getOperand(Index)))
+    return Value->getString().str();
+  return createStringError(inconvertibleErrorCode(),
+                           "!goobj.config field %u must be a string", Index);
+}
+
+// Read the Go frontend's self-describing GoObj configuration before object
+// emission constructs its writer. This is deliberately driver plumbing rather
+// than a normal optimization pass: the writer configuration is required while
+// the code-generation pipeline is being assembled.
+Error codegen::configureGoObjFromModule(const Module &M) {
+  const NamedMDNode *Named = M.getNamedMetadata("goobj.config");
+  if (!Named)
+    return Error::success();
+  if (Named->getNumOperands() != 1)
+    return createStringError(inconvertibleErrorCode(),
+                             "!goobj.config must contain one operand");
+
+  const MDNode *Record = Named->getOperand(0);
+  // New producers keep only package identity in the named record. The Error
+  // module flag carries the shared ABI contract through LLVM's IR linker.
+  // Normalize once here so llc and in-process frontends share validation and
+  // remain able to read the original twelve/thirteen-field IR format.
+  if (Record->getNumOperands() == 5) {
+    const auto *ABI = dyn_cast_or_null<MDNode>(M.getModuleFlag("goobj.abi"));
+    if (!ABI || ABI->getNumOperands() != 8)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "goobj.abi module flag must contain eight fields");
+    Metadata *Fields[] = {
+        ABI->getOperand(0),    ABI->getOperand(1),    ABI->getOperand(2),
+        ABI->getOperand(3),    ABI->getOperand(4),    ABI->getOperand(5),
+        Record->getOperand(0), Record->getOperand(1), Record->getOperand(2),
+        ABI->getOperand(6),    Record->getOperand(3), ABI->getOperand(7),
+        Record->getOperand(4)};
+    Record = MDNode::get(M.getContext(), Fields);
+  }
+  const MDNode &Node = *Record;
+  if (Node.getNumOperands() != 12 && Node.getNumOperands() != 13)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "!goobj.config must contain five, twelve or thirteen fields");
+
+  SmallVector<std::string, 11> Fields;
+  for (unsigned I = 0; I != 11; ++I) {
+    Expected<std::string> Field = getGoObjConfigField(Node, I);
+    if (!Field)
+      return Field.takeError();
+    Fields.push_back(std::move(*Field));
+  }
+  const auto *ExperimentNode = dyn_cast<MDNode>(Node.getOperand(11));
+  if (!ExperimentNode)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "!goobj.config experiments must be a metadata node");
+  SmallVector<std::string, 8> Experiments;
+  for (const MDOperand &Operand : ExperimentNode->operands()) {
+    const auto *Experiment = dyn_cast<MDString>(Operand.get());
+    if (!Experiment)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "!goobj.config experiment entries must be strings");
+    Experiments.push_back(Experiment->getString().str());
+  }
+
+  if (Fields[0] != "goallc.goobj")
+    return createStringError(inconvertibleErrorCode(),
+                             "unsupported !goobj.config schema %s",
+                             Fields[0].c_str());
+  if (Fields[1].empty() || Fields[2].empty() || Fields[3].empty())
+    return createStringError(
+        inconvertibleErrorCode(),
+        "!goobj.config GOOS, GOARCH, and version must be set");
+  if (Fields[7].empty())
+    return createStringError(inconvertibleErrorCode(),
+                             "!goobj.config package path is empty");
+  if ((Fields[4].empty()) != (Fields[5].empty()))
+    return createStringError(inconvertibleErrorCode(),
+                             "!goobj.config GOARCH setting key and value must "
+                             "be both present or absent");
+  if ((Fields[8] != "0" && Fields[8] != "1") ||
+      (Fields[9] != "0" && Fields[9] != "1") ||
+      (Fields[10] != "0" && Fields[10] != "1"))
+    return createStringError(
+        inconvertibleErrorCode(),
+        "!goobj.config main, shared, and std flags must be 0 or 1");
+  if (!Triple(M.getTargetTriple()).isOSBinFormatGoObj())
+    return createStringError(inconvertibleErrorCode(),
+                             "!goobj.config requires a GoObj target triple");
+
+  codegen::GoObjConfig Config;
+  // Older producers omit the optional package export fingerprint.
+  if (Node.getNumOperands() == 13) {
+    const auto *Fingerprint = dyn_cast<MDString>(Node.getOperand(12));
+    if (!Fingerprint || Fingerprint->getString().size() != 16)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "!goobj.config fingerprint must be 16 hexadecimal digits");
+    StringRef Hex = Fingerprint->getString();
+    for (unsigned I = 0; I != Config.Fingerprint.size(); ++I) {
+      uint8_t Byte;
+      if (!tryGetHexFromNibbles(Hex[2 * I], Hex[2 * I + 1], Byte))
+        return createStringError(
+            inconvertibleErrorCode(),
+            "!goobj.config fingerprint must be 16 hexadecimal digits");
+      Config.Fingerprint[I] = Byte;
+    }
+  }
+  Config.GOOS = std::move(Fields[1]);
+  Config.GOARCH = std::move(Fields[2]);
+  Config.Version = std::move(Fields[3]);
+  Config.GOARCHSettingKey = std::move(Fields[4]);
+  Config.GOARCHSettingValue = std::move(Fields[5]);
+  Config.BuildID = std::move(Fields[6]);
+  Config.PackagePath = std::move(Fields[7]);
+  Config.IsMain = Fields[8] == "1";
+  Config.IsShared = Fields[9] == "1";
+  Config.IsStd = Fields[10] == "1";
+  Config.Experiments.assign(Experiments.begin(), Experiments.end());
+  codegen::setGoObjConfig(std::move(Config));
+  return Error::success();
+}
+
 #define CGOPT(TY, NAME)                                                        \
   static cl::opt<TY> *NAME##View;                                              \
   TY codegen::get##NAME() {                                                    \

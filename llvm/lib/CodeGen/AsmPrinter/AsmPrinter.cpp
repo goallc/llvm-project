@@ -1182,8 +1182,20 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
                                         std::move(SourceTargets));
   }
 
+  DenseSet<const GlobalValue *> GotypeSources;
+  for (const GlobalObject &GO : M.global_objects()) {
+    const MDNode *Type = GO.getMetadata("goobj.gotype");
+    if (!Type)
+      continue;
+    if (Type->getNumOperands() != 1 || GO.isDeclaration())
+      report_fatal_error("invalid !goobj.gotype attachment");
+    const GlobalValue *Target =
+        getGoObjMetadataGlobal(Type->getOperand(0), "goobj.gotype");
+    GotypeSources.insert(&GO);
+    AP.OutContext.setGoObjGotypeTarget(AP.getSymbol(&GO), AP.getSymbol(Target));
+  }
+  // Read legacy relationship tables too, but reject ambiguous mixed inputs.
   if (const NamedMDNode *Gotypes = M.getNamedMetadata("goobj.gotype")) {
-    DenseSet<const GlobalValue *> Sources;
     for (const MDNode *Entry : Gotypes->operands()) {
       if (Entry->getNumOperands() != 2)
         report_fatal_error(
@@ -1192,7 +1204,7 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
           getGoObjMetadataGlobal(Entry->getOperand(0), "goobj.gotype");
       const GlobalValue *Target =
           getGoObjMetadataGlobal(Entry->getOperand(1), "goobj.gotype");
-      if (!Sources.insert(Source).second)
+      if (!GotypeSources.insert(Source).second)
         report_fatal_error("duplicate !goobj.gotype source");
       AP.OutContext.setGoObjGotypeTarget(AP.getSymbol(Source),
                                          AP.getSymbol(Target));
