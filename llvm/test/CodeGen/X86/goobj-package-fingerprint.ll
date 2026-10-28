@@ -13,8 +13,12 @@ define goabiinternal void @"p.F"() {
 }
 
 !goobj.config = !{!0}
-!0 = !{!"goallc.goobj", !"linux", !"amd64", !"go1.27", !"GOAMD64", !"v1", !"", !"p", !"0", !"0", !"0", !1, !"0123456789abcdef"}
+!0 = !{!"", !"p", !"0", !"0", !"0123456789abcdef"}
 !1 = !{}
 
 ; CHECK: fingerprint: 0123456789abcdef
 ; BAD: !goobj.config fingerprint must be 16 hexadecimal digits
+
+!llvm.module.flags = !{!2}
+!2 = !{i32 1, !"goobj.abi", !3}
+!3 = !{!"goallc.goobj", !"linux", !"amd64", !"go1.27", !"GOAMD64", !"v1", !"0", !1}

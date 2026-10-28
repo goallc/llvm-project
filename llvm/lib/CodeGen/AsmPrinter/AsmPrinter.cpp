@@ -1182,23 +1182,16 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
                                         std::move(SourceTargets));
   }
 
-  if (const NamedMDNode *Gotypes = M.getNamedMetadata("goobj.gotype")) {
-    DenseSet<const GlobalValue *> Sources;
-    for (const MDNode *Entry : Gotypes->operands()) {
-      if (Entry->getNumOperands() != 2)
-        report_fatal_error(
-            "expected !goobj.gotype entries to have two operands");
-      const GlobalValue *Source =
-          getGoObjMetadataGlobal(Entry->getOperand(0), "goobj.gotype");
-      const GlobalValue *Target =
-          getGoObjMetadataGlobal(Entry->getOperand(1), "goobj.gotype");
-      if (!Sources.insert(Source).second)
-        report_fatal_error("duplicate !goobj.gotype source");
-      AP.OutContext.setGoObjGotypeTarget(AP.getSymbol(Source),
-                                         AP.getSymbol(Target));
-    }
+  for (const GlobalObject &GO : M.global_objects()) {
+    const MDNode *Type = GO.getMetadata("goobj.gotype");
+    if (!Type)
+      continue;
+    if (Type->getNumOperands() != 1 || GO.isDeclaration())
+      report_fatal_error("invalid !goobj.gotype attachment");
+    const GlobalValue *Target =
+        getGoObjMetadataGlobal(Type->getOperand(0), "goobj.gotype");
+    AP.OutContext.setGoObjGotypeTarget(AP.getSymbol(&GO), AP.getSymbol(Target));
   }
-
   if (const NamedMDNode *Markers = M.getNamedMetadata("goobj.marker_relocs")) {
     DenseMap<const GlobalValue *, std::vector<MCContext::GoObjMarkerReloc>>
         Relocs;

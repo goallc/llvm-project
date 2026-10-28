@@ -2,9 +2,9 @@
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.x86.o | FileCheck %s
 ; RUN: llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj %s -o %t.arm64.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.arm64.o | FileCheck %s
-; RUN: sed 's/!"dwarf4"/!"dwarf5"/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.v5.o
+; RUN: sed 's/!"Dwarf Version", i32 4/!"Dwarf Version", i32 5/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.v5.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.v5.o | FileCheck %s
-; RUN: sed 's/!"dwarf4"/!"dwarf5"/' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.arm64v5.o
+; RUN: sed 's/!"Dwarf Version", i32 4/!"Dwarf Version", i32 5/' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.arm64v5.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.arm64v5.o | FileCheck %s
 
 ; Optimizers can clone a function and its DISubprogram without adding entries
@@ -30,7 +30,7 @@ define internal goabiinternal i64 @original.specialized.1(i64 %x) !dbg !20 {
 !4 = !{!2, !2}
 !5 = !{i32 2, !"Dwarf Version", i32 4}
 !6 = !{i32 2, !"Debug Info Version", i32 3}
-!7 = !{!"pcln-v1", !"dwarf-v1", !"dwarf4", !"main"}
+!7 = !{!"pcln-v1", !"main"}
 !8 = !{!10, ptr @original}
 !10 = distinct !DISubprogram(name: "original", linkageName: "original", file: !1, line: 3, type: !3, scopeLine: 3, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
 !11 = !DILocation(line: 4, scope: !10)

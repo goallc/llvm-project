@@ -18,7 +18,7 @@
 @keep_handle = private constant [7 x i8] c"KeepMe!", section ".rodata"
 @type_handle = private constant [8 x i8] c"TypeData", section ".rodata"
 @.goallc.anon.7 = constant i8 42, section ".rodata"
-@refs = global ptr @address_handle, section ".data"
+@refs = global ptr @address_handle, section ".data", !goobj.gotype !5
 @llvm.compiler.used = appending global [5 x ptr] [ptr @source, ptr @package_handle, ptr @shared_handle, ptr @keep_handle, ptr @type_handle], section "llvm.metadata"
 
 define goabiinternal void @source() {
@@ -27,13 +27,12 @@ define goabiinternal void @source() {
 
 !goobj.marker_relocs = !{!2, !3}
 !goobj.keep = !{!4}
-!goobj.gotype = !{!5}
 !0 = !{i1 true}
 !1 = !{i32 0}
 !2 = !{ptr @source, ptr @package_handle, i32 25, i64 0}
 !3 = !{ptr @source, ptr @shared_handle, i32 25, i64 0}
 !4 = !{ptr @source, ptr @keep_handle}
-!5 = !{ptr @refs, ptr @type_handle}
+!5 = !{ptr @type_handle}
 
 ; CHECK-DAG: symdef 0: [[PACKAGE:goallc\.[a-f0-9]+\.stmp_[0-9]+]] abi=65535 type=3 size=4
 ; CHECK-DAG: symdef [[ADDR:[0-9]+]]: [[ADDRESS:goallc\.[a-f0-9]+\.stmp_[0-9]+]] abi=65535 type=3 size=6

@@ -2,17 +2,17 @@
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.x86.o | FileCheck %s
 ; RUN: llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj %s -o %t.arm64.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.arm64.o | FileCheck %s
-; RUN: sed 's/!"dwarf5"/!"dwarf4"/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.d4.o
+; RUN: sed 's/!"Dwarf Version", i32 5/!"Dwarf Version", i32 4/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.d4.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.d4.o | FileCheck %s
-; RUN: sed 's/!"dwarf5"/!"dwarf4"/' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.arm64.d4.o
+; RUN: sed 's/!"Dwarf Version", i32 5/!"Dwarf Version", i32 4/' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.arm64.d4.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.arm64.d4.o | FileCheck %s
 ; RUN: sed 's/line: 3/line: 2/g' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.same-line.x86.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.same-line.x86.o | FileCheck %s --check-prefix=SAME-LINE
 ; RUN: sed 's/line: 3/line: 2/g' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.same-line.arm64.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.same-line.arm64.o | FileCheck %s --check-prefix=SAME-LINE
-; RUN: sed -e 's/line: 3/line: 2/g' -e 's/!"dwarf5"/!"dwarf4"/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.same-line.d4.o
+; RUN: sed -e 's/line: 3/line: 2/g' -e 's/!"Dwarf Version", i32 5/!"Dwarf Version", i32 4/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.same-line.d4.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.same-line.d4.o | FileCheck %s --check-prefix=SAME-LINE
-; RUN: sed -e 's/line: 3/line: 2/g' -e 's/!"dwarf5"/!"dwarf4"/' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.same-line.arm64.d4.o
+; RUN: sed -e 's/line: 3/line: 2/g' -e 's/!"Dwarf Version", i32 5/!"Dwarf Version", i32 4/' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.same-line.arm64.d4.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.same-line.arm64.d4.o | FileCheck %s --check-prefix=SAME-LINE
 
 ; The two i variables have the same name and type, but different lexical
@@ -41,7 +41,7 @@ attributes #0 = { "frame-pointer"="all" }
 !4 = !{null, !2}
 !5 = !{i32 2, !"Dwarf Version", i32 5}
 !6 = !{i32 2, !"Debug Info Version", i32 3}
-!7 = !{!"pcln-v1", !"dwarf-v1", !"dwarf5", !"main"}
+!7 = !{!"pcln-v1", !"main"}
 !8 = !{!10, ptr @nested}
 !10 = distinct !DISubprogram(name: "nested", linkageName: "nested", file: !1, line: 1, type: !3, scopeLine: 1, spFlags: DISPFlagDefinition, unit: !0, retainedNodes: !11)
 !11 = !{!12, !15, !16}

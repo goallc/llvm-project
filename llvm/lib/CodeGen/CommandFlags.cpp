@@ -49,6 +49,105 @@ std::optional<codegen::GoObjConfig> codegen::getGoObjConfig() {
   return IRGoObjConfig;
 }
 
+static Error readGoObjConfigStrings(const MDNode &Node, unsigned Count,
+                                    StringRef Name,
+                                    SmallVectorImpl<std::string> &Fields) {
+  for (unsigned I = 0; I != Count; ++I) {
+    const auto *Value = dyn_cast_or_null<MDString>(Node.getOperand(I));
+    if (!Value)
+      return createStringError(inconvertibleErrorCode(),
+                               "%s field %u must be a string",
+                               Name.str().c_str(), I);
+    Fields.push_back(Value->getString().str());
+  }
+  return Error::success();
+}
+
+// Decode the shared ABI contract and the output package identity before
+// constructing the writer. LLVM's Error module flag handles ABI compatibility
+// when linking IR; package identity remains local to each input.
+Error codegen::configureGoObjFromModule(const Module &M) {
+  const NamedMDNode *Named = M.getNamedMetadata("goobj.config");
+  if (!Named)
+    return Error::success();
+  if (Named->getNumOperands() != 1 ||
+      Named->getOperand(0)->getNumOperands() != 5)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "!goobj.config must contain one five-field record");
+  const auto *ABI = dyn_cast_or_null<MDNode>(M.getModuleFlag("goobj.abi"));
+  if (!ABI || ABI->getNumOperands() != 8)
+    return createStringError(inconvertibleErrorCode(),
+                             "goobj.abi module flag must contain eight fields");
+
+  SmallVector<std::string, 7> ABIFields;
+  SmallVector<std::string, 5> PackageFields;
+  if (Error E = readGoObjConfigStrings(*ABI, 7, "goobj.abi", ABIFields))
+    return E;
+  if (Error E = readGoObjConfigStrings(*Named->getOperand(0), 5,
+                                       "!goobj.config", PackageFields))
+    return E;
+  if (ABIFields[0] != "goallc.goobj")
+    return createStringError(inconvertibleErrorCode(),
+                             "unsupported goobj.abi schema %s",
+                             ABIFields[0].c_str());
+  if (ABIFields[1].empty() || ABIFields[2].empty() || ABIFields[3].empty())
+    return createStringError(inconvertibleErrorCode(),
+                             "goobj.abi GOOS, GOARCH, and version must be set");
+  if (ABIFields[4].empty() != ABIFields[5].empty())
+    return createStringError(inconvertibleErrorCode(),
+                             "goobj.abi GOARCH setting key and value must be "
+                             "both present or absent");
+  if (PackageFields[1].empty())
+    return createStringError(inconvertibleErrorCode(),
+                             "!goobj.config package path is empty");
+  if ((ABIFields[6] != "0" && ABIFields[6] != "1") ||
+      (PackageFields[2] != "0" && PackageFields[2] != "1") ||
+      (PackageFields[3] != "0" && PackageFields[3] != "1"))
+    return createStringError(
+        inconvertibleErrorCode(),
+        "GoObj main, shared, and std flags must be 0 or 1");
+  if (!M.getTargetTriple().isOSBinFormatGoObj())
+    return createStringError(inconvertibleErrorCode(),
+                             "!goobj.config requires a GoObj target triple");
+
+  GoObjConfig Config;
+  const auto *Experiments = dyn_cast_or_null<MDNode>(ABI->getOperand(7));
+  if (!Experiments)
+    return createStringError(inconvertibleErrorCode(),
+                             "goobj.abi experiments must be a metadata node");
+  for (const MDOperand &Operand : Experiments->operands()) {
+    const auto *Experiment = dyn_cast_or_null<MDString>(Operand.get());
+    if (!Experiment)
+      return createStringError(inconvertibleErrorCode(),
+                               "goobj.abi experiment entries must be strings");
+    Config.Experiments.push_back(Experiment->getString().str());
+  }
+  StringRef Hex = PackageFields[4];
+  if (Hex.size() != 2 * Config.Fingerprint.size())
+    return createStringError(
+        inconvertibleErrorCode(),
+        "!goobj.config fingerprint must be 16 hexadecimal digits");
+  for (unsigned I = 0; I != Config.Fingerprint.size(); ++I)
+    if (!tryGetHexFromNibbles(Hex[2 * I], Hex[2 * I + 1],
+                              Config.Fingerprint[I]))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "!goobj.config fingerprint must be 16 hexadecimal digits");
+  Config.GOOS = std::move(ABIFields[1]);
+  Config.GOARCH = std::move(ABIFields[2]);
+  Config.Version = std::move(ABIFields[3]);
+  Config.GOARCHSettingKey = std::move(ABIFields[4]);
+  Config.GOARCHSettingValue = std::move(ABIFields[5]);
+  Config.IsShared = ABIFields[6] == "1";
+  Config.BuildID = std::move(PackageFields[0]);
+  Config.PackagePath = std::move(PackageFields[1]);
+  Config.IsMain = PackageFields[2] == "1";
+  Config.IsStd = PackageFields[3] == "1";
+  setGoObjConfig(std::move(Config));
+  return Error::success();
+}
+
 #define CGOPT(TY, NAME)                                                        \
   static cl::opt<TY> *NAME##View;                                              \
   TY codegen::get##NAME() {                                                    \
