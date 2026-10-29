@@ -4,11 +4,11 @@
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.opt.o | FileCheck %s
 
 @target = constant i8 0, section ".rodata", align 1
-@source = constant i8 0, section ".rodata", align 1
+@source = constant i8 0, section ".rodata", align 1, !goobj.keep !1
 @llvm.compiler.used = appending global [2 x ptr] [ptr @source, ptr @target], section "llvm.metadata"
 
-!goobj.keep = !{!0}
-!0 = !{ptr @source, ptr @target}
 
 ; CHECK: symdef {{[0-9]+}}: source abi=0 type=3 size=1
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off=0 size=0 type=27 add=0 target=target
+
+!1 = !{ptr @target}

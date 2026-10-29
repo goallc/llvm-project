@@ -9,7 +9,7 @@
 @"type:[]main.T" = external global i8
 @"go:itab.main.T,main.I" = external global i8
 
-define goabiinternal void @main.main() !dbg !10 {
+define goabiinternal void @main.main() !dbg !10 !goobj.marker_relocs !14 {
   ret void, !dbg !11
 }
 
@@ -21,7 +21,6 @@ define goabiinternal void @main.main() !dbg !10 {
 !llvm.module.flags = !{!5, !6}
 !goobj.debug.config = !{!7}
 !goobj.debug.funcs = !{!8}
-!goobj.marker_relocs = !{!12, !13}
 !0 = distinct !DICompileUnit(language: DW_LANG_Go, file: !1, producer: "goallc", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug)
 !1 = !DIFile(filename: "types.go", directory: "/src")
 !2 = !{}
@@ -32,5 +31,7 @@ define goabiinternal void @main.main() !dbg !10 {
 !8 = !{!10, ptr @main.main}
 !10 = distinct !DISubprogram(name: "main.main", linkageName: "main.main", scope: !1, file: !1, line: 3, type: !3, scopeLine: 3, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
 !11 = !DILocation(line: 4, column: 2, scope: !10)
-!12 = !{ptr @main.main, ptr @"type:[]main.T", i32 23, i64 0}
-!13 = !{ptr @main.main, ptr @"go:itab.main.T,main.I", i32 23, i64 0}
+!12 = !{ptr @"type:[]main.T", i32 23, i64 0}
+!13 = !{ptr @"go:itab.main.T,main.I", i32 23, i64 0}
+
+!14 = !{!12, !13}

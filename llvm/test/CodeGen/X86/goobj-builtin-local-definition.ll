@@ -38,7 +38,7 @@ define goabiinternal void @runtime.packagelocal() "go-nosplit" {
   ret void
 }
 
-define goabiinternal void @caller(ptr %p) "go-nosplit" {
+define goabiinternal void @caller(ptr %p) "go-nosplit" !goobj.marker_relocs !4 {
   call goabiinternal void @"runtime.growslice<builtin.133>"(ptr %p)
   call goabiinternal void @"runtime.external<builtin.134>"()
   call goabi0 void @"runtime.onlyinternal<builtin.135><ABI0>"()
@@ -51,8 +51,7 @@ define goabiinternal void @caller(ptr %p) "go-nosplit" {
 !0 = !{i1 true}
 !1 = !{i32 0, i32 16}
 !2 = !{!"0123456789abcdef"}
-!goobj.marker_relocs = !{!3}
-!3 = !{ptr @caller, ptr @"runtime.hashed<builtin.139>", i32 23, i64 0}
+!3 = !{ptr @"runtime.hashed<builtin.139>", i32 23, i64 0}
 
 ; The ABIInternal builtin call resolves to the non-package canonical
 ; definition in this object, just like runtime.growslice in native GoObj.
@@ -78,3 +77,5 @@ define goabiinternal void @caller(ptr %p) "go-nosplit" {
 ; ABSENT-NOT: target=builtin:137
 ; ABSENT-NOT: target=builtin:138
 ; ABSENT-NOT: target=builtin:139
+
+!4 = !{!3}

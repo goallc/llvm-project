@@ -21,17 +21,14 @@
 @refs = global ptr @address_handle, section ".data", !goobj.gotype !5
 @llvm.compiler.used = appending global [5 x ptr] [ptr @source, ptr @package_handle, ptr @shared_handle, ptr @keep_handle, ptr @type_handle], section "llvm.metadata"
 
-define goabiinternal void @source() {
+define goabiinternal void @source() !goobj.keep !6 !goobj.marker_relocs !7 {
   ret void
 }
 
-!goobj.marker_relocs = !{!2, !3}
-!goobj.keep = !{!4}
 !0 = !{i1 true}
 !1 = !{i32 0}
-!2 = !{ptr @source, ptr @package_handle, i32 25, i64 0}
-!3 = !{ptr @source, ptr @shared_handle, i32 25, i64 0}
-!4 = !{ptr @source, ptr @keep_handle}
+!2 = !{ptr @package_handle, i32 25, i64 0}
+!3 = !{ptr @shared_handle, i32 25, i64 0}
 !5 = !{ptr @type_handle}
 
 ; CHECK-DAG: symdef 0: [[PACKAGE:goallc\.[a-f0-9]+\.stmp_[0-9]+]] abi=65535 type=3 size=4
@@ -45,3 +42,7 @@ define goabiinternal void @source() {
 ; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: off=0 size=0 type=27 add=0 target=[[KEEPNAME]] kind=unknown pkg=self sym=[[KEEP]]
 ; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: off=0 size=8 type=1 add=0 target=[[ADDRESS]] kind=R_ADDR pkg=self sym=[[ADDR]]
 ; CHECK-DAG: aux {{[0-9]+}}.{{[0-9]+}}: type=gotype target=[[TYPENAME]] pkg=self sym=[[TYPE]]
+
+!6 = !{ptr @keep_handle}
+
+!7 = !{!2, !3}

@@ -1157,67 +1157,62 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
     }
   }
 
-  if (const NamedMDNode *Keep = M.getNamedMetadata("goobj.keep")) {
-    DenseMap<const GlobalValue *, std::vector<const MCSymbol *>> Targets;
-    for (const MDNode *Entry : Keep->operands()) {
-      if (Entry->getNumOperands() != 2)
-        report_fatal_error("expected !goobj.keep entries to have two operands");
-      const GlobalValue *Source =
-          getGoObjMetadataGlobal(Entry->getOperand(0), "goobj.keep");
-      const GlobalValue *Target =
-          getGoObjMetadataGlobal(Entry->getOperand(1), "goobj.keep");
-      Targets[Source].push_back(AP.getSymbol(Target));
-    }
-    for (auto &[Source, SourceTargets] : Targets)
-      AP.OutContext.setGoObjKeepTargets(AP.getSymbol(Source),
-                                        std::move(SourceTargets));
-  }
+  if (M.getNamedMetadata("goobj.keep") ||
+      M.getNamedMetadata("goobj.marker_relocs"))
+    report_fatal_error("GoObj keep/marker relations require definition attachments");
 
   for (const GlobalObject &GO : M.global_objects()) {
-    const MDNode *Type = GO.getMetadata("goobj.gotype");
-    if (!Type)
-      continue;
-    if (Type->getNumOperands() != 1 || GO.isDeclaration())
-      report_fatal_error("invalid !goobj.gotype attachment");
-    const GlobalValue *Target =
-        getGoObjMetadataGlobal(Type->getOperand(0), "goobj.gotype");
-    AP.OutContext.setGoObjGotypeTarget(AP.getSymbol(&GO), AP.getSymbol(Target));
-  }
-  if (const NamedMDNode *Markers = M.getNamedMetadata("goobj.marker_relocs")) {
-    DenseMap<const GlobalValue *, std::vector<MCContext::GoObjMarkerReloc>>
-        Relocs;
-    for (const MDNode *Entry : Markers->operands()) {
-      if (Entry->getNumOperands() != 4)
-        report_fatal_error(
-            "expected !goobj.marker_relocs entries to have four operands");
-      const GlobalValue *Source =
-          getGoObjMetadataGlobal(Entry->getOperand(0), "goobj.marker_relocs");
-      const GlobalValue *Target =
-          getGoObjMetadataGlobal(Entry->getOperand(1), "goobj.marker_relocs");
-      const auto *Type =
-          mdconst::dyn_extract<ConstantInt>(Entry->getOperand(2));
-      const auto *Addend =
-          mdconst::dyn_extract<ConstantInt>(Entry->getOperand(3));
-      if (!isa<GlobalObject>(Source) || Source->isDeclarationForLinker() ||
-          !Type || Type->getValue().ugt(UINT16_MAX) || !Addend)
-        report_fatal_error("invalid !goobj.marker_relocs entry");
-      switch (Type->getZExtValue()) {
-      case GoObj::R_USEFIELD:
-      case GoObj::R_USEIFACE:
-      case GoObj::R_USEIFACEMETHOD:
-      case GoObj::R_USENAMEDMETHOD:
-      case GoObj::R_INITORDER:
-        break;
-      default:
-        report_fatal_error("unsupported !goobj.marker_relocs type");
-      }
-      Relocs[Source].push_back({AP.getSymbol(Target),
-                                static_cast<uint16_t>(Type->getZExtValue()),
-                                Addend->getSExtValue()});
+    if (const MDNode *Keep = GO.getMetadata("goobj.keep")) {
+      if (GO.isDeclarationForLinker())
+        report_fatal_error("!goobj.keep requires a definition");
+      std::vector<const MCSymbol *> Targets;
+      for (const MDOperand &Op : Keep->operands())
+        Targets.push_back(AP.getSymbol(
+            getGoObjMetadataGlobal(Op, "goobj.keep")));
+      AP.OutContext.setGoObjKeepTargets(AP.getSymbol(&GO), std::move(Targets));
     }
-    for (auto &[Source, SourceRelocs] : Relocs)
-      AP.OutContext.setGoObjMarkerRelocs(AP.getSymbol(Source),
-                                         std::move(SourceRelocs));
+
+    if (const MDNode *Type = GO.getMetadata("goobj.gotype")) {
+      if (Type->getNumOperands() != 1 || GO.isDeclaration())
+        report_fatal_error("invalid !goobj.gotype attachment");
+      const GlobalValue *Target =
+          getGoObjMetadataGlobal(Type->getOperand(0), "goobj.gotype");
+      AP.OutContext.setGoObjGotypeTarget(AP.getSymbol(&GO), AP.getSymbol(Target));
+    }
+
+    if (const MDNode *Markers = GO.getMetadata("goobj.marker_relocs")) {
+      if (GO.isDeclarationForLinker())
+        report_fatal_error("!goobj.marker_relocs requires a definition");
+      std::vector<MCContext::GoObjMarkerReloc> Relocs;
+      for (const MDOperand &Op : Markers->operands()) {
+        const auto *Entry = dyn_cast_or_null<MDNode>(Op);
+        if (!Entry || Entry->getNumOperands() != 3)
+          report_fatal_error(
+              "expected !goobj.marker_relocs entries to have three operands");
+        const GlobalValue *Target =
+            getGoObjMetadataGlobal(Entry->getOperand(0), "goobj.marker_relocs");
+        const auto *Type =
+            mdconst::dyn_extract<ConstantInt>(Entry->getOperand(1));
+        const auto *Addend =
+            mdconst::dyn_extract<ConstantInt>(Entry->getOperand(2));
+        if (!Type || Type->getValue().ugt(UINT16_MAX) || !Addend)
+          report_fatal_error("invalid !goobj.marker_relocs entry");
+        switch (Type->getZExtValue()) {
+        case GoObj::R_USEFIELD:
+        case GoObj::R_USEIFACE:
+        case GoObj::R_USEIFACEMETHOD:
+        case GoObj::R_USENAMEDMETHOD:
+        case GoObj::R_INITORDER:
+          break;
+        default:
+          report_fatal_error("unsupported !goobj.marker_relocs type");
+        }
+        Relocs.push_back({AP.getSymbol(Target),
+                          static_cast<uint16_t>(Type->getZExtValue()),
+                          Addend->getSExtValue()});
+      }
+      AP.OutContext.setGoObjMarkerRelocs(AP.getSymbol(&GO), std::move(Relocs));
+    }
   }
 }
 
