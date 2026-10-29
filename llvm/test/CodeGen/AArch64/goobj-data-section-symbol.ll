@@ -8,28 +8,29 @@
 @method = external global i8
 @external_gotype = external global i8
 
-%go.descriptor.test = type <{ i8 }>
-%go.itab.test = type <{ ptr, ptr, i32, [4 x i8], ptr }>
+%descriptor.storage = type <{ i8 }>
+%itab.storage = type <{ ptr, ptr, i32, [4 x i8], ptr }>
 
 @gotype = constant i8 0, section ".rodata", align 1
 @cache0 = global <{ ptr, ptr, [8 x i8] }> zeroinitializer, section ".data", align 16, !goobj.gotype !5
 @cache1 = global <{ ptr, ptr, [8 x i8] }> zeroinitializer, section ".data", align 16, !goobj.gotype !6
 @local = internal constant i8 0, section ".rodata", align 1
-@descriptor = weak constant %go.descriptor.test <{ i8 0 }>, section ".rodata", align 1, !goobj.symbol.flags !0
+@descriptor = weak constant %descriptor.storage <{ i8 0 }>, section ".rodata", align 1, !goobj.symbol.flags !0
 @llvm.compiler.used = appending global [5 x ptr] [ptr @cache0, ptr @cache1, ptr @gotype, ptr @external_gotype, ptr @local], section "llvm.metadata"
 
-@itab = weak constant %go.itab.test <{
+@itab = weak constant %itab.storage <{
   ptr @inter,
   ptr @type,
   i32 123,
   [4 x i8] zeroinitializer,
   ptr @method
-}>, section ".rodata", align 8, !goobj.weak_relocs !1
+}>, section ".rodata", align 8, !goobj.weak_relocs !1, !goobj.symbol.flags !7
 
-!0 = !{i32 4, i32 1}
+!0 = !{i32 68, i32 1}
 !1 = !{i32 24}
 !5 = !{ptr @gotype}
 !6 = !{ptr @external_gotype}
+!7 = !{i32 0, i32 2}
 
 ; CHECK-DAG: symdef {{[0-9]+}}: cache0 abi=0 type=7 size=24 align=16
 ; CHECK-DAG: symdef {{[0-9]+}}: cache1 abi=0 type=7 size=24 align=16

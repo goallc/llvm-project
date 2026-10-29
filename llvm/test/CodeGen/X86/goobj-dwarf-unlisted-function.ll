@@ -7,6 +7,11 @@
 ; RUN: sed 's/!"Dwarf Version", i32 4/!"Dwarf Version", i32 5/' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.arm64v5.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.arm64v5.o | FileCheck %s
 
+; RUN: sed '/^!goobj.debug.funcs =/d' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.no-table.o
+; RUN: cmp %t.x86.o %t.no-table.o
+; RUN: sed '/^!goobj.debug.funcs =/d' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.arm64-no-table.o
+; RUN: cmp %t.arm64.o %t.arm64-no-table.o
+
 ; Optimizers can clone a function and its DISubprogram without adding entries
 ; to the frontend's named metadata. The clone keeps the source linkage name,
 ; but its DWARF carrier must belong to the actual emitted storage symbol.
