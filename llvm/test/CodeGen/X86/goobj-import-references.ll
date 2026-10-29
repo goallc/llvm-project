@@ -11,7 +11,7 @@
 @"fmt.inlined#AAAAAAAAAAA=#suffix" = external global i8, !goobj.import !3
 @"fmt.unused" = external global i8, !goobj.import !8
 @"type:string<builtin.7>" = external global i8
-@data_source = constant ptr @"fmt.data", section ".rodata", align 8
+@data_source = constant ptr @"fmt.data", section ".rodata", align 8, !goobj.marker_relocs !10
 @inline_source = constant ptr @"fmt.inlined#AAAAAAAAAAA=#suffix", section ".rodata", align 8
 @llvm.compiler.used = appending global [9 x ptr] [ptr @source, ptr @data_source, ptr @inline_source, ptr @"fmt.data", ptr @"fmt.inlined#AAAAAAAAAAA=#suffix", ptr @"type:string<builtin.7>", ptr @"runtime.internal<builtin.8>", ptr @"runtime.abi0<builtin.9><ABI0>", ptr @"runtime.named<linkname>"], section "llvm.metadata"
 
@@ -20,7 +20,7 @@ declare goabiinternal void @"runtime.internal<builtin.8>"()
 declare goabi0 void @"runtime.abi0<builtin.9><ABI0>"()
 declare goabiinternal void @"runtime.named<linkname>"()
 
-define goabiinternal void @source() "frame-pointer"="non-leaf" {
+define goabiinternal void @source() "frame-pointer"="non-leaf" !goobj.marker_relocs !9 {
   call goabiinternal void @"os.Exit"(i64 1)
   call goabiinternal void @"runtime.internal<builtin.8>"()
   call goabi0 void @"runtime.abi0<builtin.9><ABI0>"()
@@ -35,9 +35,8 @@ define goabiinternal void @source() "frame-pointer"="non-leaf" {
 !3 = !{!"fmt", i32 10, i32 0}
 !5 = !{!"os", i32 15, i32 0}
 
-!goobj.marker_relocs = !{!6, !7}
-!6 = !{ptr @source, ptr @"type:string<builtin.7>", i32 23, i64 0}
-!7 = !{ptr @data_source, ptr @"fmt.data", i32 23, i64 0}
+!6 = !{ptr @"type:string<builtin.7>", i32 23, i64 0}
+!7 = !{ptr @"fmt.data", i32 23, i64 0}
 !8 = !{!"fmt", i32 11, i32 0}
 
 ; CHECK: autolib-count: 2
@@ -62,3 +61,7 @@ define goabiinternal void @source() "frame-pointer"="non-leaf" {
 ; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: {{.*}}target=builtin:9 {{.*}}pkg=builtin sym=9
 ; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: {{.*}}target=runtime.named {{.*}}pkg=none
 ; CHECK-DAG: reloc {{[0-9]+}}.{{[0-9]+}}: {{.*}}target=os.Exit {{.*}}pkg=[[OSIDX]] sym=15
+
+!9 = !{!6}
+
+!10 = !{!7}
