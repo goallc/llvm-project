@@ -842,15 +842,6 @@ getGoObjSymbolFlags(const GlobalObject *GO) {
   else if (GO->isWeakForLinker())
     Flag |= GoObj::SymFlagDupok;
 
-  if (const auto *GV = dyn_cast<GlobalVariable>(GO)) {
-    if (const auto *ST = dyn_cast<StructType>(GV->getValueType());
-        ST && ST->hasName()) {
-      if (ST->getName().starts_with("go.descriptor."))
-        Flag |= GoObj::SymFlagGoType;
-      if (ST->getName().starts_with("go.itab."))
-        Flag2 |= GoObj::SymFlagItab;
-    }
-  }
   if (const auto *F = dyn_cast<Function>(GO);
       F && F->hasFnAttribute(goabi::NoSplitAttr))
     Flag |= GoObj::SymFlagNoSplit;

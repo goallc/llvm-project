@@ -5,6 +5,13 @@
 ; RUN: llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj %s -o %t.arm64.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.arm64.o | FileCheck %s
 
+; RUN: sed 's/!goobj.debug.funcs = !{!8, !9}/!goobj.debug.funcs = !{!9}/' %s | llc -filetype=obj -o %t.abstract-only.o
+; RUN: cmp %t.o %t.abstract-only.o
+; RUN: sed 's/!goobj.debug.funcs = !{!8, !9}/!goobj.debug.funcs = !{!9}/' %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.arm64-abstract-only.o
+; RUN: cmp %t.arm64.o %t.arm64-abstract-only.o
+; RUN: sed '/^!goobj.debug.funcs =/d' %s | not --crash llc -filetype=obj -o /dev/null 2>&1 | FileCheck %s --check-prefix=MISSING
+; MISSING: LLVM ERROR: GoObj debug variable has no exact subprogram symbol
+
 ; Inline instances sharing one storage symbol must contribute all variables,
 ; regardless of the ordering of their metadata or allocated pointer addresses.
 target triple = "x86_64-unknown-linux-goobj"
