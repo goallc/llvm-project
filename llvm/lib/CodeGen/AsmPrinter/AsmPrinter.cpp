@@ -938,28 +938,6 @@ getGoObjRelocsMetadata(const GlobalObject *GO) {
   return Result;
 }
 
-static std::optional<std::vector<uint32_t>>
-getGoObjWeakRelocsMetadata(const GlobalObject *GO) {
-  const MDNode *MD = GO->getMetadata("goobj.weak_relocs");
-  if (!MD)
-    return std::nullopt;
-
-  std::vector<uint32_t> Result;
-  Result.reserve(MD->getNumOperands());
-  for (const MDOperand &Operand : MD->operands()) {
-    const auto *Offset = mdconst::dyn_extract<ConstantInt>(Operand);
-    if (!Offset || Offset->getValue().ugt(UINT32_MAX))
-      report_fatal_error(
-          "expected !goobj.weak_relocs entries to be i32 offsets");
-    Result.push_back(static_cast<uint32_t>(Offset->getZExtValue()));
-  }
-
-  llvm::sort(Result);
-  if (std::adjacent_find(Result.begin(), Result.end()) != Result.end())
-    report_fatal_error("duplicate !goobj.weak_relocs offset");
-  return Result;
-}
-
 static const GlobalValue *getGoObjMetadataGlobal(const MDOperand &Operand,
                                                  StringRef MetadataName) {
   const auto *CAM = dyn_cast_or_null<ConstantAsMetadata>(Operand.get());
@@ -1036,6 +1014,8 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
   // calling convention as an independent lowering contract and reject stale
   // metadata or mismatched names instead of trying to repair either one.
   for (const GlobalObject &GO : M.global_objects()) {
+    if (GO.getMetadata("goobj.weak_relocs"))
+      report_fatal_error("GoObj weak relocations require R_WEAK in !goobj.relocs");
     if (GO.getMetadata("goobj.symbol.name"))
       report_fatal_error(
           "!goobj.symbol.name is obsolete; encode ABI0 in the symbol name");
@@ -1255,9 +1235,6 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
     if (std::optional<std::vector<MCContext::GoObjRelocOverride>> Relocs =
             getGoObjRelocsMetadata(GV))
       OutContext.setGoObjRelocOverrides(GVSym, std::move(*Relocs));
-    if (std::optional<std::vector<uint32_t>> WeakRelocs =
-            getGoObjWeakRelocsMetadata(GV))
-      OutContext.setGoObjWeakRelocs(GVSym, std::move(*WeakRelocs));
   }
 
   // getOrCreateEmuTLSControlSym only creates the symbol with name and default

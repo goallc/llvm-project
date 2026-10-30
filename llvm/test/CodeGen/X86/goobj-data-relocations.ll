@@ -2,12 +2,17 @@
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | FileCheck %s
 ; RUN: opt -passes='default<O2>' -S < %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.opt.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.opt.o | FileCheck %s
+; RUN: llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj < %s -o %t.arm.o
+; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.arm.o | FileCheck %s
+; RUN: opt -passes='default<O2>' -S < %s | llc -mtriple=aarch64-unknown-linux-goobj -filetype=obj -o %t.arm.opt.o
+; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.arm.opt.o | FileCheck %s
+; REQUIRES: x86-registered-target, aarch64-registered-target
 
 %weak_offset.storage = type <{ i32 }>
 %method_offsets.storage = type <{ i32, i32, i32, i32, i32, i32 }>
 
 @target = constant i8 0, section ".rodata", align 1
-@weak_offset = constant %weak_offset.storage <{ i32 ptrtoint (ptr @target to i32) }>, section ".rodata", align 4, !goobj.relocs !0, !goobj.weak_relocs !1, !goobj.symbol.flags !9
+@weak_offset = constant %weak_offset.storage <{ i32 ptrtoint (ptr @target to i32) }>, section ".rodata", align 4, !goobj.relocs !0, !goobj.symbol.flags !9
 @method_name = constant i8 0, section ".rodata", align 1
 @method_type = constant i8 0, section ".rodata", align 1
 @method_offsets = constant %method_offsets.storage <{
@@ -21,8 +26,8 @@
 
 declare goabiinternal void @method_text()
 
-!0 = !{!3}
-!1 = !{i32 0}
+!0 = !{!1}
+!1 = !{i32 0, i32 32773}
 !2 = !{!3, !4, !5, !6, !7, !8}
 !3 = !{i32 0, i32 5}
 !4 = !{i32 4, i32 26}
@@ -41,3 +46,10 @@ declare goabiinternal void @method_text()
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off=12 size=4 type=26 add=0 target=method_text
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off=16 size=4 type=5 add=0 target=method_name
 ; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off=20 size=4 type=5 add=0 target=method_type
+
+; Weak addresses use the same residual relocation table; the initializer
+; remains the source of the target and addend.
+@weak_address = constant ptr getelementptr (i8, ptr @target, i64 7), section ".rodata", !goobj.relocs !10
+!10 = !{!11}
+!11 = !{i32 0, i32 32769}
+; CHECK: reloc {{[0-9]+}}.{{[0-9]+}}: off=0 size=8 type=32769 add=7 target=target
