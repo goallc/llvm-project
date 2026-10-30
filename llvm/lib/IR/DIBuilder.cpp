@@ -1005,12 +1005,14 @@ DILocalVariable *DIBuilder::createAutoVariable(DIScope *Scope, StringRef Name,
                                                DIFile *File, unsigned LineNo,
                                                DIType *Ty, bool AlwaysPreserve,
                                                DINode::DIFlags Flags,
-                                               uint32_t AlignInBits) {
+                                               uint32_t AlignInBits,
+                                               DINodeArray Annotations) {
   assert(Scope && isa<DILocalScope>(Scope) &&
          "Unexpected scope for a local variable.");
   return createLocalVariable(
       VMContext, getSubprogramNodesTrackingVector(Scope), Scope, Name,
-      /* ArgNo */ 0, File, LineNo, Ty, AlwaysPreserve, Flags, AlignInBits);
+      /* ArgNo */ 0, File, LineNo, Ty, AlwaysPreserve, Flags, AlignInBits,
+      Annotations);
 }
 
 DILocalVariable *DIBuilder::createParameterVariable(

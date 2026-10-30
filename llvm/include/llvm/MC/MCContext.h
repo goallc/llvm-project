@@ -184,6 +184,11 @@ public:
     uint8_t Flags2 = 0;
   };
 
+  struct GoObjDebugPackage {
+    std::string Prefix;
+    std::string Name;
+  };
+
   struct GoObjDebugInlineFrame {
     const MCSymbol *Callee = nullptr;
     std::string CallFile;
@@ -401,7 +406,7 @@ private:
   std::vector<GoObjDebugGlobal> GoObjDebugGlobals;
   DenseSet<const MCSymbol *> GoObjInlineAnchorSymbols;
   unsigned GoObjDwarfVersion = 0;
-  std::string GoObjDwarfPackageName;
+  std::vector<GoObjDebugPackage> GoObjDebugPackages;
 
   /// A mapping from a local label number and an instance count to a symbol.
   /// For example, in the assembly
@@ -1147,11 +1152,13 @@ public:
 
   unsigned getGoObjDwarfVersion() const { return GoObjDwarfVersion; }
 
-  void setGoObjDwarfPackageName(StringRef Name) {
-    GoObjDwarfPackageName = Name.str();
+  void setGoObjDebugPackages(std::vector<GoObjDebugPackage> Packages) {
+    GoObjDebugPackages = std::move(Packages);
   }
 
-  StringRef getGoObjDwarfPackageName() const { return GoObjDwarfPackageName; }
+  ArrayRef<GoObjDebugPackage> getGoObjDebugPackages() const {
+    return GoObjDebugPackages;
+  }
 
   /// Allocates and returns a new `WasmSignature` instance (with empty parameter
   /// and return type lists).

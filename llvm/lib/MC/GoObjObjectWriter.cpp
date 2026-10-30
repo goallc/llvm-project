@@ -2992,12 +2992,11 @@ uint64_t GoObjObjectWriter::writeObject() {
 
   if (DwarfVersion != 0) {
     uint32_t PointerSize = Asm->getContext().getAsmInfo().getCodePointerSize();
-    StringRef PackageName = Asm->getContext().getGoObjDwarfPackageName();
-    if (!PackageName.empty() && !Config.PackagePath.empty()) {
+    for (const auto &Package : Asm->getContext().getGoObjDebugPackages()) {
       GoObjDwarfCarrierData Carrier;
-      Carrier.Data.append(PackageName.begin(), PackageName.end());
+      Carrier.Data.append(Package.Name.begin(), Package.Name.end());
       addDwarfCarrierSymbol(
-          Symbols, (Twine("go:cuinfo.packagename.") + Config.PackagePath).str(),
+          Symbols, (Twine("go:cuinfo.packagename.") + Package.Prefix).str(),
           GoObj::SDWARFCUINFO, GoObj::SymFlagDupok, std::move(Carrier));
     }
 

@@ -26,16 +26,14 @@ define internal goabiinternal i64 @original.specialized.1(i64 %x) !dbg !20 {
 
 !llvm.dbg.cu = !{!0}
 !llvm.module.flags = !{!5, !6}
-!goobj.debug.config = !{!7}
 !goobj.debug.funcs = !{!8}
-!0 = distinct !DICompileUnit(language: DW_LANG_Go, file: !1, producer: "Go compiler", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug)
+!0 = distinct !DICompileUnit(language: DW_LANG_Go, file: !22, producer: "Go compiler", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug, imports: !25)
 !1 = !DIFile(filename: "specialized.go", directory: "/tmp/goobj-debug")
 !2 = !DIBasicType(name: "int", size: 64, encoding: DW_ATE_signed)
 !3 = !DISubroutineType(types: !4)
 !4 = !{!2, !2}
 !5 = !{i32 2, !"Dwarf Version", i32 4}
 !6 = !{i32 2, !"Debug Info Version", i32 3}
-!7 = !{!"pcln-v1", !"main"}
 !8 = !{!10, ptr @original}
 !10 = distinct !DISubprogram(name: "original", linkageName: "original", file: !1, line: 3, type: !3, scopeLine: 3, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
 !11 = !DILocation(line: 4, scope: !10)
@@ -46,3 +44,8 @@ define internal goabiinternal i64 @original.specialized.1(i64 %x) !dbg !20 {
 ; CHECK: symdef [[CLONE:[0-9]+]]: original.specialized.1 abi=
 ; CHECK: aux [[ORIGINAL]].{{[0-9]+}}: type=dwarf_info target=
 ; CHECK: aux [[CLONE]].{{[0-9]+}}: type=dwarf_info target=
+
+!22 = !DIFile(filename: "main", directory: "")
+!23 = !DIModule(scope: null, name: "main", file: !22)
+!24 = !DIImportedEntity(tag: DW_TAG_imported_module, scope: !0, entity: !23)
+!25 = !{!24}

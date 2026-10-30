@@ -19,10 +19,13 @@
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/DebugProgramInstruction.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCContext.h"
@@ -36,12 +39,34 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 using namespace llvm;
 
 namespace {
+
+// Match the Go linker's package-prefix encoding (cmd/internal/objabi).
+// The native compile-unit file retains the unescaped import path.
+static std::string goPackagePrefix(StringRef Path) {
+  size_t LastSegment = Path.rfind('/');
+  LastSegment = LastSegment == StringRef::npos ? 0 : LastSegment + 1;
+  constexpr char Hex[] = "0123456789abcdef";
+  std::string Prefix;
+  for (size_t I = 0; I != Path.size(); ++I) {
+    unsigned char C = Path[I];
+    if (C <= ' ' || (C == '.' && I >= LastSegment) || C == '%' || C == '"' ||
+        C >= 0x7f) {
+      Prefix += '%';
+      Prefix += Hex[C >> 4];
+      Prefix += Hex[C & 15];
+    } else {
+      Prefix += C;
+    }
+  }
+  return Prefix;
+}
 
 class GoObjDebugHandler final : public DebugHandlerBase {
   AsmPrinter &Asm;
@@ -62,7 +87,8 @@ class GoObjDebugHandler final : public DebugHandlerBase {
     // LineTablesOnly CUs. Like the native Go compiler with -dwarf=false,
     // the latter need minimal function DIEs and line tables for the linker,
     // while retaining inline source locations for runtime PCDATA.
-    if (Asm.OutContext.getGoObjDwarfVersion() == 0 || !CU)
+    if (Asm.OutContext.getGoObjDwarfVersion() == 0 || !CU ||
+        CU->getSourceLanguage().getUnversionedName() != dwarf::DW_LANG_Go)
       return DwarfEmission::None;
     if (CU->getEmissionKind() == DICompileUnit::FullDebug)
       return DwarfEmission::Full;
@@ -416,29 +442,50 @@ public:
     M = Module;
 
     unsigned DwarfVersion = 0;
-    StringRef PackageName;
-    if (const NamedMDNode *Config = M->getNamedMetadata("goobj.debug.config")) {
-      if (Config->getNumOperands() != 1)
-        report_fatal_error("expected one !goobj.debug.config entry");
-      const MDNode *Entry = Config->getOperand(0);
-      if (Entry->getNumOperands() != 2 ||
-          !isa_and_nonnull<MDString>(Entry->getOperand(0)) ||
-          cast<MDString>(Entry->getOperand(0))->getString() != "pcln-v1")
-        report_fatal_error("unsupported GoObj debug configuration");
+    bool HasGoDebug = false;
+    std::vector<MCContext::GoObjDebugPackage> Packages;
+    for (const DICompileUnit *CU : M->debug_compile_units()) {
+      if (CU->getSourceLanguage().getUnversionedName() != dwarf::DW_LANG_Go ||
+          CU->getEmissionKind() == DICompileUnit::NoDebug)
+        continue;
+      HasGoDebug = true;
+      // A CU's own source module uses the CU's import-path file. This native
+      // relationship survives LLVM linking, even when the package is empty.
+      // Other imported modules are not definitions of the current package.
+      for (const DIImportedEntity *Import : CU->getImportedEntities()) {
+        const auto *Package = dyn_cast_or_null<DIModule>(Import->getEntity());
+        if (Import->getScope() != CU || !Package || Package->getScope() ||
+            Package->getIsDecl() || Package->getFile() != CU->getFile())
+          continue;
+        if (Package->getName().empty())
+          report_fatal_error("GoObj source module requires a package name");
+        StringRef Path = CU->getFile()->getFilename();
+        Packages.push_back({goPackagePrefix(Path), Package->getName().str()});
+      }
+    }
+    if (HasGoDebug) {
       const auto *Version = mdconst::dyn_extract_or_null<ConstantInt>(
           M->getModuleFlag("Dwarf Version"));
-      const auto *Name = dyn_cast_or_null<MDString>(Entry->getOperand(1));
-      if (!Version || (!Version->equalsInt(4) && !Version->equalsInt(5)) ||
-          !Name)
-        report_fatal_error("GoObj debug config requires Dwarf Version 4 or 5 "
-                           "and a package name");
+      if (!Version || (!Version->equalsInt(4) && !Version->equalsInt(5)))
+        report_fatal_error("GoObj debug info requires Dwarf Version 4 or 5");
       DwarfVersion = Version->getZExtValue();
-      PackageName = Name->getString();
     }
+    llvm::sort(Packages, [](const auto &L, const auto &R) {
+      return std::tie(L.Prefix, L.Name) < std::tie(R.Prefix, R.Name);
+    });
+    for (size_t I = 1; I < Packages.size(); ++I)
+      if (Packages[I - 1].Prefix == Packages[I].Prefix &&
+          Packages[I - 1].Name != Packages[I].Name)
+        report_fatal_error("conflicting GoObj source module names");
+    Packages.erase(llvm::unique(Packages,
+                                [](const auto &L, const auto &R) {
+                                  return L.Prefix == R.Prefix;
+                                }),
+                   Packages.end());
 
     MCContext &Context = Asm.OutStreamer->getContext();
     Context.setGoObjDwarfVersion(DwarfVersion);
-    Context.setGoObjDwarfPackageName(PackageName);
+    Context.setGoObjDebugPackages(std::move(Packages));
 
     if (const NamedMDNode *Funcs = M->getNamedMetadata("goobj.debug.funcs")) {
       for (const MDNode *Entry : Funcs->operands()) {
@@ -474,65 +521,88 @@ public:
     DenseMap<const DISubprogram *, std::vector<MCContext::GoObjDebugVariable>>
         Variables;
     DenseMap<const DILocalScope *, unsigned> DeclarationScopes;
-    if (const NamedMDNode *Vars = M->getNamedMetadata("goobj.debug.vars")) {
-      if (DwarfVersion == 0)
-        report_fatal_error(
-            "GoObj debug variables require a DWARF configuration");
-      for (const MDNode *Entry : Vars->operands()) {
-        if (Entry->getNumOperands() != 3 && Entry->getNumOperands() != 4)
-          report_fatal_error("expected !goobj.debug.vars entries to have three "
-                             "or four operands");
-        const auto *Var =
-            dyn_cast_or_null<DILocalVariable>(Entry->getOperand(0));
-        const auto *TypeName = dyn_cast_or_null<MDString>(Entry->getOperand(1));
-        const auto *FlagsMD =
-            dyn_cast_or_null<ConstantAsMetadata>(Entry->getOperand(2));
-        const auto *Flags =
-            FlagsMD ? dyn_cast<ConstantInt>(FlagsMD->getValue()) : nullptr;
-        const ConstantInt *DictIndex = nullptr;
-        if (Entry->getNumOperands() == 4) {
-          const auto *DictIndexMD =
-              dyn_cast_or_null<ConstantAsMetadata>(Entry->getOperand(3));
-          DictIndex = DictIndexMD
-                          ? dyn_cast<ConstantInt>(DictIndexMD->getValue())
-                          : nullptr;
-        }
-        if (!Var || !TypeName || !Flags ||
-            (Entry->getNumOperands() == 4 && !DictIndex))
-          report_fatal_error("invalid !goobj.debug.vars entry");
-        const DISubprogram *SP = Var->getScope()->getSubprogram();
-        if (!SP || !SubprogramSymbols.contains(SP))
-          report_fatal_error(
-              "GoObj debug variable has no exact subprogram symbol");
-        if (getDwarfEmission(SP) != DwarfEmission::Full)
-          continue;
+    auto AddVariable = [&](const DILocalVariable *Var) {
+      if (VariableInfo.contains(Var))
+        return;
+      const DISubprogram *SP = Var->getScope()->getSubprogram();
+      if (getDwarfEmission(SP) != DwarfEmission::Full)
+        return;
+      if (!SubprogramSymbols.contains(SP))
+        SubprogramSymbols.try_emplace(SP, getSubprogramSymbol(SP));
+      const DIType *Type = Var->getType();
+      if (!Type || Type->getName().empty())
+        report_fatal_error("GoObj debug variable requires a named DIType");
 
-        MCContext::GoObjDebugVariable Result;
-        Result.Name = Var->getName().str();
-        Result.TypeName = TypeName->getString().str();
-        Result.File = filePath(Var->getFile());
-        Result.DeclLine = Var->getLine();
-        Result.ArgNo = Var->getArg();
-        // Keep distinct lexical declarations even when their names and source
-        // lines match. Assign IDs in manifest order, never pointer-hash order.
-        // Subprogram-scoped variables still merge across inline instances.
-        const auto *Scope = Var->getScope()->getNonLexicalBlockFileScope();
-        if (!isa<DISubprogram>(Scope))
-          Result.DeclScope = DeclarationScopes
-                                 .try_emplace(Scope, DeclarationScopes.size() + 1)
-                                 .first->second;
-        if (DictIndex) {
-          uint64_t Value = DictIndex->getZExtValue();
-          if (Value > std::numeric_limits<uint16_t>::max())
-            report_fatal_error(
-                "GoObj debug variable dictionary index overflow");
-          Result.DictIndex = static_cast<uint16_t>(Value);
+      MCContext::GoObjDebugVariable Result;
+      Result.Name = Var->getName().str();
+      Result.TypeName = Type->getName().str();
+      Result.File = filePath(Var->getFile());
+      Result.DeclLine = Var->getLine();
+      Result.ArgNo = Var->getArg();
+      // Retained nodes preserve declaration order, including optimized-out
+      // variables. Keep distinct lexical declarations with the same name.
+      const auto *Scope = Var->getScope()->getNonLexicalBlockFileScope();
+      if (!isa<DISubprogram>(Scope))
+        Result.DeclScope =
+            DeclarationScopes.try_emplace(Scope, DeclarationScopes.size() + 1)
+                .first->second;
+      bool HasReturn = false, HasDictIndex = false;
+      if (const MDTuple *Annotations = Var->getAnnotations().get())
+        for (const MDOperand &Op : Annotations->operands()) {
+          const auto *Annotation = dyn_cast_or_null<MDTuple>(Op);
+          if (!Annotation)
+            report_fatal_error("invalid GoObj debug variable annotation");
+          const auto *Key =
+              Annotation->getNumOperands() > 0
+                  ? dyn_cast_or_null<MDString>(Annotation->getOperand(0))
+                  : nullptr;
+          if (!Key || (Key->getString() != "go.return" &&
+                       Key->getString() != "go.dictindex"))
+            continue;
+          const auto *Value =
+              Annotation->getNumOperands() == 2
+                  ? dyn_cast_or_null<MDString>(Annotation->getOperand(1))
+                  : nullptr;
+          unsigned Number;
+          if (!Value || Value->getString().getAsInteger(10, Number))
+            report_fatal_error("invalid GoObj debug variable annotation");
+          if (Key->getString() == "go.return") {
+            if (HasReturn || Number != 1 || !Var->isParameter())
+              report_fatal_error("invalid GoObj return variable annotation");
+            HasReturn = true;
+            Result.IsReturn = true;
+          } else {
+            if (HasDictIndex || Number == 0 || Number > UINT16_MAX)
+              report_fatal_error("invalid GoObj variable dictionary index");
+            HasDictIndex = true;
+            Result.DictIndex = Number;
+          }
         }
-        Result.IsReturn = (Flags->getZExtValue() & 1) != 0;
-        VariableInfo.try_emplace(Var, Result);
-        Variables[SP].push_back(std::move(Result));
-      }
-    }
+      VariableInfo.try_emplace(Var, Result);
+      Variables[SP].push_back(std::move(Result));
+    };
+
+    // LLVM owns the variable graph: retainedNodes preserve declarations, and
+    // debug records follow cloning and inlining. Abstract Go inline instances
+    // can additionally be rooted by their explicit subprogram-symbol mapping.
+    DebugInfoFinder Finder;
+    Finder.processModule(*M);
+    if (const NamedMDNode *Funcs = M->getNamedMetadata("goobj.debug.funcs"))
+      for (const MDNode *Entry : Funcs->operands())
+        Finder.processSubprogram(cast<DISubprogram>(Entry->getOperand(0)));
+    for (const DISubprogram *SP : Finder.subprograms())
+      for (const MDNode *Node : SP->getRetainedNodes())
+        if (const auto *Var = dyn_cast<DILocalVariable>(Node))
+          AddVariable(Var);
+    for (const Function &F : *M)
+      for (const BasicBlock &BB : F)
+        for (const Instruction &I : BB) {
+          for (const DbgRecord &Record : I.getDbgRecordRange())
+            if (const auto *Variable = dyn_cast<DbgVariableRecord>(&Record))
+              AddVariable(Variable->getVariable());
+          if (const auto *Variable = dyn_cast<DbgVariableIntrinsic>(&I))
+            AddVariable(Variable->getVariable());
+        }
 
     {
       // Multiple inline instances can describe the same emitted function.
@@ -579,7 +649,8 @@ public:
                                                 LHS.TypeName == RHS.TypeName &&
                                                 LHS.File == RHS.File &&
                                                 LHS.DeclLine == RHS.DeclLine &&
-                                                LHS.DeclScope == RHS.DeclScope &&
+                                                LHS.DeclScope ==
+                                                    RHS.DeclScope &&
                                                 LHS.ArgNo == RHS.ArgNo &&
                                                 LHS.DictIndex == RHS.DictIndex;
                                        }),
@@ -702,8 +773,7 @@ public:
         report_fatal_error(
             "GoObj inline anchor has no following source instruction");
       Location.AnchorChildFrames = getInlineFrames(It->getDebugLoc().get());
-      if (Location.AnchorChildFrames.size() <=
-              Location.InlineFrames.size() ||
+      if (Location.AnchorChildFrames.size() <= Location.InlineFrames.size() ||
           !std::equal(Location.InlineFrames.begin(),
                       Location.InlineFrames.end(),
                       Location.AnchorChildFrames.begin(),

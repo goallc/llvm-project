@@ -246,7 +246,7 @@ notnil:
 }
 
 !llvm.dbg.cu = !{!2}
-!llvm.module.flags = !{!3}
+!llvm.module.flags = !{!3, !11}
 
 !0 = !{!"goallc"}
 !1 = !{}
@@ -260,4 +260,6 @@ attributes #0 = { "frame-pointer"="non-leaf" }
 !8 = !DILocation(line: 20, column: 9, scope: !4)
 
 !9 = !DILocalVariable(name: "p", scope: !4, file: !5, line: 1, type: !10)
-!10 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: null, size: 64)
+!10 = !DIDerivedType(tag: DW_TAG_pointer_type, name: "unsafe.Pointer", baseType: null, size: 64)
+
+!11 = !{i32 2, !"Dwarf Version", i32 5}
