@@ -1879,9 +1879,6 @@ uint64_t GoObjObjectWriter::writeObject() {
     if (const auto *Markers = Asm->getContext().getGoObjMarkerRelocs(&Symbol))
       for (const auto &Marker : *Markers)
         AddPrivateTarget(Marker.Target);
-    if (const auto *Targets = Asm->getContext().getGoObjKeepTargets(&Symbol))
-      for (const MCSymbol *Target : *Targets)
-        AddPrivateTarget(Target);
     AddPrivateTarget(Asm->getContext().getGoObjGotypeTarget(&Symbol));
   }
 
@@ -3502,22 +3499,29 @@ uint64_t GoObjObjectWriter::writeObject() {
     }
   }
 
-  // R_KEEP has no bytes or MC fixup. It is a Go linker reachability edge
-  // carried separately from normal LLVM relocations by !goobj.keep.
-  for (GoObjSymbol &Source : Symbols) {
-    if (!Source.Symbol)
-      continue;
-    const auto *Targets = Asm->getContext().getGoObjKeepTargets(Source.Symbol);
-    if (!Targets)
-      continue;
-    for (const MCSymbol *Target : *Targets) {
-      int64_t Addend = 0;
-      GoObjSymRef TargetSymRef = GetTargetSymRef(Target, GoObj::R_KEEP, Addend);
-      Source.Relocations.push_back({0, 0, GoObj::R_KEEP, Addend,
-                                    TargetSymRef.PkgIdx, TargetSymRef.SymIdx,
-                                    std::nullopt});
+  // Preserve both symbol-reference assignment and equal-offset relocation
+  // order: all R_KEEP edges, indirect calls, then the remaining markers.
+  auto AppendMarkerRelocs = [&](bool Keep) {
+    for (GoObjSymbol &Source : Symbols) {
+      if (!Source.Symbol)
+        continue;
+      const auto *Markers =
+          Asm->getContext().getGoObjMarkerRelocs(Source.Symbol);
+      if (!Markers)
+        continue;
+      for (const MCContext::GoObjMarkerReloc &Marker : *Markers) {
+        if ((Marker.Type == GoObj::R_KEEP) != Keep)
+          continue;
+        int64_t Addend = Marker.Addend;
+        GoObjSymRef TargetSymRef =
+            GetTargetSymRef(Marker.Target, Marker.Type, Addend);
+        Source.Relocations.push_back({0, 0, Marker.Type, Addend,
+                                      TargetSymRef.PkgIdx, TargetSymRef.SymIdx,
+                                      std::nullopt});
+      }
     }
-  }
+  };
+  AppendMarkerRelocs(/*Keep=*/true);
 
   for (GoObjSymbol &Source : Symbols) {
     if (!Source.Symbol)
@@ -3546,21 +3550,7 @@ uint64_t GoObjObjectWriter::writeObject() {
     }
   }
 
-  for (GoObjSymbol &Source : Symbols) {
-    if (!Source.Symbol)
-      continue;
-    const auto *Markers = Asm->getContext().getGoObjMarkerRelocs(Source.Symbol);
-    if (!Markers)
-      continue;
-    for (const MCContext::GoObjMarkerReloc &Marker : *Markers) {
-      int64_t Addend = Marker.Addend;
-      GoObjSymRef TargetSymRef =
-          GetTargetSymRef(Marker.Target, Marker.Type, Addend);
-      Source.Relocations.push_back({0, 0, Marker.Type, Addend,
-                                    TargetSymRef.PkgIdx, TargetSymRef.SymIdx,
-                                    std::nullopt});
-    }
-  }
+  AppendMarkerRelocs(/*Keep=*/false);
 
   for (GoObjSymbol &Source : Symbols) {
     if (!Source.Symbol)
