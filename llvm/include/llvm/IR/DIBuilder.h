@@ -943,8 +943,7 @@ namespace llvm {
     createAutoVariable(DIScope *Scope, StringRef Name, DIFile *File,
                        unsigned LineNo, DIType *Ty, bool AlwaysPreserve = false,
                        DINode::DIFlags Flags = DINode::FlagZero,
-                       uint32_t AlignInBits = 0,
-                       DINodeArray Annotations = nullptr);
+                       uint32_t AlignInBits = 0);
 
     /// Create a new descriptor for an label.
     ///
