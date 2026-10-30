@@ -19,7 +19,7 @@ declare goabiinternal void @callee()
 declare goabiinternal void @other()
 declare goabiinternal void @uncalled()
 
-define goabiinternal ptr @weak_caller() "frame-pointer"="all" {
+define goabiinternal ptr @weak_caller() "frame-pointer"="all" !goobj.weak_calls !0 {
   call goabiinternal void @callee()
   call goabiinternal void @other()
   ret ptr @callee
@@ -31,9 +31,7 @@ define goabiinternal void @strong_caller() "frame-pointer"="all" {
   ret void
 }
 
-!goobj.weak_calls = !{!0, !1}
-!0 = !{ptr @weak_caller, ptr @callee}
-!1 = !{ptr @weak_caller, ptr @uncalled}
+!0 = !{ptr @callee, ptr @uncalled}
 
 ; X86-NOT: target=uncalled
 ; X86: reloc {{[0-9]+}}.{{[0-9]+}}: {{.*}}type=32775 add=0 target=callee
