@@ -1140,28 +1140,25 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
     AP.OutContext.setGoObjImportedSymbolRef(AP.getSymbol(&GO), std::move(Ref));
   }
 
-  if (const NamedMDNode *Calls = M.getNamedMetadata("goobj.weak_calls")) {
-    for (const MDNode *Entry : Calls->operands()) {
-      if (Entry->getNumOperands() != 2)
-        report_fatal_error(
-            "expected !goobj.weak_calls entries to have two operands");
-      const GlobalValue *Source =
-          getGoObjMetadataGlobal(Entry->getOperand(0), "goobj.weak_calls");
-      const GlobalValue *Target =
-          getGoObjMetadataGlobal(Entry->getOperand(1), "goobj.weak_calls");
-      if (!isa<Function>(Source) || Source->isDeclaration() ||
-          !isa<Function>(Target))
-        report_fatal_error("expected !goobj.weak_calls to name a defined "
-                           "caller and a function callee");
-      AP.OutContext.addGoObjWeakCall(AP.getSymbol(Source), AP.getSymbol(Target));
-    }
-  }
+  if (M.getNamedMetadata("goobj.weak_calls"))
+    report_fatal_error("GoObj weak calls require definition attachments");
 
   if (M.getNamedMetadata("goobj.keep") ||
       M.getNamedMetadata("goobj.marker_relocs"))
     report_fatal_error("GoObj keep/marker relations require definition attachments");
 
   for (const GlobalObject &GO : M.global_objects()) {
+    if (const MDNode *Calls = GO.getMetadata("goobj.weak_calls")) {
+      if (!isa<Function>(GO) || GO.isDeclaration())
+        report_fatal_error("!goobj.weak_calls requires a function definition");
+      for (const MDOperand &Op : Calls->operands()) {
+        const GlobalValue *Target = getGoObjMetadataGlobal(Op, "goobj.weak_calls");
+        if (!isa<Function>(Target))
+          report_fatal_error("!goobj.weak_calls requires function targets");
+        AP.OutContext.addGoObjWeakCall(AP.getSymbol(&GO), AP.getSymbol(Target));
+      }
+    }
+
     if (const MDNode *Keep = GO.getMetadata("goobj.keep")) {
       if (GO.isDeclarationForLinker())
         report_fatal_error("!goobj.keep requires a definition");
