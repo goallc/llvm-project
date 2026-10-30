@@ -8,14 +8,14 @@
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.min.arm64.o | FileCheck %s --check-prefixes=COMMON,MINIMAL --implicit-check-not=SDWARFABSFCN
 ; RUN: sed 's/i32 5}/i32 4}/' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.v4.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.v4.o | FileCheck %s --check-prefixes=COMMON,MIXED
-; RUN: sed '/^!goobj.debug.vars =/d; /^!goobj.debug.config =/d' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.pcln.o
+; RUN: sed 's/emissionKind: FullDebug/emissionKind: NoDebug/g; s/emissionKind: LineTablesOnly/emissionKind: NoDebug/g' %s | llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o %t.pcln.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.pcln.o | FileCheck %s --check-prefix=PCLN --implicit-check-not=SDWARF --implicit-check-not=type=dwarf_
 
 ; RUN: sed 's/!llvm.module.flags = !{!5, !6}/!llvm.module.flags = !{!6}/' %s | not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj -o /dev/null 2>&1 | FileCheck %s --check-prefix=VERSION
-; VERSION: GoObj debug config requires Dwarf Version 4 or 5 and a package name
+; VERSION: GoObj debug info requires Dwarf Version 4 or 5
 
-; LTO may combine FullDebug and LineTablesOnly CUs. The module config only
-; selects the Go DWARF encoding. Like native Go -dwarf=false, a LineTablesOnly
+; LLVM linking may combine FullDebug and LineTablesOnly CUs. The native
+; Dwarf Version module flag selects the Go DWARF encoding. Like native Go -dwarf=false, a LineTablesOnly
 ; function needs a minimal DIE and line table, but no variables or inline DIEs.
 ; Runtime PC tables must survive all three emission modes.
 
@@ -36,32 +36,27 @@ define goabiinternal i64 @minimal(i64 %x) !dbg !20 {
 
 !llvm.dbg.cu = !{!0, !1}
 !llvm.module.flags = !{!5, !6}
-!goobj.debug.config = !{!7}
 !goobj.debug.funcs = !{!8, !9}
-!goobj.debug.vars = !{!16, !26}
 
-!0 = distinct !DICompileUnit(language: DW_LANG_Go, file: !2, producer: "Go compiler", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug)
-!1 = distinct !DICompileUnit(language: DW_LANG_Go, file: !3, producer: "Go compiler", isOptimized: true, runtimeVersion: 0, emissionKind: LineTablesOnly)
+!0 = distinct !DICompileUnit(language: DW_LANG_Go, file: !56, producer: "Go compiler", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug, imports: !59)
+!1 = distinct !DICompileUnit(language: DW_LANG_Go, file: !56, producer: "Go compiler", isOptimized: true, runtimeVersion: 0, emissionKind: LineTablesOnly, imports: !61)
 !2 = !DIFile(filename: "full.go", directory: "/tmp/goobj-emission")
 !3 = !DIFile(filename: "minimal.go", directory: "/tmp/goobj-emission")
 !4 = !DISubroutineType(types: !17)
 !5 = !{i32 2, !"Dwarf Version", i32 5}
 !6 = !{i32 2, !"Debug Info Version", i32 3}
-!7 = !{!"pcln-v1", !"main"}
 !8 = !{!10, ptr @full}
 !9 = !{!20, ptr @minimal}
 !10 = distinct !DISubprogram(name: "full", linkageName: "full", file: !2, line: 10, type: !4, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0, retainedNodes: !14)
 !12 = !DILocation(line: 11, scope: !10)
 !14 = !{!15}
 !15 = !DILocalVariable(name: "x", arg: 1, scope: !10, file: !2, line: 10, type: !18)
-!16 = !{!15, !"int", i32 0}
 !17 = !{!18, !18}
 !18 = !DIBasicType(name: "int", size: 64, encoding: DW_ATE_signed)
 !20 = distinct !DISubprogram(name: "minimal", linkageName: "minimal", file: !3, line: 20, type: !4, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !1, retainedNodes: !24)
 !22 = !DILocation(line: 21, scope: !20)
 !24 = !{!25}
 !25 = !DILocalVariable(name: "x", arg: 1, scope: !20, file: !3, line: 20, type: !18)
-!26 = !{!25, !"int", i32 0}
 !50 = !DIGlobalVariableExpression(var: !51, expr: !DIExpression())
 !51 = distinct !DIGlobalVariable(name: "main.full.global", linkageName: "main.full.global", scope: !0, file: !2, line: 2, type: !18, isLocal: false, isDefinition: true)
 !52 = !DIGlobalVariableExpression(var: !53, expr: !DIExpression())
@@ -93,3 +88,12 @@ define goabiinternal i64 @minimal(i64 %x) !dbg !20 {
 ; PCLN: type=pcfile
 ; PCLN: type=pcline
 ; MINIMAL-NOT: reloc [[FULLINFO]].{{.*}}kind=R_USETYPE
+
+
+
+!56 = !DIFile(filename: "main", directory: "")
+!57 = !DIModule(scope: null, name: "main", file: !56)
+!58 = !DIImportedEntity(tag: DW_TAG_imported_module, scope: !0, entity: !57)
+!59 = !{!58}
+!60 = !DIImportedEntity(tag: DW_TAG_imported_module, scope: !1, entity: !57)
+!61 = !{!60}

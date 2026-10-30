@@ -54,46 +54,38 @@ define goabiinternal i64 @"main.pieces"(i64 %x, i64 %y) !dbg !50 {
 
 !llvm.dbg.cu = !{!0}
 !llvm.module.flags = !{!5, !6}
-!goobj.debug.config = !{!7}
 !goobj.debug.funcs = !{!8, !9, !14, !44, !55}
-!goobj.debug.vars = !{!15, !25, !35, !45, !56}
-!0 = distinct !DICompileUnit(language: DW_LANG_Go, file: !1, producer: "Go compiler", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug)
+!0 = distinct !DICompileUnit(language: DW_LANG_Go, file: !64, producer: "Go compiler", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug, imports: !67)
 !1 = !DIFile(filename: "locations.go", directory: "/tmp")
 !2 = !DIBasicType(name: "int", size: 64, encoding: DW_ATE_signed)
 !3 = !DISubroutineType(types: !4)
 !4 = !{!2, !2}
 !5 = !{i32 2, !"Dwarf Version", i32 4}
 !6 = !{i32 2, !"Debug Info Version", i32 3}
-!7 = !{!"pcln-v1", !"main"}
 !8 = !{!10, ptr @"main.stack"}
 !9 = !{!20, ptr @"main.register"}
 !14 = !{!30, ptr @"main.unavailable"}
-!10 = distinct !DISubprogram(name: "main.stack", linkageName: "main.stack", file: !1, line: 1, type: !3, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!10 = distinct !DISubprogram(name: "main.stack", linkageName: "main.stack", file: !1, line: 1, type: !3, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0, retainedNodes: !59)
 !12 = !DILocalVariable(name: "x", arg: 1, scope: !10, file: !1, line: 1, type: !2)
 !13 = !DILocation(line: 2, column: 1, scope: !10)
-!15 = !{!12, !"int", i32 0}
-!20 = distinct !DISubprogram(name: "main.register", linkageName: "main.register", file: !1, line: 4, type: !3, scopeLine: 4, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!20 = distinct !DISubprogram(name: "main.register", linkageName: "main.register", file: !1, line: 4, type: !3, scopeLine: 4, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0, retainedNodes: !60)
 !22 = !DILocalVariable(name: "x", arg: 1, scope: !20, file: !1, line: 4, type: !2)
 !23 = !DILocation(line: 5, column: 1, scope: !20)
 !24 = !DILocation(line: 6, column: 1, scope: !20)
-!25 = !{!22, !"int", i32 0}
-!30 = distinct !DISubprogram(name: "main.unavailable", linkageName: "main.unavailable", file: !1, line: 8, type: !3, scopeLine: 8, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!30 = distinct !DISubprogram(name: "main.unavailable", linkageName: "main.unavailable", file: !1, line: 8, type: !3, scopeLine: 8, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0, retainedNodes: !61)
 !32 = !DILocalVariable(name: "x", arg: 1, scope: !30, file: !1, line: 8, type: !2)
 !33 = !DILocation(line: 9, column: 1, scope: !30)
-!35 = !{!32, !"int", i32 0}
 
 
-!40 = distinct !DISubprogram(name: "main.heap", linkageName: "main.heap", file: !1, line: 11, type: !3, scopeLine: 11, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!40 = distinct !DISubprogram(name: "main.heap", linkageName: "main.heap", file: !1, line: 11, type: !3, scopeLine: 11, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0, retainedNodes: !62)
 !42 = !DILocalVariable(name: "heap", arg: 1, scope: !40, file: !1, line: 11, type: !2)
 !43 = !DILocation(line: 12, column: 1, scope: !40)
 !44 = !{!40, ptr @"main.heap"}
-!45 = !{!42, !"int", i32 0}
-!50 = distinct !DISubprogram(name: "main.pieces", linkageName: "main.pieces", file: !1, line: 14, type: !3, scopeLine: 14, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!50 = distinct !DISubprogram(name: "main.pieces", linkageName: "main.pieces", file: !1, line: 14, type: !3, scopeLine: 14, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0, retainedNodes: !63)
 !52 = !DILocalVariable(name: "pair", scope: !50, file: !1, line: 14, type: !57)
 !53 = !DILocation(line: 15, column: 1, scope: !50)
 !54 = !DILocation(line: 16, column: 1, scope: !50)
 !55 = !{!50, ptr @"main.pieces"}
-!56 = !{!52, !"pair", i32 0}
 !57 = !DICompositeType(tag: DW_TAG_structure_type, name: "pair", file: !1, size: 128, elements: !58)
 !58 = !{}
 
@@ -129,3 +121,14 @@ define goabiinternal i64 @"main.pieces"(i64 %x, i64 %y) !dbg !50 {
 ; ARM64: aux 3.{{[0-9]+}}: type=dwarf_info
 ; ARM64: aux 3.{{[0-9]+}}: type=dwarf_loc target= data=00000000000000000000000000000000030091080600000000000000000000000000000000
 ; ARM64: aux 4.{{[0-9]+}}: type=dwarf_loc target= data=000000000000000000000000000000000500930851930800000000000000000000000000000000
+
+!59 = !{!12}
+!60 = !{!22}
+!61 = !{!32}
+!62 = !{!42}
+!63 = !{!52}
+
+!64 = !DIFile(filename: "main", directory: "")
+!65 = !DIModule(scope: null, name: "main", file: !64)
+!66 = !DIImportedEntity(tag: DW_TAG_imported_module, scope: !0, entity: !65)
+!67 = !{!66}
