@@ -1139,14 +1139,14 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
       }
     }
 
+    std::vector<MCContext::GoObjMarkerReloc> Relocs;
     if (const MDNode *Keep = GO.getMetadata("goobj.keep")) {
       if (GO.isDeclarationForLinker())
         report_fatal_error("!goobj.keep requires a definition");
-      std::vector<const MCSymbol *> Targets;
       for (const MDOperand &Op : Keep->operands())
-        Targets.push_back(AP.getSymbol(
-            getGoObjMetadataGlobal(Op, "goobj.keep")));
-      AP.OutContext.setGoObjKeepTargets(AP.getSymbol(&GO), std::move(Targets));
+        Relocs.push_back(
+            {AP.getSymbol(getGoObjMetadataGlobal(Op, "goobj.keep")),
+             GoObj::R_KEEP, 0});
     }
 
     if (const MDNode *Type = GO.getMetadata("goobj.gotype")) {
@@ -1160,7 +1160,6 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
     if (const MDNode *Markers = GO.getMetadata("goobj.marker_relocs")) {
       if (GO.isDeclarationForLinker())
         report_fatal_error("!goobj.marker_relocs requires a definition");
-      std::vector<MCContext::GoObjMarkerReloc> Relocs;
       for (const MDOperand &Op : Markers->operands()) {
         const auto *Entry = dyn_cast_or_null<MDNode>(Op);
         if (!Entry || Entry->getNumOperands() != 3)
@@ -1188,8 +1187,9 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
                           static_cast<uint16_t>(Type->getZExtValue()),
                           Addend->getSExtValue()});
       }
-      AP.OutContext.setGoObjMarkerRelocs(AP.getSymbol(&GO), std::move(Relocs));
     }
+    if (!Relocs.empty())
+      AP.OutContext.setGoObjMarkerRelocs(AP.getSymbol(&GO), std::move(Relocs));
   }
 }
 

@@ -357,10 +357,8 @@ private:
   /// Direct call edges which do not make their target reachable in Go's linker.
   DenseSet<std::pair<const MCSymbol *, const MCSymbol *>> GoObjWeakCalls;
 
-  /// Go object zero-width R_KEEP targets keyed by their source symbol.
-  DenseMap<const MCSymbol *, std::vector<const MCSymbol *>> GoObjKeepTargets;
-
-  /// Go object zero-width linker marker relocations keyed by source symbol.
+  /// Go object zero-width linker marker relocations, including R_KEEP, keyed
+  /// by source symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjMarkerReloc>> GoObjMarkerRelocs;
 
   /// Imported packages and their opaque linker fingerprints, in source order.
@@ -949,19 +947,6 @@ public:
 
   bool isGoObjWeakCall(const MCSymbol *Source, const MCSymbol *Target) const {
     return GoObjWeakCalls.contains({Source, Target});
-  }
-
-  void setGoObjKeepTargets(const MCSymbol *Sym,
-                           std::vector<const MCSymbol *> Targets) {
-    GoObjKeepTargets[Sym] = std::move(Targets);
-  }
-
-  const std::vector<const MCSymbol *> *
-  getGoObjKeepTargets(const MCSymbol *Sym) const {
-    auto It = GoObjKeepTargets.find(Sym);
-    if (It == GoObjKeepTargets.end())
-      return nullptr;
-    return &It->second;
   }
 
   void setGoObjMarkerRelocs(const MCSymbol *Sym,
