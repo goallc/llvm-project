@@ -86,7 +86,8 @@ public:
   /// linker models the sequence as a unit. Returns true when Current was
   /// consumed by Previous.
   virtual bool mergeRelocations(GoObjRelocationEntry &Previous,
-                                const GoObjRelocationEntry &Current) const {
+                                const GoObjRelocationEntry &Current,
+                                bool FromAssembly = false) const {
     return false;
   }
 };

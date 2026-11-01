@@ -128,6 +128,89 @@ class GoObjAsmParser : public MCAsmParserExtension {
     return false;
   }
 
+  bool parseSymbol(const MCSymbol *&Sym) {
+    StringRef Name;
+    if (getParser().parseIdentifier(Name))
+      return TokError("expected GoObj symbol");
+    Sym = getContext().getOrCreateSymbol(Name);
+    return false;
+  }
+
+  bool parseInteger(int64_t &Value) {
+    return getParser().parseToken(AsmToken::Comma) ||
+           getParser().parseAbsoluteExpression(Value);
+  }
+
+  bool parseDirectiveAssembly(StringRef, SMLoc) {
+    if (parseEOL())
+      return true;
+    getContext().setGoObjFromAssembly();
+    return false;
+  }
+
+  bool parseDirectiveAsmFunction(StringRef, SMLoc) {
+    const MCSymbol *Sym;
+    int64_t Args, Locals, ID, Flags, Line;
+    if (parseSymbol(Sym) || parseInteger(Args) || parseInteger(Locals) ||
+        parseInteger(ID) || parseInteger(Flags) || parseInteger(Line) ||
+        parseEOL())
+      return true;
+    if (Args < INT32_MIN || Args > UINT32_MAX || Locals < INT32_MIN ||
+        Locals > INT32_MAX || ID < 0 || ID > UINT8_MAX || Flags < 0 ||
+        Flags > UINT8_MAX || Line < 0 || Line > INT32_MAX)
+      return TokError("invalid GoObj assembly function metadata");
+    auto &Info = getContext().getOrCreateGoObjAsmFunction(Sym);
+    Info.Args = Args;
+    Info.Locals = Locals;
+    Info.FuncID = ID;
+    Info.FuncFlag = Flags;
+    Info.StartLine = Line;
+    return false;
+  }
+
+  bool parseDirectiveAsmPC(StringRef, SMLoc) {
+    const MCSymbol *Sym, *Label;
+    int64_t Kind, Value;
+    std::string File;
+    if (parseSymbol(Sym) || getParser().parseToken(AsmToken::Comma) ||
+        parseSymbol(Label) || parseInteger(Kind) || parseInteger(Value))
+      return true;
+    if (Kind < -5 || Kind == -1 || Kind > 65535 || Value < INT32_MIN ||
+        Value > INT32_MAX || (Kind == -4 && Value < 0))
+      return TokError("invalid GoObj assembly PC event");
+    if (Kind == -2 && (getParser().parseToken(AsmToken::Comma) ||
+                       getParser().parseEscapedString(File)))
+      return true;
+    if (parseEOL())
+      return true;
+    if (Kind == -5) {
+      getContext().addGoObjSymbolIndirectCallLabel(Sym, Label);
+      return false;
+    }
+    getContext().getOrCreateGoObjAsmFunction(Sym).Events.push_back(
+        {Label, static_cast<int32_t>(Kind), static_cast<int32_t>(Value),
+         std::move(File)});
+    return false;
+  }
+
+  bool parseDirectiveAsmFuncdata(StringRef, SMLoc) {
+    const MCSymbol *Sym, *Target;
+    int64_t Index;
+    if (parseSymbol(Sym) || parseInteger(Index) ||
+        getParser().parseToken(AsmToken::Comma) || parseSymbol(Target) ||
+        parseEOL())
+      return true;
+    if (Index < 0 || Index > 255)
+      return TokError("invalid GoObj assembly FUNCDATA index");
+    auto &Data = getContext().getOrCreateGoObjAsmFunction(Sym).Funcdata;
+    if (Data.size() <= static_cast<size_t>(Index))
+      Data.resize(Index + 1);
+    if (Data[Index])
+      return TokError("duplicate GoObj assembly FUNCDATA index");
+    Data[Index] = Target;
+    return false;
+  }
+
 public:
   GoObjAsmParser() = default;
 
@@ -141,6 +224,13 @@ public:
         ".rodata");
     addDirectiveHandler<&GoObjAsmParser::parseDirectiveSection>(".section");
     addDirectiveHandler<&GoObjAsmParser::parseDirectiveCgo>(".goobj.cgo");
+    addDirectiveHandler<&GoObjAsmParser::parseDirectiveAssembly>(
+        ".goobj.assembly");
+    addDirectiveHandler<&GoObjAsmParser::parseDirectiveAsmFunction>(
+        ".goobj.asmfunc");
+    addDirectiveHandler<&GoObjAsmParser::parseDirectiveAsmPC>(".goobj.asmpc");
+    addDirectiveHandler<&GoObjAsmParser::parseDirectiveAsmFuncdata>(
+        ".goobj.asmfuncdata");
   }
 };
 

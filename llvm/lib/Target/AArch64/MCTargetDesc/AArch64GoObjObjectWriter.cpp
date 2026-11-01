@@ -29,7 +29,8 @@ public:
   int64_t getRelocAddend(const MCValue &Target,
                          const MCFixup &Fixup) const override;
   bool mergeRelocations(GoObjRelocationEntry &Previous,
-                        const GoObjRelocationEntry &Current) const override;
+                        const GoObjRelocationEntry &Current,
+                        bool FromAssembly) const override;
 };
 
 } // end anonymous namespace
@@ -111,9 +112,11 @@ unsigned AArch64GoObjObjectWriter::getRelocType(const MCValue &Target,
 }
 
 bool AArch64GoObjObjectWriter::mergeRelocations(
-    GoObjRelocationEntry &Previous,
-    const GoObjRelocationEntry &Current) const {
-  if (!useAArch64GoObjCompositeRelocations())
+    GoObjRelocationEntry &Previous, const GoObjRelocationEntry &Current,
+    bool FromAssembly) const {
+  // Assembly sequences must retain the relocation pairs understood by the Go
+  // linker, including its dynamic-import rewriting on Darwin.
+  if (!FromAssembly && !useAArch64GoObjCompositeRelocations())
     return false;
 
   // getRelocAddend subtracts one instruction from the PC-relative ADRP,
