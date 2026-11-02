@@ -159,7 +159,11 @@ jobs:
             "$build/test/MC/GoObj"
             "$build/test/Transforms/PreISelIntrinsicLowering/X86/goobj-memory.ll"
           )
-          "$build/bin/llvm-lit" -sv "${tests[@]}"
+          lit="$build/bin/llvm-lit"
+          if [[ -f "$lit.py" ]]; then
+            lit="$lit.py"
+          fi
+          python3 "$lit" -sv "${tests[@]}"
 
       - name: Validate relocatable payload
         shell: bash
