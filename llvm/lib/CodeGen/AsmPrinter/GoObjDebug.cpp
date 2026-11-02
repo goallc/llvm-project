@@ -414,7 +414,7 @@ class GoObjDebugHandler final : public DebugHandlerBase {
         continue;
       SmallVector<const DbgValueHistoryMap::Entry *, 4> Active;
       for (auto [N, Entry] : enumerate(Entries)) {
-        erase_if(Active, [&](const auto *E) { return E->getEndIndex() <= N; });
+        erase_if(Active, [N = N](const auto *E) { return E->getEndIndex() <= N; });
         if (Entry.isDbgValue() && !Entry.getInstr()->isUndefDebugValue())
           Active.push_back(&Entry);
         auto Label = [&](const auto &E) {
