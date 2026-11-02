@@ -25,6 +25,7 @@
 #include "X86ShuffleDecodeConstantPool.h"
 #include "X86Subtarget.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/CodeGen/MachineBranchProbabilityInfo.h"
@@ -2301,6 +2302,7 @@ bool hasJumpTableInfoInBlock(const llvm::MachineInstr *MI) {
 }
 
 void X86AsmPrinter::emitInstruction(const MachineInstr *MI) {
+  scope_exit RecordGoSEH([&] { recordGoSEHInstruction(*MI); });
   // FIXME: Enable feature predicate checks once all the test pass.
   // X86_MC::verifyInstructionPredicates(MI->getOpcode(),
   //                                     Subtarget->getFeatureBits());

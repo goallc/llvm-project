@@ -54,18 +54,20 @@ jobs:
           )
           matching=()
           for name in "${artifact_names[@]}"; do
-            if [[ "$name" =~ ^goallc-llvm-pr([1-9][0-9]*)-([0-9a-f]{40})-linux-(amd64|arm64)$ ]]; then
+            if [[ "$name" =~ ^goallc-llvm-pr([1-9][0-9]*)-([0-9a-f]{40})-(linux-amd64|linux-arm64|darwin-arm64|windows-amd64)$ ]]; then
               matching+=("$name")
               pr_number=${BASH_REMATCH[1]}
               revision=${BASH_REMATCH[2]}
             fi
           done
-          test "${#matching[@]}" -eq 2
+          test "${#matching[@]}" -eq 4
           prefix="goallc-llvm-pr$pr_number-$revision"
           printf '%s\n' "${matching[@]}" | sort -u \
             | diff -u - <(printf '%s\n' \
+                "$prefix-darwin-arm64" \
                 "$prefix-linux-amd64" \
-                "$prefix-linux-arm64")
+                "$prefix-linux-arm64" \
+                "$prefix-windows-amd64")
 
           pull=$(gh api "repos/goallc/llvm-project/pulls/$pr_number")
           test "$(jq -r .state <<<"$pull")" = open
@@ -99,7 +101,7 @@ jobs:
           github-token: ${{ github.token }}
           repository: goallc/llvm-project
           run-id: ${{ env.LLVM_WORKFLOW_RUN_ID }}
-          pattern: goallc-llvm-pr${{ steps.source.outputs.pr_number }}-${{ steps.source.outputs.revision }}-linux-*
+          pattern: goallc-llvm-pr${{ steps.source.outputs.pr_number }}-${{ steps.source.outputs.revision }}-*
           path: ${{ runner.temp }}/payloads
 
       - name: Validate payload artifacts without executing them
@@ -111,9 +113,9 @@ jobs:
           mkdir -p "$upload_dir"
           test -z "$(find "$RUNNER_TEMP/payloads" -type l -print -quit)"
 
-          for arch in amd64 arm64; do
-            artifact_dir="$RUNNER_TEMP/payloads/$prefix-linux-$arch"
-            archive="$prefix-linux-$arch.tar.zst"
+          for platform in linux-amd64 linux-arm64 darwin-arm64 windows-amd64; do
+            artifact_dir="$RUNNER_TEMP/payloads/$prefix-$platform"
+            archive="$prefix-$platform.tar.zst"
             test -d "$artifact_dir"
             test "$(find "$artifact_dir" -mindepth 1 -maxdepth 1 | wc -l)" -eq 2
             test -f "$artifact_dir/$archive"
@@ -169,9 +171,9 @@ jobs:
                 | select(
                     (.name | test(
                       "^goallc-llvm-pr" + $pr
-                      + "-[0-9a-f]{40}-linux-(amd64|arm64)\\.tar\\.zst(\\.sha256)?$"
+                      + "-[0-9a-f]{40}-(linux-amd64|linux-arm64|darwin-arm64|windows-amd64)\\.tar\\.zst(\\.sha256)?$"
                     ))
-                    and (.name | startswith($keep + "-linux-") | not)
+                    and (.name | startswith($keep + "-") | not)
                   )
                 | .id
               ' \
@@ -207,7 +209,7 @@ jobs:
                 .[]
                 | select(.name | test(
                     "^goallc-llvm-pr" + $pr
-                    + "-[0-9a-f]{40}-linux-(amd64|arm64)\\.tar\\.zst(\\.sha256)?$"
+                    + "-[0-9a-f]{40}-(linux-amd64|linux-arm64|darwin-arm64|windows-amd64)\\.tar\\.zst(\\.sha256)?$"
                   ))
                 | .id
               ' \

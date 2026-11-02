@@ -19,19 +19,32 @@ concurrency:
 jobs:
   payload:
     if: github.repository == 'goallc/llvm-project'
-    name: linux-${{ matrix.arch }}
+    name: ${{ matrix.os }}-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: amd64
+          - os: linux
+            arch: amd64
             runner: ubuntu-22.04
             build_jobs: 2
-          - arch: arm64
+          - os: linux
+            arch: arm64
             runner: ubuntu-22.04-arm
             build_jobs: auto
+          - os: darwin
+            arch: arm64
+            runner: macos-14
+            build_jobs: 3
+          - os: windows
+            arch: amd64
+            runner: windows-2025
+            build_jobs: 4
+    defaults:
+      run:
+        shell: bash
     env:
       LLVM_SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       LLVM_ARTIFACT_PREFIX: ${{ github.event_name == 'pull_request' && format('goallc-llvm-pr{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) || format('goallc-llvm-commit-{0}', github.sha) }}
@@ -47,39 +60,33 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Install build dependencies
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            ccache \
-            libedit-dev \
-            libxml2-dev \
-            libzstd-dev \
-            ninja-build \
-            zlib1g-dev
+          sudo apt-get install -y ccache ninja-build zstd
+
+      - name: Install Darwin build dependencies
+        if: runner.os == 'macOS'
+        run: brew install ccache ninja zstd
+
+      - name: Install Windows compiler toolchain
+        if: runner.os == 'Windows'
+        run: bash llvm/utils/goallc/setup-windows-toolchain.bash
 
       - name: Restore ccache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: goallc-llvm23-ci-linux-${{ matrix.arch }}-${{ env.LLVM_SOURCE_REVISION }}
+          key: goallc-llvm23-ci-${{ matrix.os }}-${{ matrix.arch }}-${{ env.LLVM_SOURCE_REVISION }}
           restore-keys: |
-            goallc-llvm23-ci-linux-${{ matrix.arch }}-
-
-      - name: Report runner resources
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "architecture=$(uname -m)"
-          echo "logical_cpus=$(nproc)"
-          free -h
-          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+            goallc-llvm23-ci-${{ matrix.os }}-${{ matrix.arch }}-
 
       - name: Build installed LLVM payload
         shell: bash
         run: |
           set -euo pipefail
-          asset_base="$LLVM_ARTIFACT_PREFIX-linux-${{ matrix.arch }}"
+          asset_base="$LLVM_ARTIFACT_PREFIX-${{ matrix.os }}-${{ matrix.arch }}"
           build_jobs='${{ matrix.build_jobs }}'
           if [[ "$build_jobs" == auto ]]; then
             build_jobs="$(nproc)"
@@ -90,7 +97,6 @@ jobs:
           GOALLC_BUILD_TYPE=Release \
           GOALLC_LLVM_TARGETS='X86;AArch64' \
           GOALLC_BUILD_JOBS="$build_jobs" \
-          GOALLC_CCACHE=/usr/bin/ccache \
             ./llvm/utils/goallc/build-payload.bash
 
       - name: Test core Go and GoObj LLVM support
@@ -140,6 +146,7 @@ jobs:
             "$build/test/CodeGen/X86/go-statepoint-stack-results.ll"
             "$build/test/CodeGen/X86/goobj-content-addressable-cycle.ll"
             "$build/test/CodeGen/X86/goobj-filetype.ll"
+            "$build/test/CodeGen/X86/goobj-windows.ll"
             "$build/test/CodeGen/X86/goobj-import-references.ll"
             "$build/test/CodeGen/X86/goobj-jump-table-boundaries.ll"
             "$build/test/CodeGen/X86/goobj-retpoline.ll"
@@ -161,77 +168,38 @@ jobs:
             "$build/test/MC/GoObj"
             "$build/test/Transforms/PreISelIntrinsicLowering/X86/goobj-memory.ll"
           )
-          "$build/bin/llvm-lit" -sv "${tests[@]}"
+          lit="$build/bin/llvm-lit"
+          if [[ -f "$lit.py" ]]; then
+            lit="$lit.py"
+          fi
+          python3 "$lit" -sv "${tests[@]}"
 
       - name: Validate relocatable payload
         shell: bash
         run: |
           set -euo pipefail
-          asset_base="$LLVM_ARTIFACT_PREFIX-linux-${{ matrix.arch }}"
+          asset_base="$LLVM_ARTIFACT_PREFIX-${{ matrix.os }}-${{ matrix.arch }}"
           mkdir -p "$RUNNER_TEMP/relocated"
           mv "$RUNNER_TEMP/$asset_base" "$RUNNER_TEMP/relocated/$asset_base"
-          payload="$RUNNER_TEMP/relocated/$asset_base"
-
-          cmake_version_component() {
-            sed -n "s/^[[:space:]]*set(LLVM_VERSION_$1 \\([^)]*\\)).*/\\1/p" \
-              cmake/Modules/LLVMVersion.cmake | tail -n 1
-          }
-          expected_llvm_version="$(cmake_version_component MAJOR).$(cmake_version_component MINOR).$(cmake_version_component PATCH)$(cmake_version_component SUFFIX)"
-
-          test "$("$payload/bin/llvm-config" --prefix)" = "$payload"
-          test "$("$payload/bin/llvm-config" --version)" = "$expected_llvm_version"
-          test "$("$payload/bin/llvm-config" --build-mode)" = Release
-          grep -Fx "llvm_revision=$LLVM_SOURCE_REVISION" \
-            "$payload/share/goallc/build-manifest"
-          grep -Fx 'llvm_dirty=false' "$payload/share/goallc/build-manifest"
-          grep -Fx 'build_type=Release' "$payload/share/goallc/build-manifest"
-          for target in X86 AArch64; do
-            "$payload/bin/llvm-config" --targets-built \
-              | tr ' ' '\n' | grep -Fx "$target"
-          done
-          for path in \
-            bin/FileCheck \
-            bin/llc \
-            bin/llvm-ar \
-            bin/llvm-config \
-            bin/opt \
-            include/llvm-c/Core.h \
-            include/llvm/Config/llvm-config.h \
-            lib/cmake/llvm/AddLLVM.cmake \
-            lib/cmake/llvm/LLVMConfig.cmake \
-            lib/cmake/llvm/LLVMExports.cmake \
-            lib/libLLVMCore.a; do
-            test -e "$payload/$path"
-          done
-          find "$payload/lib" -maxdepth 1 \
-            -name 'libLLVM.so*' -print -quit | grep .
-          env -u LD_LIBRARY_PATH "$payload/bin/llc" --version
-          env -u LD_LIBRARY_PATH "$payload/bin/opt" --version
-          if ldd "$payload/bin/llc" | grep 'not found'; then
-            exit 1
-          fi
+          bash llvm/utils/goallc/validate-payload.bash "$RUNNER_TEMP/relocated/$asset_base" "$LLVM_SOURCE_REVISION"
 
       - name: Package payload
         shell: bash
         run: |
           set -euo pipefail
-          asset_base="$LLVM_ARTIFACT_PREFIX-linux-${{ matrix.arch }}"
+          asset_base="$LLVM_ARTIFACT_PREFIX-${{ matrix.os }}-${{ matrix.arch }}"
           archive="$asset_base.tar.zst"
           artifact_dir="$RUNNER_TEMP/artifact"
           mkdir -p "$artifact_dir"
-          tar --zstd -cf "$artifact_dir/$archive" \
-            -C "$RUNNER_TEMP/relocated" "$asset_base"
-          (
-            cd "$artifact_dir"
-            sha256sum "$archive" >"$archive.sha256"
-            sha256sum --check --strict "$archive.sha256"
-          )
+          tar -cf - -C "$RUNNER_TEMP/relocated" "$asset_base" | zstd -T0 -o "$artifact_dir/$archive"
+          python3 llvm/utils/goallc/checksum-payload.py "$artifact_dir/$archive"
+          python3 llvm/utils/goallc/checksum-payload.py --check "$artifact_dir/$archive"
           du -h "$artifact_dir/$archive"
 
       - name: Upload payload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ env.LLVM_ARTIFACT_PREFIX }}-linux-${{ matrix.arch }}
+          name: ${{ env.LLVM_ARTIFACT_PREFIX }}-${{ matrix.os }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/artifact/*
           if-no-files-found: error
           compression-level: 0
@@ -239,4 +207,4 @@ jobs:
 
       - name: Report ccache
         if: always()
-        run: ccache -s
+        run: if command -v ccache; then ccache -s; fi
