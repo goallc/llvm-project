@@ -25,6 +25,7 @@ PY
 }
 fetch() {
   local name=$1 url=$2 sha=$3
+  shift 3
   local archive="$GOALLC_DEPS_BUILD/$name.tar.gz"
   if [[ ! -f $archive ]]; then
     curl --fail --location --retry 5 "$url" -o "$archive.tmp"
@@ -34,13 +35,23 @@ fetch() {
     verify_archive "$archive" "$sha"
   fi
   if [[ ! -d "$GOALLC_DEPS_BUILD/$name" ]]; then
+    local unpack
+    unpack=$(mktemp -d "$GOALLC_DEPS_BUILD/.unpack.XXXXXX")
     # GNU tar treats a Windows drive letter in -f as a remote host. Let the
     # shell open the archive so both native drive paths and POSIX paths work.
-    tar -xzf - -C "$GOALLC_DEPS_BUILD" < "$archive"
+    if ! tar -xzf - -C "$unpack" "$@" < "$archive"; then
+      rm -rf "$unpack"
+      return 1
+    fi
+    mv "$unpack/$name" "$GOALLC_DEPS_BUILD/$name"
+    rmdir "$unpack"
   fi
 }
 fetch zlib-1.3.2 https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
-fetch zstd-1.5.7 https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
+# CLI test fixtures contain dangling executable symlinks that MSYS tar cannot
+# emulate. They are not inputs to this library-only build (programs/tests OFF).
+fetch zstd-1.5.7 https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3 \
+  --exclude=zstd-1.5.7/tests/cli-tests/bin
 cmake -S "$GOALLC_DEPS_BUILD/zlib-1.3.2" -B "$GOALLC_DEPS_BUILD/zlib-build" "${common[@]}" \
   -DZLIB_BUILD_SHARED=OFF -DZLIB_BUILD_STATIC=ON -DZLIB_BUILD_TESTING=OFF
 cmake --build "$GOALLC_DEPS_BUILD/zlib-build" --parallel "${GOALLC_BUILD_JOBS:-4}"
