@@ -520,8 +520,9 @@ static MCAsmInfo *createX86MCAsmInfo(const MCRegisterInfo &MRI,
       MAI = new X86_64MCAsmInfoDarwin(TheTriple, Options);
     else
       MAI = new X86MCAsmInfoDarwin(TheTriple, Options);
-  } else if (TheTriple.isOSBinFormatELF()) {
-    // Force the use of an ELF container.
+  } else if (TheTriple.isOSBinFormatELF() || TheTriple.isOSBinFormatGoObj()) {
+    // GoObj uses DWARF CFI to describe frames to its object writer, even on
+    // Windows. Do not select COFF's .seh directives from the OS/environment.
     MAI = new X86ELFMCAsmInfo(TheTriple, Options);
   } else if (TheTriple.isWindowsMSVCEnvironment() ||
              TheTriple.isWindowsCoreCLREnvironment() || TheTriple.isUEFI()) {

@@ -18,6 +18,7 @@
 #include "MCTargetDesc/X86TargetStreamer.h"
 #include "TargetInfo/X86TargetInfo.h"
 #include "X86.h"
+#include "X86FrameLowering.h"
 #include "X86InstrInfo.h"
 #include "X86MachineFunctionInfo.h"
 #include "X86Subtarget.h"
@@ -25,9 +26,11 @@
 #include "llvm/Analysis/StaticDataProfileInfo.h"
 #include "llvm/BinaryFormat/COFF.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/CodeGen/MachineModuleInfoImpls.h"
 #include "llvm/CodeGen/MachinePassManager.h"
+#include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
 #include "llvm/CodeGenTypes/MachineValueType.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -118,6 +121,11 @@ bool X86AsmPrinter::runOnMachineFunction(MachineFunction &MF) {
 }
 
 void X86AsmPrinter::emitFunctionBodyStart() {
+  const Triple &TT = TM.getTargetTriple();
+  EmitGoSEH = TT.isOSWindows() && TT.isOSBinFormatGoObj() && TT.isX86_64() &&
+              goabi::isGoCallingConv(MF->getFunction().getCallingConv()) &&
+              Subtarget->getFrameLowering()->hasFP(*MF);
+  GoSEHPushFramePointerEnd = GoSEHSetFramePointerEnd = nullptr;
   if (EmitFPOData) {
     auto *XTS =
         static_cast<X86TargetStreamer *>(OutStreamer->getTargetStreamer());
@@ -128,10 +136,39 @@ void X86AsmPrinter::emitFunctionBodyStart() {
 }
 
 void X86AsmPrinter::emitFunctionBodyEnd() {
+  if (EmitGoSEH) {
+    if (!GoSEHPushFramePointerEnd || !GoSEHSetFramePointerEnd)
+      report_fatal_error(
+          "Windows GoObj frame is missing PUSH RBP / MOV RSP, RBP");
+    OutContext.setGoObjSEHFrame(
+        CurrentFnSym, {GoSEHPushFramePointerEnd, GoSEHSetFramePointerEnd});
+  }
   if (EmitFPOData) {
     auto *XTS =
         static_cast<X86TargetStreamer *>(OutStreamer->getTargetStreamer());
     XTS->emitFPOEndProc();
+  }
+}
+
+// Record labels after the actual emitted instructions. The object writer
+// resolves them after branch relaxation, including the Go stack-split prefix.
+void X86AsmPrinter::recordGoSEHInstruction(const MachineInstr &MI) {
+  if (!EmitGoSEH || !MI.getFlag(MachineInstr::FrameSetup))
+    return;
+  if (MI.getOpcode() == X86::PUSH64r && MI.getOperand(0).getReg() == X86::RBP) {
+    if (GoSEHPushFramePointerEnd)
+      report_fatal_error(
+          "Windows GoObj frame has multiple PUSH RBP instructions");
+    GoSEHPushFramePointerEnd = OutContext.createTempSymbol();
+    OutStreamer->emitLabel(GoSEHPushFramePointerEnd);
+  } else if (MI.getOpcode() == X86::MOV64rr &&
+             MI.getOperand(0).getReg() == X86::RBP &&
+             MI.getOperand(1).getReg() == X86::RSP) {
+    if (!GoSEHPushFramePointerEnd || GoSEHSetFramePointerEnd)
+      report_fatal_error(
+          "Windows GoObj frame has an invalid frame-pointer setup");
+    GoSEHSetFramePointerEnd = OutContext.createTempSymbol();
+    OutStreamer->emitLabel(GoSEHSetFramePointerEnd);
   }
 }
 

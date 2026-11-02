@@ -46,9 +46,11 @@ AUX_TYPES = {
     9: "pcline",
     10: "pcinline",
     11: "pcdata",
+    14: "seh_unwind",
 }
 
 SYMBOL_TYPES = {
+    25: "SSEHUNWINDINFO",
     1: "STEXT",
     2: "STEXTFIPS",
     3: "SRODATA",
@@ -332,7 +334,7 @@ def main(path):
                             f" startline={start_line} files={files}"
                             f" inline={inline_nodes}"
                         )
-            if aux_type in (2, 3, 4) and payload is not None:
+            if aux_type in (2, 3, 4, 14) and payload is not None:
                 extra = f" data={payload.hex()}"
             if aux_type in (7, 8, 9, 10, 11) and payload is not None:
                 extra = f" pc={decode_pctab(payload)}"
