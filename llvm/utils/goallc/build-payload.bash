@@ -125,6 +125,9 @@ cmake_launcher_args=()
 if [[ -n "$ccache_path" ]]; then
 	[[ -x "$ccache_path" ]] || die "GOALLC_CCACHE is not executable: $ccache_path"
 	ccache_path=$(cd "$(dirname "$ccache_path")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$ccache_path")")
+	if command -v cygpath >/dev/null 2>&1; then
+		ccache_path=$(cygpath -m "$ccache_path")
+	fi
 	cmake_launcher_args+=(
 		"-DCMAKE_C_COMPILER_LAUNCHER=$ccache_path"
 		"-DCMAKE_CXX_COMPILER_LAUNCHER=$ccache_path"

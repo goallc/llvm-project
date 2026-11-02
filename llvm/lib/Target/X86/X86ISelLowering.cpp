@@ -64754,6 +64754,12 @@ bool X86TargetLowering::hasInlineStackProbe(const MachineFunction &MF) const {
 /// string if not applicable.
 StringRef
 X86TargetLowering::getStackProbeSymbolName(const MachineFunction &MF) const {
+  // Go goroutine stacks are committed by the runtime and grow through the Go
+  // stack guard/morestack prologue. Windows' C ABI __chkstk neither implements
+  // that protocol nor preserves the Go argument registers.
+  if (goabi::isGoCallingConv(MF.getFunction().getCallingConv()))
+    return "";
+
   // Inline Stack probes disable stack probe call
   if (hasInlineStackProbe(MF))
     return "";

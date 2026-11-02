@@ -34,6 +34,10 @@ private:
   FaultMaps FM;
   std::unique_ptr<MCCodeEmitter> CodeEmitter;
   bool EmitFPOData = false;
+  bool EmitGoSEH = false;
+  MCSymbol *GoSEHPushFramePointerEnd = nullptr;
+  MCSymbol *GoSEHSetFramePointerEnd = nullptr;
+  void recordGoSEHInstruction(const MachineInstr &MI);
   bool ShouldEmitWeakSwiftAsyncExtendedFramePointerFlags = false;
   bool IndCSPrefix = false;
   bool EnableImportCallOptimization = false;

@@ -107,6 +107,17 @@ jobs:
           GOALLC_BUILD_JOBS="${{ matrix.build_jobs }}" \
             ./llvm/utils/goallc/build-payload.bash
 
+      - name: Test Windows GoObj support before packaging
+        run: |
+          set -euo pipefail
+          build="$RUNNER_TEMP/goallc-llvm-build"
+          lit="$build/bin/llvm-lit"
+          if [[ -f "$lit.py" ]]; then
+            lit="$lit.py"
+          fi
+          python3 "$lit" -sv \
+            "$build/test/CodeGen/X86/goobj-windows.ll"
+
       - name: Validate relocatable payload
         shell: bash
         run: |
@@ -124,12 +135,8 @@ jobs:
           asset_base="$RELEASE_TAG-${{ matrix.os }}-${{ matrix.arch }}"
           archive="$asset_base.tar.zst"
           tar -cf - -C "$RUNNER_TEMP/relocated" "$asset_base" | zstd -T0 -o "$archive"
-          sha256_command=(sha256sum)
-          if ! command -v sha256sum >/dev/null 2>&1; then
-            sha256_command=(shasum -a 256)
-          fi
-          "${sha256_command[@]}" "$archive" >"$archive.sha256"
-          "${sha256_command[@]}" --check "$archive.sha256"
+          python3 llvm/utils/goallc/checksum-payload.py "$archive"
+          python3 llvm/utils/goallc/checksum-payload.py --check "$archive"
           echo "archive=$archive" >>"$GITHUB_OUTPUT"
           cat "$archive.sha256"
           du -h "$archive"
@@ -138,6 +145,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ARCHIVE: ${{ steps.package.outputs.archive }}
+          SOURCE_REVISION: ${{ steps.release.outputs.source_revision }}
         shell: bash
         run: |
           set -euo pipefail
@@ -146,7 +154,7 @@ jobs:
             if ! gh release create "$RELEASE_TAG" \
               --verify-tag \
               --title "GoALLC LLVM 23.1.4 $release_suffix" \
-              --notes "Installed, relocatable GoALLC LLVM 23.1.4 payloads from commit $GITHUB_SHA. This release contains Linux amd64/arm64, Darwin arm64 and Windows amd64 payloads consumed by GoALLC CI."; then
+              --notes "Installed, relocatable GoALLC LLVM 23.1.4 payloads from commit $SOURCE_REVISION. This release contains Linux amd64/arm64, Darwin arm64 and Windows amd64 payloads consumed by GoALLC CI."; then
               # Matrix jobs may race to create the release. Accept failure only
               # when the sibling job successfully created the same release.
               gh release view "$RELEASE_TAG" >/dev/null
@@ -155,3 +163,7 @@ jobs:
           gh release upload "$RELEASE_TAG" \
             "$ARCHIVE" \
             "$ARCHIVE.sha256"
+
+      - name: Report ccache
+        if: always()
+        run: if command -v ccache; then ccache -s; fi

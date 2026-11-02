@@ -4562,6 +4562,12 @@ bool X86FrameLowering::canUseAsEpilogue(const MachineBasicBlock &MBB) const {
 }
 
 bool X86FrameLowering::enableShrinkWrapping(const MachineFunction &MF) const {
+  // GoObj's Windows unwind auxiliary describes one entry prologue. Moving
+  // RBP setup into a conditional block would require multiple RUNTIME_FUNCTION
+  // ranges and chained unwind records, which that contract does not represent.
+  if (STI.isOSWindows() && isGoObjGoFunction(MF))
+    return false;
+
   // If we may need to emit frameless compact unwind information, give
   // up as this is currently broken: PR25614.
   bool CompactUnwind =

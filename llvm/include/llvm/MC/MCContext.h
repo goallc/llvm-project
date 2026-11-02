@@ -115,6 +115,11 @@ public:
     }
   };
 
+  struct GoObjSEHFrame {
+    const MCSymbol *PushFramePointerEnd;
+    const MCSymbol *SetFramePointerEnd;
+  };
+
   struct GoObjPCSPEntry {
     const MCSymbol *Label;
     int32_t Value;
@@ -380,6 +385,9 @@ private:
 
   /// Go type auxiliary targets for data symbols.
   DenseMap<const MCSymbol *, const MCSymbol *> GoObjGotypeTargets;
+
+  /// Final instruction boundaries for Windows amd64 Go frame-pointer unwind.
+  DenseMap<const MCSymbol *, GoObjSEHFrame> GoObjSEHFrames;
 
   /// Go object pcsp entries keyed by MC symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjPCSPEntry>>
@@ -1017,6 +1025,15 @@ public:
     if (It == GoObjGotypeTargets.end())
       return nullptr;
     return It->second;
+  }
+
+  void setGoObjSEHFrame(const MCSymbol *Sym, GoObjSEHFrame Frame) {
+    GoObjSEHFrames[Sym] = Frame;
+  }
+
+  const GoObjSEHFrame *getGoObjSEHFrame(const MCSymbol *Sym) const {
+    auto It = GoObjSEHFrames.find(Sym);
+    return It == GoObjSEHFrames.end() ? nullptr : &It->second;
   }
 
   void setGoObjSymbolPCSPEntries(const MCSymbol *Sym,

@@ -25,13 +25,21 @@ installs the matching plugin through `cmd/dist`.
 
 New release tags use a UTC timestamp in the form
 `goallc-llvm23.1.4-YYYYMMDDTHHMMSSZ` and trigger
-`.github/workflows/goallc-release.yml`. Historical `goallc-llvm23.1.0-vN`
-tags remain accepted. Existing release assets are immutable: publish a new tag
+`.github/workflows/goallc-release.yml`. Historical 23.1.0 assets remain available.
+Existing release assets are immutable: publish a new tag
 instead of overwriting an archive. The workflow builds native Linux amd64/arm64,
 Darwin arm64 and Windows amd64 payloads, and publishes each
 `.tar.zst` archive together with its SHA-256 file on the tag's GitHub Release.
 Consumers must select the asset matching the host architecture and pin both
 the tag and archive digest.
+
+The Windows asset is named
+`goallc-llvm23.1.4-<timestamp>-windows-amd64.tar.zst`, with a matching
+`.tar.zst.sha256` file. It contains native `.exe` tools, headers, CMake exports,
+and static LLVM/zlib/zstd archives. Both PR CI and release builds check the
+Windows GoObj TLS/SEH fixture; release packaging also verifies the archive's
+checksum before upload. The release workflow never overwrites an existing
+asset.
 
 Every pull request targeting `llvm23.1.master` also runs
 `.github/workflows/goallc-ci.yml`. It builds and tests all four native host
@@ -58,6 +66,8 @@ Darwin uses deployment target 13.0 for LLVM and dependencies. Linux release
 runners use Ubuntu 22.04. Windows uses the pinned llvm-mingw UCRT toolchain in
 `setup-windows-toolchain.bash`; LLVM, bindings and Go pass must use that same
 C++ ABI. MSVC libraries are not supported by this release path.
+The setup also installs SHA-256-pinned ccache and passes a native Windows
+launcher path to CMake. CI and release jobs report the resulting cache statistics.
 
 Configuration variables are listed by `build-payload.bash --help`. The source
 revision, dirty flag, build mode, targets, dependency versions and deployment

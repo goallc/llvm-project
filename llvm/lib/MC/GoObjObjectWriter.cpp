@@ -2958,6 +2958,50 @@ uint64_t GoObjObjectWriter::writeObject() {
             makeConstantPCTab(-1, CodeSize, PCQuantum));
       }
 
+      if (const auto *Frame =
+              Asm->getContext().getGoObjSEHFrame(Symbols[I].Symbol)) {
+        auto GetOffset = [&](const MCSymbol *Label) -> uint8_t {
+          if (!Label->isInSection() ||
+              &Label->getSection() != Symbols[I].Section)
+            report_fatal_error(
+                "GoObj SEH label is outside its function section");
+          uint64_t Offset = Asm->getSymbolOffset(*Label);
+          if (Offset < Symbols[I].SectionBegin ||
+              Offset > Symbols[I].SectionEnd ||
+              Offset - Symbols[I].SectionBegin > UINT8_MAX)
+            report_fatal_error("GoObj SEH prologue exceeds the 255-byte limit");
+          return Offset - Symbols[I].SectionBegin;
+        };
+        uint8_t PushEnd = GetOffset(Frame->PushFramePointerEnd);
+        uint8_t SetEnd = GetOffset(Frame->SetFramePointerEnd);
+        if (!PushEnd || SetEnd <= PushEnd)
+          report_fatal_error("invalid GoObj SEH frame instruction order");
+        // UNWIND_INFO version 1, no handler, RBP with frame offset zero.
+        // Restoring SP from RBP also discards the local frame allocation.
+        // Codes are ordered backwards: UWOP_SET_FPREG, UWOP_PUSH_NONVOL(RBP).
+        const char Data[] = {1,
+                             char(SetEnd),
+                             2,
+                             5,
+                             char(SetEnd),
+                             3,
+                             char(PushEnd),
+                             0x50,
+                             0,
+                             0,
+                             0,
+                             0};
+        uint32_t UnwindSym = getOrAddHashedAuxCarrierSymbol(
+            Symbols, AuxCarrierIndexes, 'S', Data);
+        Symbols[UnwindSym].Type = GoObj::SSEHUNWINDINFO;
+        Symbols[UnwindSym].Align = 4;
+        // cmd/link deduplicates .xdata by symbol name, including across
+        // packages.
+        Symbols[UnwindSym].Name =
+            "go:sehuw." + toHex(StringRef(Data, sizeof(Data)));
+        Symbols[I].Auxiliaries.push_back({GoObj::AuxSehUnwindInfo, UnwindSym});
+      }
+
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncInfo, FuncInfoSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, ArgsMapSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, LocalsMapSym});

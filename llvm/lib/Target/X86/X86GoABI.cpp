@@ -104,6 +104,30 @@ static bool isGoABI0Call(const MachineInstr &MI, const MachineFunction &MF) {
 void X86InstrInfo::emitGoLoadG(MachineBasicBlock &MBB,
                               MachineBasicBlock::iterator Pos,
                               const DebugLoc &DL) const {
+  if (MBB.getParent()->getTarget().getTargetTriple().isOSWindows()) {
+    // runtime.tls_g contains the offset of the TLS slot in the TEB. The slot
+    // points to Go's TLS block, whose first word holds g (see
+    // runtime/go_tls.h).
+    BuildMI(MBB, Pos, DL, get(X86::MOV64rm), X86::R14)
+        .addReg(X86::RIP)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addExternalSymbol("runtime.tls_g")
+        .addReg(X86::NoRegister);
+    BuildMI(MBB, Pos, DL, get(X86::MOV64rm), X86::R14)
+        .addReg(X86::R14, RegState::Kill)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(0)
+        .addReg(X86::GS);
+    BuildMI(MBB, Pos, DL, get(X86::MOV64rm), X86::R14)
+        .addReg(X86::R14, RegState::Kill)
+        .addImm(1)
+        .addReg(X86::NoRegister)
+        .addImm(0)
+        .addReg(X86::NoRegister);
+    return;
+  }
   if (MBB.getParent()->getTarget().isPositionIndependent()) {
     // Shared objects cannot use local-exec TLS. Match Go's initial-exec
     // sequence, using the reserved g register to hold the TLS offset.

@@ -192,6 +192,7 @@ void MCContext::reset() {
   GoObjSymbolSizes.clear();
   GoObjGotypeTargets.clear();
   GoObjSymbolPCSPEntries.clear();
+  GoObjSEHFrames.clear();
   GoObjSymbolIndirectCallLabels.clear();
   GoObjSymbolUnsafePointEntries.clear();
   GoObjSymbolAsyncUnsafe.clear();
