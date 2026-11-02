@@ -12854,10 +12854,10 @@ static SDValue AddCombineTo64BitSMLAL16(SDNode *AddcNode, SDNode *AddeNode,
 
   DAG.ReplaceAllUsesOfValueWith(SDValue(AddcNode, 0), LoMLALResult);
   DAG.ReplaceAllUsesOfValueWith(SDValue(AddeNode, 0), HiMLALResult);
+  DCI.recursivelyDeleteUnusedNodes(AddeNode);
 
   // Return original node to notify the driver to stop replacing.
-  SDValue resNode(AddcNode, 0);
-  return resNode;
+  return SDValue(AddeNode, 0);
 }
 
 static SDValue AddCombineTo64bitMLAL(SDNode *AddeSubeNode,
@@ -20670,7 +20670,7 @@ RCPair ARMTargetLowering::getRegForInlineAsmConstraint(
 
   // r14 is an alias of lr.
   if (StringRef("{r14}").equals_insensitive(Constraint))
-    return std::make_pair(unsigned(ARM::LR), getRegClassFor(MVT::i32));
+    Constraint = "{lr}";
 
   auto RCP = TargetLowering::getRegForInlineAsmConstraint(TRI, Constraint, VT);
   if (isIncompatibleReg(RCP.first, VT))
