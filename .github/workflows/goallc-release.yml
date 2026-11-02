@@ -21,17 +21,32 @@ concurrency:
 jobs:
   linux:
     if: github.repository == 'goallc/llvm-project'
-    name: linux-${{ matrix.arch }}
+    name: ${{ matrix.os }}-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: amd64
+          - os: linux
+            arch: amd64
             runner: ubuntu-22.04
-          - arch: arm64
+            build_jobs: 2
+          - os: linux
+            arch: arm64
             runner: ubuntu-22.04-arm
+            build_jobs: 4
+          - os: darwin
+            arch: arm64
+            runner: macos-14
+            build_jobs: 3
+          - os: windows
+            arch: amd64
+            runner: windows-2025
+            build_jobs: 4
+    defaults:
+      run:
+        shell: bash
     env:
       RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release-tag }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -55,90 +70,61 @@ jobs:
           test "$(git rev-list -n1 "$RELEASE_TAG")" = "$source_revision"
           echo "source_revision=$source_revision" >>"$GITHUB_OUTPUT"
 
-      - name: Install build dependencies
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            ccache \
-            libedit-dev \
-            libxml2-dev \
-            libzstd-dev \
-            ninja-build \
-            zlib1g-dev
+          sudo apt-get install -y ccache ninja-build zstd
+
+      - name: Install Darwin build dependencies
+        if: runner.os == 'macOS'
+        run: brew install ccache ninja zstd
+
+      - name: Install Windows compiler toolchain
+        if: runner.os == 'Windows'
+        run: bash llvm/utils/goallc/setup-windows-toolchain.bash
 
       - name: Restore ccache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: goallc-llvm23-ci-linux-${{ matrix.arch }}-${{ steps.release.outputs.source_revision }}
+          key: goallc-llvm23-ci-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.release.outputs.source_revision }}
           restore-keys: |
-            goallc-llvm23-ci-linux-${{ matrix.arch }}-
+            goallc-llvm23-ci-${{ matrix.os }}-${{ matrix.arch }}-
 
       - name: Reset ccache statistics
-        run: ccache --zero-stats
+        run: if command -v ccache; then ccache --zero-stats; fi
 
       - name: Build installed LLVM payload
         shell: bash
         run: |
           set -euo pipefail
-          asset_base="$RELEASE_TAG-linux-${{ matrix.arch }}"
+          asset_base="$RELEASE_TAG-${{ matrix.os }}-${{ matrix.arch }}"
           GOALLC_LLVM_BUILD="$RUNNER_TEMP/goallc-llvm-build" \
           GOALLC_LLVM_INSTALL="$RUNNER_TEMP/$asset_base" \
           GOALLC_BUILD_TYPE=Release \
           GOALLC_LLVM_TARGETS='X86;AArch64' \
-          GOALLC_BUILD_JOBS="$(nproc)" \
-          GOALLC_CCACHE=/usr/bin/ccache \
+          GOALLC_BUILD_JOBS="${{ matrix.build_jobs }}" \
             ./llvm/utils/goallc/build-payload.bash
 
       - name: Validate relocatable payload
         shell: bash
         run: |
           set -euo pipefail
-          asset_base="$RELEASE_TAG-linux-${{ matrix.arch }}"
+          asset_base="$RELEASE_TAG-${{ matrix.os }}-${{ matrix.arch }}"
           mkdir -p "$RUNNER_TEMP/relocated"
           mv "$RUNNER_TEMP/$asset_base" "$RUNNER_TEMP/relocated/$asset_base"
-          payload="$RUNNER_TEMP/relocated/$asset_base"
-
-          cmake_version_component() {
-            sed -n "s/^[[:space:]]*set(LLVM_VERSION_$1 \\([^)]*\\)).*/\\1/p" \
-              cmake/Modules/LLVMVersion.cmake | tail -n 1
-          }
-          expected_llvm_version="$(cmake_version_component MAJOR).$(cmake_version_component MINOR).$(cmake_version_component PATCH)$(cmake_version_component SUFFIX)"
-
-          test "$("$payload/bin/llvm-config" --prefix)" = "$payload"
-          test "$("$payload/bin/llvm-config" --version)" = "$expected_llvm_version"
-          test "$("$payload/bin/llvm-config" --build-mode)" = Release
-          for target in X86 AArch64; do
-            "${payload}/bin/llvm-config" --targets-built | tr ' ' '\n' | grep -Fx "$target"
-          done
-          for path in \
-            bin/FileCheck \
-            bin/llc \
-            bin/llvm-ar \
-            bin/llvm-config \
-            bin/opt \
-            include/llvm-c/Core.h \
-            include/llvm/Config/llvm-config.h \
-            lib/cmake/llvm/AddLLVM.cmake \
-            lib/cmake/llvm/LLVMConfig.cmake \
-            lib/cmake/llvm/LLVMExports.cmake \
-            lib/libLLVMCore.a; do
-            test -e "$payload/$path"
-          done
-          find "$payload/lib" -maxdepth 1 -name 'libLLVM.so*' -print -quit | grep .
-          env -u LD_LIBRARY_PATH "$payload/bin/llc" --version
-          env -u LD_LIBRARY_PATH "$payload/bin/opt" --version
-          ldd "$payload/bin/llc"
+          bash llvm/utils/goallc/validate-payload.bash "$RUNNER_TEMP/relocated/$asset_base" "${{ steps.release.outputs.source_revision }}"
 
       - name: Package payload
         id: package
         shell: bash
         run: |
           set -euo pipefail
-          asset_base="$RELEASE_TAG-linux-${{ matrix.arch }}"
+          asset_base="$RELEASE_TAG-${{ matrix.os }}-${{ matrix.arch }}"
           archive="$asset_base.tar.zst"
-          tar --zstd -cf "$archive" -C "$RUNNER_TEMP/relocated" "$asset_base"
-          sha256sum "$archive" >"$archive.sha256"
+          tar -cf - -C "$RUNNER_TEMP/relocated" "$asset_base" | zstd -T0 -o "$archive"
+          shasum -a 256 "$archive" >"$archive.sha256"
           echo "archive=$archive" >>"$GITHUB_OUTPUT"
           cat "$archive.sha256"
           du -h "$archive"
@@ -155,7 +141,7 @@ jobs:
             if ! gh release create "$RELEASE_TAG" \
               --verify-tag \
               --title "GoALLC LLVM 23.1.0 $release_suffix" \
-              --notes "Installed, relocatable GoALLC LLVM 23.1.0 payloads from commit $GITHUB_SHA. This release contains Linux amd64 and arm64 payloads consumed by GoALLC CI."; then
+              --notes "Installed, relocatable GoALLC LLVM 23.1.0 payloads from commit $GITHUB_SHA. This release contains Linux amd64/arm64, Darwin arm64 and Windows amd64 payloads consumed by GoALLC CI."; then
               # Matrix jobs may race to create the release. Accept failure only
               # when the sibling job successfully created the same release.
               gh release view "$RELEASE_TAG" >/dev/null
@@ -163,5 +149,4 @@ jobs:
           fi
           gh release upload "$RELEASE_TAG" \
             "$ARCHIVE" \
-            "$ARCHIVE.sha256" \
-            --clobber
+            "$ARCHIVE.sha256"

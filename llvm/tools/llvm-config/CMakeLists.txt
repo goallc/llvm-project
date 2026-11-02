@@ -21,7 +21,17 @@ add_llvm_tool(llvm-config
 get_property(SUPPORT_SYSTEM_LIBS TARGET LLVMSupport PROPERTY LLVM_SYSTEM_LIBS)
 get_property(WINDOWSMANIFEST_SYSTEM_LIBS TARGET LLVMWindowsManifest PROPERTY LLVM_SYSTEM_LIBS)
 
+# GoALLC payloads install these static dependencies alongside LLVM. Report
+# linker names rather than the dependency build directory in llvm-config.
+set(GOALLC_BUNDLED_STATIC_LIBS "" CACHE STRING "Static dependencies installed in the LLVM payload")
 foreach(l ${SUPPORT_SYSTEM_LIBS} ${WINDOWSMANIFEST_SYSTEM_LIBS})
+  if(IS_ABSOLUTE "${l}")
+    get_filename_component(goallc_lib_name "${l}" NAME)
+    string(REGEX REPLACE "^lib(.*)\\.a$" "\\1" goallc_lib_name "${goallc_lib_name}")
+    if(goallc_lib_name IN_LIST GOALLC_BUNDLED_STATIC_LIBS)
+      set(l "${goallc_lib_name}")
+    endif()
+  endif()
   if(MSVC)
     if(IS_ABSOLUTE ${l})
       set(SYSTEM_LIBS ${SYSTEM_LIBS} "${l}")

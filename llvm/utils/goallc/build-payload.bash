@@ -23,6 +23,9 @@ Configuration is supplied through environment variables:
                        Darwin deployment target (default: Go's current 13.0)
   GOALLC_BUILD_JOBS    parallel LLVM build jobs
   GOALLC_CCACHE        ccache executable; auto-detected when unset
+  GOALLC_CMAKE_TOOLCHAIN_FILE
+                       optional CMake toolchain (Windows: llvm-mingw)
+  GOALLC_DEPS_BUILD    pinned dependency build/cache directory
 
 The default payload is an ignored build-goallc-payload-* directory at the
 llvm-project root. The install is staged and then replaces the previous
@@ -78,6 +81,10 @@ llvm_targets=${GOALLC_LLVM_TARGETS:-X86;AArch64}
 mkdir -p "$(dirname "$llvm_build")" "$(dirname "$llvm_install")"
 llvm_build=$(cd "$(dirname "$llvm_build")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$llvm_build")")
 llvm_install=$(cd "$(dirname "$llvm_install")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$llvm_install")")
+if command -v cygpath >/dev/null 2>&1; then
+    llvm_build=$(cygpath -m "$llvm_build")
+    llvm_install=$(cygpath -m "$llvm_install")
+fi
 case "$llvm_install" in
 /|/usr|/usr/local|/opt|/opt/homebrew)
 	die "refusing unsafe GOALLC_LLVM_INSTALL: $llvm_install"
@@ -130,8 +137,29 @@ if [[ "$(uname -s)" == Darwin ]]; then
 	cmake_platform_args+=("-DCMAKE_OSX_DEPLOYMENT_TARGET=$macos_deployment_target")
 fi
 
+exe=
+shared_llvm=ON
+cmake_runtime_args=()
+case "$(uname -s)" in
+Darwin) ;;
+Linux) cmake_runtime_args+=("-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc") ;;
+MINGW*|MSYS*)
+    exe=.exe
+    shared_llvm=OFF
+    cmake_runtime_args+=("-DCMAKE_EXE_LINKER_FLAGS=-static")
+    ;;
+*) die "unsupported host: $(uname -s)" ;;
+esac
+if [[ -n ${GOALLC_CMAKE_TOOLCHAIN_FILE:-} ]]; then
+    cmake_platform_args+=("-DCMAKE_TOOLCHAIN_FILE=$GOALLC_CMAKE_TOOLCHAIN_FILE")
+fi
+deps_build=${GOALLC_DEPS_BUILD:-"$llvm_build-deps"}
+deps_install="$deps_build/install"
+GOALLC_DEPS_BUILD="$deps_build" GOALLC_DEPS_INSTALL="$deps_install" \
+GOALLC_BUILD_JOBS="$build_jobs" "$script_dir/build-static-deps.bash"
+
 payload_version() {
-	"$1/bin/llvm-config" --version
+	"$1/bin/llvm-config$exe" --version
 }
 
 validate_payload_files() {
@@ -143,7 +171,7 @@ validate_payload_files() {
 		bin/llc \
 		bin/opt \
 		bin/FileCheck; do
-		[[ -x "$root/$path" ]] || die "incomplete LLVM payload: missing executable $root/$path"
+		[[ -x "$root/$path$exe" ]] || die "incomplete LLVM payload: missing executable $root/$path$exe"
 	done
 	for path in \
 		include/llvm-c/Core.h \
@@ -151,7 +179,9 @@ validate_payload_files() {
 		lib/cmake/llvm/LLVMConfig.cmake \
 		lib/cmake/llvm/AddLLVM.cmake \
 		lib/cmake/llvm/LLVMExports.cmake \
-		lib/libLLVMCore.a; do
+		lib/libLLVMCore.a \
+		lib/libz.a \
+		lib/libzstd.a; do
 		[[ -f "$root/$path" ]] || die "incomplete LLVM payload: missing $root/$path"
 	done
 	case "$(uname -s)" in
@@ -161,6 +191,7 @@ validate_payload_files() {
 	Linux)
 		compgen -G "$root/lib/libLLVM.so*" >/dev/null || die "incomplete LLVM payload: missing libLLVM shared object"
 		;;
+	MINGW*|MSYS*) ;;
 	*)
 		die "unsupported host: $(uname -s)"
 		;;
@@ -178,11 +209,11 @@ validate_payload() {
 		die "LLVM payload must be version 23: $(payload_version "$root")"
 		;;
 	esac
-	same_directory "$("$root/bin/llvm-config" --prefix)" "$expected_prefix" || \
-		die "LLVM payload prefix mismatch: expected $expected_prefix, got $("$root/bin/llvm-config" --prefix)"
+	same_directory "$("$root/bin/llvm-config$exe" --prefix)" "$expected_prefix" || \
+		die "LLVM payload prefix mismatch: expected $expected_prefix, got $("$root/bin/llvm-config$exe" --prefix)"
 	local target
 	local built_targets
-	built_targets=" $("$root/bin/llvm-config" --targets-built) "
+	built_targets=" $("$root/bin/llvm-config$exe" --targets-built) "
 	for target in $(printf '%s' "$llvm_targets" | tr ';' ' '); do
 		case "$built_targets" in
 		*" $target "*) ;;
@@ -223,6 +254,8 @@ write_llvm_manifest() {
 	mkdir -p "$root/share/goallc"
 	{
 		printf 'format=1\n'
+		printf 'dependency_mode=bundled-static\n'
+		printf 'zlib=1.3.2\nzstd=1.5.7\n'
 		printf 'llvm_revision=%s\n' "$revision"
 		printf 'llvm_dirty=%s\n' "$dirty"
 		printf 'build_type=%s\n' "$build_type"
@@ -255,18 +288,54 @@ build_llvm() {
 		-DLLVM_INCLUDE_EXAMPLES=OFF \
 		-DLLVM_INCLUDE_BENCHMARKS=OFF \
 		-DBUILD_SHARED_LIBS=OFF \
-		-DLLVM_BUILD_LLVM_DYLIB=ON \
-		-DLLVM_LINK_LLVM_DYLIB=ON \
+		-DLLVM_BUILD_LLVM_DYLIB="$shared_llvm" \
+		-DLLVM_LINK_LLVM_DYLIB="$shared_llvm" \
 		-DLLVM_ENABLE_RTTI=OFF \
+		-DLLVM_ENABLE_ZLIB=FORCE_ON -DZLIB_USE_STATIC_LIBS=ON \
+		-DLLVM_ENABLE_ZSTD=FORCE_ON -DLLVM_USE_STATIC_ZSTD=ON \
+		-DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_LIBEDIT=OFF \
+		-DLLVM_ENABLE_CURL=OFF -DLLVM_ENABLE_HTTPLIB=OFF \
+		-DLLVM_ENABLE_TERMINFO=OFF \
+		"-DCMAKE_PREFIX_PATH=$deps_install" \
+		"-DZLIB_ROOT=$deps_install" \
+		"-Dzstd_LIBRARY=$deps_install/lib/libzstd.a" \
+		"-Dzstd_STATIC_LIBRARY=$deps_install/lib/libzstd.a" \
+		"-Dzstd_INCLUDE_DIR=$deps_install/include" \
+		'-DGOALLC_BUNDLED_STATIC_LIBS=z;zstd' \
 		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-		"${cmake_launcher_args[@]}" \
-		"${cmake_platform_args[@]}"
+		${cmake_launcher_args[@]+"${cmake_launcher_args[@]}"} \
+		${cmake_platform_args[@]+"${cmake_platform_args[@]}"} \
+		${cmake_runtime_args[@]+"${cmake_runtime_args[@]}"}
 	cmake --build "$llvm_build" --parallel "$build_jobs"
 
 	stage_root=$(mktemp -d "$(dirname "$llvm_install")/.goallc-install.XXXXXX")
 	printf 'Staging LLVM install under %s\n' "$stage_root"
-	DESTDIR="$stage_root" cmake --install "$llvm_build"
-	staged_payload="$stage_root$llvm_install"
+	staged_payload="$stage_root/payload"
+	cmake --install "$llvm_build" --prefix "$staged_payload"
+	cp -R "$deps_install/include/." "$staged_payload/include/"
+	cp -R "$deps_install/lib/." "$staged_payload/lib/"
+	mkdir -p "$staged_payload/share/licenses"
+	cp -R "$deps_install/share/licenses/." "$staged_payload/share/licenses/"
+	cp "$llvm_source/LICENSE.TXT" "$staged_payload/share/licenses/llvm.txt"
+	# Preserve compiler-runtime notices when those runtimes are embedded.
+	if [[ "$(uname -s)" == Linux ]]; then
+		for notice in /usr/share/doc/gcc-*-base/copyright /usr/share/doc/libstdc++*/copyright /usr/share/doc/libgcc*/copyright; do
+			[[ -f "$notice" ]] || continue
+			cp "$notice" "$staged_payload/share/licenses/$(basename "$(dirname "$notice")").txt"
+		done
+	fi
+	if [[ -n ${GOALLC_TOOLCHAIN_LICENSE:-} ]]; then
+		cp "$GOALLC_TOOLCHAIN_LICENSE" "$staged_payload/share/licenses/toolchain.txt"
+	fi
+	# Imported CMake targets and dependency lookup must survive relocation.
+	python3 - "$staged_payload" "$deps_install" <<'PYRELOCATE'
+import os, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+old = sys.argv[2]
+for p in (root / 'lib/cmake').rglob('*.cmake'):
+    prefix = '${CMAKE_CURRENT_LIST_DIR}/' + os.path.relpath(root, p.parent)
+    p.write_text(p.read_text().replace(old, prefix))
+PYRELOCATE
 	[[ -d "$staged_payload" ]] || die "CMake did not create staged payload $staged_payload"
 	# Do not execute llvm-config under DESTDIR: it deliberately derives its
 	# install layout from its current executable path. Check the complete file
@@ -285,7 +354,7 @@ build_llvm() {
 	validate_payload "$llvm_install" "$llvm_install"
 	{
 		printf 'llvm_version=%s\n' "$(payload_version "$llvm_install")"
-		printf 'static_system_libs=%s\n' "$("$llvm_install/bin/llvm-config" --link-static --system-libs)"
+		printf 'static_system_libs=%s\n' "$("$llvm_install/bin/llvm-config$exe" --link-static --system-libs)"
 	} >>"$llvm_install/share/goallc/build-manifest"
 	if [[ -n "$backup_payload" ]]; then
 		rm -rf "$backup_payload"
