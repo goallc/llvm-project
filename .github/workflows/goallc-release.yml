@@ -107,6 +107,13 @@ jobs:
           GOALLC_BUILD_JOBS="${{ matrix.build_jobs }}" \
             ./llvm/utils/goallc/build-payload.bash
 
+      - name: Test Windows GoObj support before packaging
+        run: |
+          set -euo pipefail
+          build="$RUNNER_TEMP/goallc-llvm-build"
+          python3 "$build/bin/llvm-lit" -sv \
+            "$build/test/CodeGen/X86/goobj-windows.ll"
+
       - name: Validate relocatable payload
         shell: bash
         run: |
@@ -125,6 +132,7 @@ jobs:
           archive="$asset_base.tar.zst"
           tar -cf - -C "$RUNNER_TEMP/relocated" "$asset_base" | zstd -T0 -o "$archive"
           shasum -a 256 "$archive" >"$archive.sha256"
+          shasum -a 256 --check "$archive.sha256"
           echo "archive=$archive" >>"$GITHUB_OUTPUT"
           cat "$archive.sha256"
           du -h "$archive"
@@ -133,6 +141,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ARCHIVE: ${{ steps.package.outputs.archive }}
+          SOURCE_REVISION: ${{ steps.release.outputs.source_revision }}
         shell: bash
         run: |
           set -euo pipefail
@@ -141,7 +150,7 @@ jobs:
             if ! gh release create "$RELEASE_TAG" \
               --verify-tag \
               --title "GoALLC LLVM 23.1.0 $release_suffix" \
-              --notes "Installed, relocatable GoALLC LLVM 23.1.0 payloads from commit $GITHUB_SHA. This release contains Linux amd64/arm64, Darwin arm64 and Windows amd64 payloads consumed by GoALLC CI."; then
+              --notes "Installed, relocatable GoALLC LLVM 23.1.0 payloads from commit $SOURCE_REVISION. This release contains Linux amd64/arm64, Darwin arm64 and Windows amd64 payloads consumed by GoALLC CI."; then
               # Matrix jobs may race to create the release. Accept failure only
               # when the sibling job successfully created the same release.
               gh release view "$RELEASE_TAG" >/dev/null
@@ -150,3 +159,7 @@ jobs:
           gh release upload "$RELEASE_TAG" \
             "$ARCHIVE" \
             "$ARCHIVE.sha256"
+
+      - name: Report ccache
+        if: always()
+        run: if command -v ccache; then ccache -s; fi

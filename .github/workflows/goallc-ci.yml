@@ -138,6 +138,7 @@ jobs:
             "$build/test/CodeGen/X86/go-statepoint-stack-results.ll"
             "$build/test/CodeGen/X86/goobj-content-addressable-cycle.ll"
             "$build/test/CodeGen/X86/goobj-filetype.ll"
+            "$build/test/CodeGen/X86/goobj-windows.ll"
             "$build/test/CodeGen/X86/goobj-import-references.ll"
             "$build/test/CodeGen/X86/goobj-jump-table-boundaries.ll"
             "$build/test/CodeGen/X86/goobj-retpoline.ll"
@@ -159,7 +160,7 @@ jobs:
             "$build/test/MC/GoObj"
             "$build/test/Transforms/PreISelIntrinsicLowering/X86/goobj-memory.ll"
           )
-          "$build/bin/llvm-lit" -sv "${tests[@]}"
+          python3 "$build/bin/llvm-lit" -sv "${tests[@]}"
 
       - name: Validate relocatable payload
         shell: bash
