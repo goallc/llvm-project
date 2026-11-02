@@ -15,24 +15,31 @@ fi
 if [[ -n ${GOALLC_CMAKE_TOOLCHAIN_FILE:-} ]]; then
   common+=("-DCMAKE_TOOLCHAIN_FILE=$GOALLC_CMAKE_TOOLCHAIN_FILE")
 fi
-fetch() {
-  local name=$1 url=$2 sha=$3
-  local archive="$GOALLC_DEPS_BUILD/$name.tar.gz"
-  if [[ ! -f $archive ]]; then
-    curl --fail --location --retry 5 "$url" -o "$archive.tmp"
-    mv "$archive.tmp" "$archive"
-  fi
-  python3 - "$archive" "$sha" <<'PY'
+verify_archive() {
+  python3 - "$1" "$2" <<'PY'
 import hashlib, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 if hashlib.sha256(p.read_bytes()).hexdigest() != sys.argv[2]:
     raise SystemExit('SHA-256 mismatch: ' + str(p))
 PY
+}
+fetch() {
+  local name=$1 url=$2 sha=$3
+  local archive="$GOALLC_DEPS_BUILD/$name.tar.gz"
+  if [[ ! -f $archive ]]; then
+    curl --fail --location --retry 5 "$url" -o "$archive.tmp"
+    verify_archive "$archive.tmp" "$sha"
+    mv "$archive.tmp" "$archive"
+  else
+    verify_archive "$archive" "$sha"
+  fi
   if [[ ! -d "$GOALLC_DEPS_BUILD/$name" ]]; then
-    tar -xzf "$archive" -C "$GOALLC_DEPS_BUILD"
+    # GNU tar treats a Windows drive letter in -f as a remote host. Let the
+    # shell open the archive so both native drive paths and POSIX paths work.
+    tar -xzf - -C "$GOALLC_DEPS_BUILD" < "$archive"
   fi
 }
-fetch zlib-1.3.2 https://zlib.net/fossils/zlib-1.3.2.tar.gz bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
+fetch zlib-1.3.2 https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
 fetch zstd-1.5.7 https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
 cmake -S "$GOALLC_DEPS_BUILD/zlib-1.3.2" -B "$GOALLC_DEPS_BUILD/zlib-build" "${common[@]}" \
   -DZLIB_BUILD_SHARED=OFF -DZLIB_BUILD_STATIC=ON -DZLIB_BUILD_TESTING=OFF
