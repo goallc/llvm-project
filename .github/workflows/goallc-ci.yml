@@ -99,6 +99,7 @@ jobs:
           set -euo pipefail
           build="$RUNNER_TEMP/goallc-llvm-build"
           tests=(
+            "$build/test/Bitcode/go-defer-summary.ll"
             "$build/test/CodeGen/AArch64/fast-isel-statepoint-result.ll"
             "$build/test/CodeGen/AArch64/go-callconv.ll"
             "$build/test/CodeGen/AArch64/go-fast-isel-fallback.ll"
