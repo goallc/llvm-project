@@ -23,7 +23,7 @@ pass plugin is not part of the LLVM release: Go's `make.bash` builds and
 installs the matching plugin through `cmd/dist`.
 
 New release tags use a UTC timestamp in the form
-`goallc-llvm23.1.0-YYYYMMDDTHHMMSSZ` and trigger
+`goallc-llvm23.1.4-YYYYMMDDTHHMMSSZ` and trigger
 `.github/workflows/goallc-release.yml`. Historical `goallc-llvm23.1.0-vN`
 tags remain accepted so their payloads can be rebuilt. The workflow builds a
 relocatable Linux payload natively on both amd64 and arm64, and publishes each

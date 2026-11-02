@@ -18547,7 +18547,7 @@ static SDValue performSETCCCombine(SDNode *N,
         isPowerOf2_32(-uint32_t(AndRHSInt)) && (N1Int & AndRHSInt) == N1Int) {
       unsigned ShiftBits = llvm::countr_zero(AndRHSInt);
       int64_t NewC = SignExtend64<32>(N1Int) >> ShiftBits;
-      if (NewC >= -2048 && NewC <= 2048) {
+      if (ShiftBits != 0 && NewC >= -2048 && NewC <= 2048) {
         SDValue SExt =
             DAG.getNode(ISD::SIGN_EXTEND_INREG, dl, OpVT, N0.getOperand(0),
                         DAG.getValueType(MVT::i32));
@@ -21246,6 +21246,10 @@ static SDValue performINSERT_VECTOR_ELTCombine(SDNode *N, SelectionDAG &DAG,
     if (!ISD::isBuildVectorOfConstantSDNodes(InVecRHS.getNode()))
       return SDValue();
     if (!isa<ConstantSDNode>(InValRHS) && !isa<ConstantFPSDNode>(InValRHS))
+      return SDValue();
+    // This INSERT_VECTOR_ELT involves an implicit truncation, and sinking
+    // truncates through binops is non-trivial.
+    if (InVal.getValueType() != VT.getVectorElementType())
       return SDValue();
     // FIXME: Return failure if the RHS type doesn't match the LHS. Shifts may
     // have different LHS and RHS types.

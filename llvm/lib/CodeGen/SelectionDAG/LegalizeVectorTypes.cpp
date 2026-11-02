@@ -5242,13 +5242,16 @@ void DAGTypeLegalizer::WidenVectorResult(SDNode *N, unsigned ResNo) {
     // elements. If the wide vector op is eventually going to be expanded to
     // scalar libcalls, then unroll into scalar ops now to avoid unnecessary
     // libcalls on the undef elements.
-    EVT VT = N->getValueType(0);
-    EVT WideVecVT = TLI.getTypeToTransformTo(*DAG.getContext(), VT);
+    EVT ResVT = N->getValueType(ResNo);
+    EVT WideVecVT = TLI.getTypeToTransformTo(*DAG.getContext(), ResVT);
+    EVT VT0 = N->getValueType(0);
     if (!TLI.isOperationLegalOrCustomOrPromote(N->getOpcode(), WideVecVT) &&
-        TLI.isOperationExpandOrLibCall(N->getOpcode(), VT.getScalarType())) {
-      Res = DAG.UnrollVectorOp(N, WideVecVT.getVectorNumElements());
+        TLI.isOperationExpandOrLibCall(N->getOpcode(), VT0.getScalarType())) {
+      SDValue Unrolled =
+          DAG.UnrollVectorOp(N, WideVecVT.getVectorNumElements());
+      Res = Unrolled.getValue(ResNo);
       if (N->getNumValues() > 1)
-        ReplaceOtherWidenResults(N, Res.getNode(), ResNo);
+        ReplaceOtherWidenResults(N, Unrolled.getNode(), ResNo);
       return true;
     }
     return false;
@@ -8738,8 +8741,8 @@ SDValue DAGTypeLegalizer::WidenVecOp_VSELECT(SDNode *N) {
 SDValue DAGTypeLegalizer::WidenVecOp_CttzElements(SDNode *N) {
   SDLoc DL(N);
   SDValue Source = N->getOperand(0);
-  EVT WideVT =
-      TLI.getTypeToTransformTo(*DAG.getContext(), Source.getValueType());
+  EVT SourceVT = Source.getValueType();
+  EVT WideVT = TLI.getTypeToTransformTo(*DAG.getContext(), SourceVT);
 
   SDValue WideSource;
   if (N->getOpcode() == ISD::CTTZ_ELTS_ZERO_POISON) {
@@ -8748,7 +8751,18 @@ SDValue DAGTypeLegalizer::WidenVecOp_CttzElements(SDNode *N) {
     // Pad the widened portion with all-ones so the extra lanes appear as
     // active (non-zero) elements and do not contribute trailing zeros.
     SDValue AllOnes = DAG.getAllOnesConstant(DL, WideVT);
-    WideSource = DAG.getInsertSubvector(DL, AllOnes, Source, 0);
+    if (WideVT.isFixedLengthVector() &&
+        getTypeAction(WideVT) == TargetLowering::TypeSplitVector) {
+      WideSource = GetWidenedVector(Source);
+      unsigned WideElts = WideVT.getVectorNumElements();
+      SmallVector<int> Mask(WideElts);
+      std::iota(Mask.begin(), Mask.end(), 0);
+      for (unsigned I = SourceVT.getVectorNumElements(); I != WideElts; ++I)
+        Mask[I] += WideElts;
+      WideSource = DAG.getVectorShuffle(WideVT, DL, WideSource, AllOnes, Mask);
+    } else {
+      WideSource = DAG.getInsertSubvector(DL, AllOnes, Source, 0);
+    }
   }
 
   return DAG.getNode(N->getOpcode(), DL, N->getValueType(0), WideSource,
