@@ -124,7 +124,12 @@ jobs:
           asset_base="$RELEASE_TAG-${{ matrix.os }}-${{ matrix.arch }}"
           archive="$asset_base.tar.zst"
           tar -cf - -C "$RUNNER_TEMP/relocated" "$asset_base" | zstd -T0 -o "$archive"
-          shasum -a 256 "$archive" >"$archive.sha256"
+          sha256_command=(sha256sum)
+          if ! command -v sha256sum >/dev/null 2>&1; then
+            sha256_command=(shasum -a 256)
+          fi
+          "${sha256_command[@]}" "$archive" >"$archive.sha256"
+          "${sha256_command[@]}" --check "$archive.sha256"
           echo "archive=$archive" >>"$GITHUB_OUTPUT"
           cat "$archive.sha256"
           du -h "$archive"

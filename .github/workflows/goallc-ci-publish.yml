@@ -122,7 +122,8 @@ jobs:
             test -f "$artifact_dir/$archive.sha256"
             test "$(wc -l <"$artifact_dir/$archive.sha256")" -eq 1
             checksum=$(<"$artifact_dir/$archive.sha256")
-            [[ "$checksum" =~ ^([0-9a-f]{64})\ \ $archive$ ]]
+            # GNU sha256sum on Windows emits the standard binary '*' marker.
+            [[ "$checksum" =~ ^([0-9a-f]{64})\ [\ *]$archive$ ]]
             test "$(sha256sum "$artifact_dir/$archive" | cut -d' ' -f1)" \
               = "${BASH_REMATCH[1]}"
             cp "$artifact_dir/$archive" "$upload_dir/$archive"
