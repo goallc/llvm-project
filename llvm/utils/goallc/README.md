@@ -24,9 +24,9 @@ pass plugin is not part of the LLVM release: Go's `make.bash` builds and
 installs the matching plugin through `cmd/dist`.
 
 New release tags use a UTC timestamp in the form
-`goallc-llvm23.1.0-YYYYMMDDTHHMMSSZ` and trigger
-`.github/workflows/goallc-release.yml`. Historical `goallc-llvm23.1.0-vN`
-tags remain accepted. Existing release assets are immutable: publish a new tag
+`goallc-llvm23.1.4-YYYYMMDDTHHMMSSZ` and trigger
+`.github/workflows/goallc-release.yml`. Historical 23.1.0 assets remain available.
+Existing release assets are immutable: publish a new tag
 instead of overwriting an archive. The workflow builds native Linux amd64/arm64,
 Darwin arm64 and Windows amd64 payloads, and publishes each
 `.tar.zst` archive together with its SHA-256 file on the tag's GitHub Release.
@@ -34,7 +34,7 @@ Consumers must select the asset matching the host architecture and pin both
 the tag and archive digest.
 
 The Windows asset is named
-`goallc-llvm23.1.0-<timestamp>-windows-amd64.tar.zst`, with a matching
+`goallc-llvm23.1.4-<timestamp>-windows-amd64.tar.zst`, with a matching
 `.tar.zst.sha256` file. It contains native `.exe` tools, headers, CMake exports,
 and static LLVM/zlib/zstd archives. Both PR CI and release builds check the
 Windows GoObj TLS/SEH fixture; release packaging also verifies the archive's

@@ -11,7 +11,7 @@ python3 - "$root" "$("$config" --prefix)" <<'PY'
 import pathlib, sys
 assert pathlib.Path(sys.argv[1]).resolve() == pathlib.Path(sys.argv[2]).resolve()
 PY
-[[ $("$config" --version) == 23.1.0* ]]
+test "$("$config" --version)" = 23.1.4
 test "$("$config" --build-mode)" = Release
 grep -Fx "llvm_revision=$revision" "$root/share/goallc/build-manifest"
 grep -Fx 'llvm_dirty=false' "$root/share/goallc/build-manifest"
