@@ -469,10 +469,13 @@ static void computeFunctionSummary(
       // Check if this is a direct call to a known function or a known
       // intrinsic, or an indirect call with profile data.
       if (CalledFunction) {
-        if (CI && CalledFunction->isIntrinsic()) {
-          addIntrinsicToSummary(
-              CI, TypeTests, TypeTestAssumeVCalls, TypeCheckedLoadVCalls,
-              TypeTestAssumeConstVCalls, TypeCheckedLoadConstVCalls, DT);
+        if (CalledFunction->isIntrinsic()) {
+          // Callbr intrinsics such as llvm.go.defer.edge describe control
+          // flow, not an interprocedural call edge or a profiled callsite.
+          if (CI)
+            addIntrinsicToSummary(
+                CI, TypeTests, TypeTestAssumeVCalls, TypeCheckedLoadVCalls,
+                TypeTestAssumeConstVCalls, TypeCheckedLoadConstVCalls, DT);
           continue;
         }
         // We should have named any anonymous globals
@@ -1287,7 +1290,7 @@ bool llvm::mayHaveMemprofSummary(const CallBase *CB) {
   // Check if this is a direct call to a known function or a known
   // intrinsic, or an indirect call with profile data.
   if (CalledFunction) {
-    if (CI && CalledFunction->isIntrinsic())
+    if (CalledFunction->isIntrinsic())
       return false;
   } else {
     // Skip indirect calls if we haven't enabled memprof ICP.
