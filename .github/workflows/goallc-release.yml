@@ -111,7 +111,11 @@ jobs:
         run: |
           set -euo pipefail
           build="$RUNNER_TEMP/goallc-llvm-build"
-          python3 "$build/bin/llvm-lit" -sv \
+          lit="$build/bin/llvm-lit"
+          if [[ -f "$lit.py" ]]; then
+            lit="$lit.py"
+          fi
+          python3 "$lit" -sv \
             "$build/test/CodeGen/X86/goobj-windows.ll"
 
       - name: Validate relocatable payload
