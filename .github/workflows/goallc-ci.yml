@@ -184,11 +184,8 @@ jobs:
           artifact_dir="$RUNNER_TEMP/artifact"
           mkdir -p "$artifact_dir"
           tar -cf - -C "$RUNNER_TEMP/relocated" "$asset_base" | zstd -T0 -o "$artifact_dir/$archive"
-          (
-            cd "$artifact_dir"
-            shasum -a 256 "$archive" >"$archive.sha256"
-            shasum -a 256 --check "$archive.sha256"
-          )
+          python3 llvm/utils/goallc/checksum-payload.py "$artifact_dir/$archive"
+          python3 llvm/utils/goallc/checksum-payload.py --check "$artifact_dir/$archive"
           du -h "$artifact_dir/$archive"
 
       - name: Upload payload
