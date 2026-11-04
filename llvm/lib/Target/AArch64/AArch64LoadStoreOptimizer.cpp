@@ -28,12 +28,14 @@
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/MC/MCAsmInfo.h"
@@ -144,7 +146,8 @@ struct AArch64LoadStoreOpt {
   MachineBasicBlock::iterator findMatchingInsn(MachineBasicBlock::iterator I,
                                                LdStPairFlags &Flags,
                                                unsigned Limit,
-                                               bool FindNarrowMerge);
+                                               bool FindNarrowMerge,
+                                               bool StatepointOnly = false);
 
   // Scan the instructions looking for a store that writes to the address from
   // which the current load instruction reads. Return true if one is found.
@@ -215,7 +218,8 @@ struct AArch64LoadStoreOpt {
   bool tryToMergeZeroStInst(MachineBasicBlock::iterator &MBBI);
 
   // Find and pair ldr/str instructions.
-  bool tryToPairLdStInst(MachineBasicBlock::iterator &MBBI);
+  bool tryToPairLdStInst(MachineBasicBlock::iterator &MBBI,
+                         bool StatepointOnly = false);
 
   // Find and promote load instructions which read directly from store.
   bool tryToPromoteLoadFromStore(MachineBasicBlock::iterator &MBBI);
@@ -1678,13 +1682,26 @@ static bool needsWinCFI(const MachineFunction *MF) {
          MF->getFunction().needsUnwindTableEntry();
 }
 
+static bool accessesStatepointSpillSlot(const MachineInstr &MI) {
+  const MachineFrameInfo &MFI = MI.getMF()->getFrameInfo();
+  return llvm::any_of(MI.memoperands(), [&](const MachineMemOperand *MMO) {
+    const auto *PSV =
+        dyn_cast_or_null<FixedStackPseudoSourceValue>(MMO->getPseudoValue());
+    return PSV && MFI.isStatepointSpillSlotObjectIndex(PSV->getFrameIndex());
+  });
+}
+
 // Returns true if FirstMI and MI are candidates for merging or pairing.
 // Otherwise, returns false.
 static bool areCandidatesToMergeOrPair(MachineInstr &FirstMI, MachineInstr &MI,
                                        LdStPairFlags &Flags,
-                                       const AArch64InstrInfo *TII) {
+                                       const AArch64InstrInfo *TII,
+                                       bool StatepointOnly) {
   // If this is volatile or if pairing is suppressed, not a candidate.
   if (MI.hasOrderedMemoryRef() || TII->isLdStPairSuppressed(MI))
+    return false;
+
+  if (StatepointOnly && !accessesStatepointSpillSlot(MI))
     return false;
 
   // We should have already checked FirstMI for pair suppression and volatility.
@@ -2020,10 +2037,9 @@ static std::optional<MCPhysReg> findRenameRegForSameLdStRegPair(
 
 /// Scan the instructions looking for a load/store that can be combined with the
 /// current instruction into a wider equivalent or a load/store pair.
-MachineBasicBlock::iterator
-AArch64LoadStoreOpt::findMatchingInsn(MachineBasicBlock::iterator I,
-                                      LdStPairFlags &Flags, unsigned Limit,
-                                      bool FindNarrowMerge) {
+MachineBasicBlock::iterator AArch64LoadStoreOpt::findMatchingInsn(
+    MachineBasicBlock::iterator I, LdStPairFlags &Flags, unsigned Limit,
+    bool FindNarrowMerge, bool StatepointOnly) {
   MachineBasicBlock::iterator E = I->getParent()->end();
   MachineBasicBlock::iterator MBBI = I;
   MachineInstr &FirstMI = *I;
@@ -2069,7 +2085,7 @@ AArch64LoadStoreOpt::findMatchingInsn(MachineBasicBlock::iterator I,
       ++Count;
 
     Flags.setSExtIdx(-1);
-    if (areCandidatesToMergeOrPair(FirstMI, MI, Flags, TII) &&
+    if (areCandidatesToMergeOrPair(FirstMI, MI, Flags, TII, StatepointOnly) &&
         AArch64InstrInfo::getLdStOffsetOp(MI).isImm()) {
       assert(MI.mayLoadOrStore() && "Expected memory operation.");
       // If we've found another instruction with the same opcode, check to see
@@ -2853,7 +2869,8 @@ bool AArch64LoadStoreOpt::tryToMergeZeroStInst(
 
 // Find loads and stores that can be merged into a single load or store pair
 // instruction.
-bool AArch64LoadStoreOpt::tryToPairLdStInst(MachineBasicBlock::iterator &MBBI) {
+bool AArch64LoadStoreOpt::tryToPairLdStInst(MachineBasicBlock::iterator &MBBI,
+                                            bool StatepointOnly) {
   MachineInstr &MI = *MBBI;
   MachineBasicBlock::iterator E = MI.getParent()->end();
 
@@ -2882,8 +2899,8 @@ bool AArch64LoadStoreOpt::tryToPairLdStInst(MachineBasicBlock::iterator &MBBI) {
 
   // Look ahead up to LdStLimit instructions for a pairable instruction.
   LdStPairFlags Flags;
-  MachineBasicBlock::iterator Paired =
-      findMatchingInsn(MBBI, Flags, LdStLimit, /* FindNarrowMerge = */ false);
+  MachineBasicBlock::iterator Paired = findMatchingInsn(
+      MBBI, Flags, LdStLimit, /* FindNarrowMerge = */ false, StatepointOnly);
 
   if (Paired == E)
     return false;
@@ -3241,20 +3258,32 @@ bool AArch64LoadStoreOpt::optimizeBlock(MachineBasicBlock &MBB,
   //        ; becomes
   //        ldp q0, q1, [x2]
 
-  if (MBB.getParent()->getRegInfo().tracksLiveness()) {
-    DefinedInBB.clear();
-    DefinedInBB.addLiveIns(MBB);
-  }
+  // Pair statepoint spills first. Ordinary register spills are scheduled
+  // independently and can otherwise steal a root's pair partner: STP scalar,
+  // root0; STR root1 before a call, but LDP root0, root1 after it. The reload
+  // then crosses two stores, which can stall store-to-load forwarding.
+  // The normal scan still pairs leftover roots with ordinary spills when no
+  // statepoint pair was possible; this is a preference, not a pairing ban.
+  for (bool StatepointOnly : {true, false}) {
+    if (StatepointOnly && !MBB.getParent()->getFunction().hasGC())
+      continue;
+    if (MBB.getParent()->getRegInfo().tracksLiveness()) {
+      DefinedInBB.clear();
+      DefinedInBB.addLiveIns(MBB);
+    }
 
-  for (MachineBasicBlock::iterator MBBI = MBB.begin(), E = MBB.end();
-       MBBI != E;) {
-    // Track currently live registers up to this point, to help with
-    // searching for a rename register on demand.
-    updateDefinedRegisters(*MBBI, DefinedInBB, TRI);
-    if (TII->isPairableLdStInst(*MBBI) && tryToPairLdStInst(MBBI))
-      Modified = true;
-    else
-      ++MBBI;
+    for (MachineBasicBlock::iterator MBBI = MBB.begin(), E = MBB.end();
+         MBBI != E;) {
+      // Track currently live registers up to this point, to help with
+      // searching for a rename register on demand.
+      updateDefinedRegisters(*MBBI, DefinedInBB, TRI);
+      if (TII->isPairableLdStInst(*MBBI) &&
+          (!StatepointOnly || accessesStatepointSpillSlot(*MBBI)) &&
+          tryToPairLdStInst(MBBI, StatepointOnly))
+        Modified = true;
+      else
+        ++MBBI;
+    }
   }
   // 4) Find base register updates that can be merged into the load or store
   //    as a base-reg writeback.
