@@ -2071,6 +2071,9 @@ public:
                               InstructionCost ReductionCost = TTI::TCC_Free,
                               Instruction *RdxRoot = nullptr);
 
+  /// Check latency before packing independent integer recurrence chains.
+  bool hasUnprofitableIntegerRecurrence() const;
+
   /// Construct a vectorizable tree that starts at \p Roots, ignoring users for
   /// the purpose of scheduling and extraction in the \p UserIgnoreLst.
   void buildTree(ArrayRef<Value *> Roots,
@@ -19856,10 +19859,158 @@ template <typename T> struct ShuffledInsertData {
 };
 } // namespace
 
+// Compare the critical paths of independent, loop-carried integer states.
+// Throughput savings alone do not account for the longer dependency chain
+// introduced when independent scalar recurrences become one vector recurrence.
+// In particular, a vector rotate may need several dependent instructions where
+// each scalar lane needs just one.
+//
+// Start with intrinsic expansions in single-block loops and fully vectorized
+// linear integer recurrences fitting in one register. Leave ordinary
+// arithmetic, unsupported operations, and partially vectorized cycles to the
+// existing throughput model: higher arithmetic latency alone need not outweigh
+// reduced execution-port pressure.
+bool BoUpSLP::hasUnprofitableIntegerRecurrence() const {
+  for (const auto &Entry : VectorizableTree) {
+    const TreeEntry *PhiTE = Entry.get();
+    if (PhiTE->State != TreeEntry::Vectorize || !PhiTE->hasState() ||
+        PhiTE->getOpcode() != Instruction::PHI ||
+        DeletedNodes.contains(PhiTE) || MinBWs.contains(PhiTE) ||
+        TransformedToGatherNodes.contains(PhiTE))
+      continue;
+    auto *Phi = cast<PHINode>(PhiTE->getMainOp());
+    if (!Phi->getType()->isIntegerTy() || Phi->getNumIncomingValues() != 2 ||
+        !TTI->isTypeLegal(
+            getWidenedType(Phi->getType(), PhiTE->getVectorFactor())))
+      continue;
+    BasicBlock *BB = Phi->getParent();
+    int Backedge = Phi->getBasicBlockIndex(BB);
+    if (Backedge < 0)
+      continue;
+
+    using Latencies = std::pair<InstructionCost, InstructionCost>;
+    DenseMap<Value *, std::optional<Latencies>> Cache;
+    bool Supported = true;
+    bool HasSlowerIntrinsicExpansion = false;
+    auto GetLatency = [&](auto &&Self, Value *V) -> std::optional<Latencies> {
+      if (V == Phi)
+        return Latencies{0, 0};
+      auto *I = dyn_cast<Instruction>(V);
+      if (!I || I->getParent() != BB)
+        return std::nullopt;
+      if (isa<PHINode>(I)) {
+        // Interacting lanes need a different model from independent states.
+        if (is_contained(PhiTE->Scalars, I))
+          Supported = false;
+        return std::nullopt;
+      }
+      auto [It, Inserted] = Cache.try_emplace(V, std::nullopt);
+      if (!Inserted)
+        return It->second;
+      if (Cache.size() > 64) {
+        Supported = false;
+        return std::nullopt;
+      }
+      std::optional<Latencies> Path;
+      Value *RecurrenceOperand = nullptr;
+      for (Value *Op : I->operands()) {
+        if (auto L = Self(Self, Op)) {
+          // Repeated operands (such as a rotate's two identical inputs) are
+          // one dependency. Leave branching recurrence graphs unmodeled.
+          if (RecurrenceOperand && RecurrenceOperand != Op) {
+            Supported = false;
+            return std::nullopt;
+          }
+          RecurrenceOperand = Op;
+          Path = L;
+        }
+      }
+      if (!Path)
+        return std::nullopt;
+
+      const TreeEntry *TE = nullptr;
+      for (const TreeEntry *Candidate : getTreeEntries(I)) {
+        if (Candidate->State == TreeEntry::Vectorize &&
+            !Candidate->isAltShuffle() && !DeletedNodes.contains(Candidate) &&
+            !MinBWs.contains(Candidate) &&
+            !TransformedToGatherNodes.contains(Candidate) &&
+            Candidate->getVectorFactor() == PhiTE->getVectorFactor()) {
+          TE = Candidate;
+          break;
+        }
+      }
+      if (!TE || !I->getType()->isIntegerTy()) {
+        Supported = false;
+        return std::nullopt;
+      }
+      constexpr auto Kind = TTI::TCK_Latency;
+      Type *VecTy = getWidenedType(I->getType(), TE->getVectorFactor());
+      // Different constants can give the scalar lanes different costs. Use
+      // the slowest lane at each step rather than assuming that the selected
+      // representative is the limiting scalar recurrence.
+      auto GetScalarCost = [&](TTI::TargetCostKind CostKind) {
+        InstructionCost Cost = 0;
+        for (Value *V : TE->Scalars) {
+          auto *ScalarI = dyn_cast<Instruction>(V);
+          if (!ScalarI)
+            return InstructionCost::getInvalid();
+          InstructionCost C = TTI->getInstructionCost(ScalarI, CostKind);
+          if (!C.isValid())
+            return C;
+          Cost = std::max(Cost, C);
+        }
+        return Cost;
+      };
+      InstructionCost Scalar = GetScalarCost(Kind);
+      InstructionCost Vector = InstructionCost::getInvalid();
+      if (isa<BinaryOperator>(I)) {
+        SmallVector<const Value *> Args(I->operand_values());
+        Vector = TTI->getArithmeticInstrCost(
+            I->getOpcode(), VecTy, Kind, TTI::getOperandInfo(I->getOperand(0)),
+            TTI::getOperandInfo(I->getOperand(1)), Args, I);
+      } else if (auto *II = dyn_cast<IntrinsicInst>(I)) {
+        Intrinsic::ID ID = getVectorIntrinsicIDForCall(II, TLI);
+        if (ID != Intrinsic::not_intrinsic) {
+          SmallVector<Type *> ArgTys =
+              buildIntrinsicArgTypes(II, ID, TE->getVectorFactor(), 0, TTI);
+          SmallVector<const Value *> Args(II->args());
+          IntrinsicCostAttributes ICA(ID, VecTy, Args, ArgTys, {}, II);
+          Vector = TTI->getIntrinsicInstrCost(ICA, Kind);
+          InstructionCost ScalarSize = GetScalarCost(TTI::TCK_CodeSize);
+          InstructionCost VectorSize =
+              TTI->getIntrinsicInstrCost(ICA, TTI::TCK_CodeSize);
+          HasSlowerIntrinsicExpansion |=
+              Scalar.isValid() && Vector.isValid() && Vector > Scalar &&
+              ScalarSize.isValid() && VectorSize.isValid() &&
+              VectorSize > ScalarSize;
+        }
+      }
+      if (!Scalar.isValid() || !Vector.isValid()) {
+        Supported = false;
+        return std::nullopt;
+      }
+      Path->first += Scalar;
+      Path->second += Vector;
+      Cache[V] = Path;
+      return Path;
+    };
+    auto L = GetLatency(GetLatency, Phi->getIncomingValue(Backedge));
+    if (Supported && HasSlowerIntrinsicExpansion && L && L->second > L->first) {
+      LLVM_DEBUG(dbgs() << "SLP: Rejecting slower integer recurrence: scalar="
+                        << L->first << " vector=" << L->second << "\n");
+      return true;
+    }
+  }
+  return false;
+}
+
 InstructionCost BoUpSLP::getTreeCost(InstructionCost TreeCost,
                                      ArrayRef<Value *> VectorizedVals,
                                      InstructionCost ReductionCost,
                                      Instruction *RdxRoot) {
+  if (hasUnprofitableIntegerRecurrence())
+    return InstructionCost::getInvalid();
+
   // A poor-throughput entry's real vector-vs-scalar savings (fdiv/frem/fsqrt)
   // are already folded into TreeCost like any other entry, including all
   // shuffle/insert/extract overhead elsewhere in the tree. So bypassing the
