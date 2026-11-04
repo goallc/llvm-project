@@ -3898,6 +3898,43 @@ X86TargetLowering::getJumpConditionMergingParams(Instruction::BinaryOps Opc,
       match(Rhs, m_SpecificICmp(ICmpInst::ICMP_EQ, m_Value(), m_Value())))
     return {-1, -1, -1};
 
+  // In a small early-exit loop, materializing the induction bound and the
+  // data-dependent condition with SETCCs adds a dependency chain on every
+  // iteration. Keep the bound as a separate branch, which is predictable until
+  // the last iteration. Mixed EQ/NE conditions cannot use the bitwise combining
+  // patterns for AND+EQ or OR+NE. CCMP can combine them without SETCCs.
+  auto *LCmp = dyn_cast<ICmpInst>(Lhs);
+  auto *RCmp = dyn_cast<ICmpInst>(Rhs);
+  if (BaseCost >= 0 && !Subtarget.hasCCMP() && LCmp && RCmp &&
+      LCmp->isEquality() && RCmp->isEquality() &&
+      LCmp->getPredicate() != RCmp->getPredicate() &&
+      LCmp->getParent() == RCmp->getParent()) {
+    const BasicBlock *BB = LCmp->getParent();
+    auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
+    auto BoundPred =
+        Opc == Instruction::Or ? ICmpInst::ICMP_EQ : ICmpInst::ICMP_NE;
+    const ICmpInst *Bound = LCmp->getPredicate() == BoundPred ? LCmp : RCmp;
+    if (Br && (Br->getSuccessor(0) == BB || Br->getSuccessor(1) == BB)) {
+      for (unsigned Idx = 0; Idx != 2; ++Idx) {
+        const Value *V = Bound->getOperand(Idx);
+        const Value *Limit = Bound->getOperand(1 - Idx);
+        if (auto *I = dyn_cast<Instruction>(Limit))
+          if (I->getParent() == BB)
+            continue;
+        if (auto *Add = dyn_cast<BinaryOperator>(V))
+          if (Add->getOpcode() == Instruction::Add &&
+              isa<ConstantInt>(Add->getOperand(1)))
+            V = Add->getOperand(0);
+        auto *Phi = dyn_cast<PHINode>(V);
+        if (!Phi || Phi->getParent() != BB)
+          continue;
+        const Value *Next = Phi->getIncomingValueForBlock(BB);
+        if (match(Next, m_Add(m_Specific(Phi), m_ConstantInt())))
+          return {-1, -1, -1};
+      }
+    }
+  }
+
   return {BaseCost, BrMergingLikelyBias.getValue(),
           BrMergingUnlikelyBias.getValue()};
 }
