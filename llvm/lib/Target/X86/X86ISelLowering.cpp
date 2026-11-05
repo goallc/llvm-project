@@ -3873,6 +3873,29 @@ unsigned X86TargetLowering::preferedOpcodeForCmpEqPiecesOfOperand(
   return ISD::SRL;
 }
 
+/// Match a constant-step induction bound in a single-block loop.
+static bool isSingleBlockLoopBound(const ICmpInst *Cmp) {
+  using namespace llvm::PatternMatch;
+  const BasicBlock *BB = Cmp->getParent();
+  auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
+  if (!Br || (Br->getSuccessor(0) != BB && Br->getSuccessor(1) != BB))
+    return false;
+
+  auto IsInductionBound = [BB](Value *V, Value *Limit) {
+    if (auto *I = dyn_cast<Instruction>(Limit); I && I->getParent() == BB)
+      return false;
+    PHINode *Phi;
+    if (!match(V,
+               m_CombineOr(m_Phi(Phi), m_Add(m_Phi(Phi), m_ConstantInt()))) ||
+        Phi->getParent() != BB)
+      return false;
+    return match(Phi->getIncomingValueForBlock(BB),
+                 m_Add(m_Specific(Phi), m_ConstantInt()));
+  };
+  return IsInductionBound(Cmp->getOperand(0), Cmp->getOperand(1)) ||
+         IsInductionBound(Cmp->getOperand(1), Cmp->getOperand(0));
+}
+
 TargetLoweringBase::CondMergingParams
 X86TargetLowering::getJumpConditionMergingParams(Instruction::BinaryOps Opc,
                                                  const Value *Lhs,
@@ -3898,42 +3921,25 @@ X86TargetLowering::getJumpConditionMergingParams(Instruction::BinaryOps Opc,
       match(Rhs, m_SpecificICmp(ICmpInst::ICMP_EQ, m_Value(), m_Value())))
     return {-1, -1, -1};
 
-  // In a small early-exit loop, materializing the induction bound and the
+  // In an early-exit loop, materializing the induction bound and the
   // data-dependent condition with SETCCs adds a dependency chain on every
   // iteration. Keep the bound as a separate branch, which is predictable until
   // the last iteration. Mixed EQ/NE conditions cannot use the bitwise combining
   // patterns for AND+EQ or OR+NE. CCMP can combine them without SETCCs.
-  auto *LCmp = dyn_cast<ICmpInst>(Lhs);
-  auto *RCmp = dyn_cast<ICmpInst>(Rhs);
-  if (BaseCost >= 0 && !Subtarget.hasCCMP() && LCmp && RCmp &&
-      LCmp->isEquality() && RCmp->isEquality() &&
-      LCmp->getPredicate() != RCmp->getPredicate() &&
-      LCmp->getParent() == RCmp->getParent()) {
-    const BasicBlock *BB = LCmp->getParent();
-    auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
-    auto BoundPred =
-        Opc == Instruction::Or ? ICmpInst::ICMP_EQ : ICmpInst::ICMP_NE;
-    const ICmpInst *Bound = LCmp->getPredicate() == BoundPred ? LCmp : RCmp;
-    if (Br && (Br->getSuccessor(0) == BB || Br->getSuccessor(1) == BB)) {
-      for (unsigned Idx = 0; Idx != 2; ++Idx) {
-        const Value *V = Bound->getOperand(Idx);
-        const Value *Limit = Bound->getOperand(1 - Idx);
-        if (auto *I = dyn_cast<Instruction>(Limit))
-          if (I->getParent() == BB)
-            continue;
-        if (auto *Add = dyn_cast<BinaryOperator>(V))
-          if (Add->getOpcode() == Instruction::Add &&
-              isa<ConstantInt>(Add->getOperand(1)))
-            V = Add->getOperand(0);
-        auto *Phi = dyn_cast<PHINode>(V);
-        if (!Phi || Phi->getParent() != BB)
-          continue;
-        const Value *Next = Phi->getIncomingValueForBlock(BB);
-        if (match(Next, m_Add(m_Specific(Phi), m_ConstantInt())))
-          return {-1, -1, -1};
-      }
-    }
-  }
+  auto BoundPred =
+      Opc == Instruction::Or ? ICmpInst::ICMP_EQ : ICmpInst::ICMP_NE;
+  const Instruction *Bound, *Data;
+  auto BoundCmp =
+      m_Instruction(Bound, m_SpecificICmp(BoundPred, m_Value(), m_Value()));
+  auto DataCmp = m_Instruction(
+      Data, m_SpecificICmp(ICmpInst::getInversePredicate(BoundPred), m_Value(),
+                           m_Value()));
+  if (BaseCost >= 0 && !Subtarget.hasCCMP() &&
+      ((match(Lhs, BoundCmp) && match(Rhs, DataCmp)) ||
+       (match(Rhs, BoundCmp) && match(Lhs, DataCmp))) &&
+      Bound->getParent() == Data->getParent() &&
+      isSingleBlockLoopBound(cast<ICmpInst>(Bound)))
+    return {-1, -1, -1};
 
   return {BaseCost, BrMergingLikelyBias.getValue(),
           BrMergingUnlikelyBias.getValue()};
