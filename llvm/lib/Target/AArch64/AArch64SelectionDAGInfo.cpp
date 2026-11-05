@@ -12,6 +12,7 @@
 
 #include "AArch64SelectionDAGInfo.h"
 #include "AArch64MachineFunctionInfo.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/GoCallingConv.h"
 
 #define GET_SDNODE_DESC
@@ -324,6 +325,23 @@ SDValue AArch64SelectionDAGInfo::EmitTargetCodeForMemset(
     MachinePointerInfo DstPtrInfo) const {
   const AArch64Subtarget &STI =
       DAG.getMachineFunction().getSubtarget<AArch64Subtarget>();
+
+  // A bounded, fixed-size Go stack clear is commonly followed immediately by
+  // accesses to the initialized object. Avoid the generic runtime dispatch for
+  // these objects, while leaving large and dynamic clears to the runtime.
+  // This hook runs only after the ordinary small-memset expansion has declined.
+  // Re-enter once with AlwaysInline to use the normal store type/alignment and
+  // tail selection, rather than duplicating that logic here.
+  const Function &F = DAG.getMachineFunction().getFunction();
+  auto *ConstantSize = dyn_cast<ConstantSDNode>(Size);
+  const Value *Object = dyn_cast_if_present<const Value *>(DstPtrInfo.V);
+  if (!AlwaysInline && !isVolatile && !F.hasOptSize() && isNullConstant(Src) &&
+      ConstantSize && ConstantSize->getZExtValue() <= 1024 && Object &&
+      isa<AllocaInst>(getUnderlyingObject(Object)) &&
+      goabi::isGoCallingConv(F.getCallingConv()) &&
+      (!STI.requiresStrictAlign() || Alignment >= Align(8)))
+    return DAG.getMemset(Chain, dl, Dst, Src, Size, Alignment, isVolatile,
+                         /*AlwaysInline=*/true, /*CI=*/nullptr, DstPtrInfo);
 
   if (UseMOPS && STI.hasMOPS())
     return EmitMOPS(AArch64::MOPSMemorySetPseudo, DAG, dl, Chain, Dst, Src,
