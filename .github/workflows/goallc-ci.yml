@@ -137,6 +137,7 @@ jobs:
             "$build/test/CodeGen/Generic/goobj-memory-intrinsics.ll"
             "$build/test/CodeGen/Generic/goobj-no-hosted-libcalls.ll"
             "$build/test/CodeGen/Generic/goobj-stack-check-policy.ll"
+            "$build/test/CodeGen/X86/byval-overlapping-stores.ll"
             "$build/test/CodeGen/X86/branchfolding-inlineasmbr-successor.mir"
             "$build/test/CodeGen/X86/go-callconv.ll"
             "$build/test/CodeGen/X86/go-abi-transition-pic.ll"

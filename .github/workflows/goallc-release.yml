@@ -107,7 +107,7 @@ jobs:
           GOALLC_BUILD_JOBS="${{ matrix.build_jobs }}" \
             ./llvm/utils/goallc/build-payload.bash
 
-      - name: Test Windows GoObj support before packaging
+      - name: Test byval forwarding and Windows GoObj support before packaging
         run: |
           set -euo pipefail
           build="$RUNNER_TEMP/goallc-llvm-build"
@@ -116,6 +116,7 @@ jobs:
             lit="$lit.py"
           fi
           python3 "$lit" -sv \
+            "$build/test/CodeGen/X86/byval-overlapping-stores.ll" \
             "$build/test/CodeGen/X86/goobj-windows.ll"
 
       - name: Validate relocatable payload
