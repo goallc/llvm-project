@@ -1,0 +1,532 @@
+# RUN: llc -mtriple=x86_64 -run-pass=machine-cp -verify-machineinstrs %s -o - | FileCheck %s
+# RUN: llc -mtriple=x86_64 -passes=machine-cp -verify-machineinstrs %s -o - | FileCheck %s
+# CHECK-LABEL: name: single_pred
+# CHECK: bb.0:
+# CHECK: MOV64mr %stack.0, 1, $noreg, 0, $noreg, $rdi
+# CHECK: bb.1:
+# CHECK: liveins: $rdi
+# CHECK-NOT: MOV64rm
+# CHECK: RET64 implicit $rdi
+# CHECK: bb.2:
+# CHECK: $rdi = MOV64rm
+# NORELOAD-LABEL: name: single_pred
+# NORELOAD: bb.1:
+# NORELOAD-NOT: MOV64rm
+# NORELOAD: RET64 implicit $rdi
+---
+name: single_pred
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    successors: %bb.1, %bb.2
+    liveins: $rdi, $rsi
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    TEST64rr killed $rsi, $rsi, implicit-def $eflags
+    JCC_1 %bb.2, 4, implicit killed $eflags
+    JMP_1 %bb.1
+  bb.1:
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+  bb.2:
+    $edi = MOV32ri 9
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: same_block
+# CHECK: MOV64mr %stack.0, 1, $noreg, 0, $noreg, $rdi
+# CHECK-NOT: MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: same_block
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: intervening_kill
+# CHECK: CMP64rr $rdi, $rsi
+# CHECK-NOT: MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: intervening_kill
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, $rdi :: (store (s64) into %stack.0)
+    CMP64rr killed $rdi, $rsi, implicit-def dead $eflags
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: full_clobber
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: full_clobber
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    $rdi = MOV64ri 9
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: subreg_clobber
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: subreg_clobber
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    $edi = MOV32ri 9
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: byte_clobber
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: byte_clobber
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    $dil = MOV8ri 9
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: unknown_store
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: unknown_store
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    MOV64mr $rsi, 1, $noreg, 0, $noreg, $rax :: (store (s64))
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: slot_overwrite
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: slot_overwrite
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, $rax :: (store (s64) into %stack.0)
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: call_boundary
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: call_boundary
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    CALL64pcrel32 &callee, csr_64, implicit $rsp, implicit $ssp, implicit-def $rsp, implicit-def $ssp
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: call_frame_boundary
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: call_frame_boundary
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    ADJCALLSTACKDOWN64 0, 0, 0, implicit-def dead $rsp, implicit-def dead $eflags, implicit-def dead $ssp, implicit $rsp, implicit $ssp
+    ADJCALLSTACKUP64 0, 0, implicit-def dead $rsp, implicit-def dead $eflags, implicit-def dead $ssp, implicit $rsp, implicit $ssp
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: asm_boundary
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: asm_boundary
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    INLINEASM &"", 1
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: atomic_read_boundary
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: atomic_read_boundary
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    $rax = MOV64rm $rsi, 1, $noreg, 0, $noreg :: (load seq_cst (s64))
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: volatile_read_boundary
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: volatile_read_boundary
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    $rax = MOV64rm $rsi, 1, $noreg, 0, $noreg :: (volatile load (s64))
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: address_exposed
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: address_exposed
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    $rax = LEA64r %stack.0, 1, $noreg, 0, $noreg
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: different_slot
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: different_slot
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+  - { id: 1, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    $rdi = MOV64rm %stack.1, 1, $noreg, 0, $noreg :: (load (s64) from %stack.1)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: different_source
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: different_source
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, $rax :: (store (s64) into %stack.0)
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: narrow_store
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: narrow_store
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV32mr %stack.0, 1, $noreg, 0, $noreg, killed $edi :: (store (s32) into %stack.0)
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: volatile_reload
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: volatile_reload
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (volatile load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: volatile_spill
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: volatile_spill
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (volatile store (s64) into %stack.0)
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: non_spill_home
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: non_spill_home
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: default, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: returns_twice
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: returns_twice
+tracksRegLiveness: true
+exposesReturnsTwice: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: address_taken
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: address_taken
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0 (machine-block-address-taken):
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: subreg_reload
+# CHECK: $edi = MOV32rm
+# CHECK: RET64 implicit $edi
+---
+name: subreg_reload
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV32mr %stack.0, 1, $noreg, 0, $noreg, killed $edi :: (store (s32) into %stack.0)
+    $edi = MOV32rm %stack.0, 1, $noreg, 0, $noreg :: (load (s32) from %stack.0)
+    RET64 implicit $edi
+...
+
+# CHECK-LABEL: name: statepoint_boundary
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: statepoint_boundary
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    STATEPOINT 0, 0, 0, &callee, 2, 0, 2, 0, 2, 0, 2, 1, 1, 8, %stack.0, 0, 2, 0, 2, 1, 0, 0, csr_64, implicit-def $rsp, implicit-def $ssp :: (volatile load store (s64) on %stack.0)
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: root_slot
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: root_slot
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi, $rsi, $rax
+    STATEPOINT 0, 0, 0, &callee, 2, 0, 2, 0, 2, 0, 2, 1, 1, 8, %stack.0, 0, 2, 0, 2, 1, 0, 0, csr_64, implicit-def $rsp, implicit-def $ssp :: (volatile load store (s64) on %stack.0)
+    $rdi = MOV64ri 9
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: multiple_predecessors
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: multiple_predecessors
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    successors: %bb.1, %bb.2
+    liveins: $rdi, $rsi
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    TEST64rr $rsi, $rsi, implicit-def $eflags
+    JCC_1 %bb.2, 4, implicit killed $eflags
+    JMP_1 %bb.1
+  bb.1:
+    successors: %bb.3
+    $rdi = MOV64ri 9
+    JMP_1 %bb.3
+  bb.2:
+    successors: %bb.3
+    JMP_1 %bb.3
+  bb.3:
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# CHECK-LABEL: name: eh_pad
+# CHECK: $rdi = MOV64rm
+# CHECK: RET64 implicit $rdi
+---
+name: eh_pad
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    RET64
+  bb.1 (landing-pad):
+    liveins: $rdi
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
+
+# A loop header has both an initial incoming edge and a backedge. Do not
+# forward a register value from only one of them.
+# CHECK-LABEL: name: loop_header
+# CHECK: bb.1:
+# CHECK: $rdi = MOV64rm
+# CHECK: CMP64rr
+---
+name: loop_header
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    successors: %bb.1
+    liveins: $rdi
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    JMP_1 %bb.1
+  bb.1:
+    successors: %bb.1, %bb.2
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    CMP64rr $rdi, $rdi, implicit-def $eflags
+    JCC_1 %bb.1, 4, implicit killed $eflags
+    JMP_1 %bb.2
+  bb.2:
+    liveins: $rdi
+    RET64 implicit $rdi
+...
+
+# A clobbering register mask must end the search even without a call opcode.
+# CHECK-LABEL: name: register_mask
+# CHECK: KILL
+# CHECK: $rdi = MOV64rm
+---
+name: register_mask
+tracksRegLiveness: true
+stack:
+  - { id: 0, type: spill-slot, size: 8, alignment: 8 }
+body: |
+  bb.0:
+    liveins: $rdi
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, killed $rdi :: (store (s64) into %stack.0)
+    KILL csr_64
+    $rdi = MOV64rm %stack.0, 1, $noreg, 0, $noreg :: (load (s64) from %stack.0)
+    RET64 implicit $rdi
+...
