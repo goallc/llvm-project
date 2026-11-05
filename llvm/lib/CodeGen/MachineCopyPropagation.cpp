@@ -58,9 +58,12 @@
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineOperand.h"
+#include "llvm/CodeGen/MachineMemOperand.h"
+#include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
@@ -79,6 +82,7 @@ using namespace llvm;
 
 #define DEBUG_TYPE "machine-cp"
 
+STATISTIC(NumSpillReloads, "Number of redundant same-register spill reloads removed");
 STATISTIC(NumDeletes, "Number of dead copies deleted");
 STATISTIC(NumCopyForwards, "Number of copy uses forwarded");
 STATISTIC(NumCopyBackwardPropagated, "Number of copy defs backward propagated");
@@ -1598,6 +1602,132 @@ void MachineCopyPropagation::eliminateSpillageCopies(MachineBasicBlock &MBB) {
   Tracker.clear();
 }
 
+// Register allocation can spill one live-range fragment and reload another
+// into the same physical register, even when nothing clobbers it on that edge.
+// Retain the spill (other paths may need it), but remove the redundant reload.
+// This deliberately handles only a short local path and at most one unique
+// predecessor. It is not a general memory value propagation analysis.
+static bool removeRedundantSpillReloads(MachineFunction &MF,
+                                       const TargetInstrInfo &TII,
+                                       const TargetRegisterInfo &TRI) {
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+  const MachineRegisterInfo &MRI = MF.getRegInfo();
+  if (MF.exposesReturnsTwice() || !MFI.getObjectIndexEnd())
+    return false;
+
+  // Only private spill slots used by plain loads/stores are eligible. In
+  // particular, never reuse a GC home or a slot exposed to a statepoint,
+  // stackmap, inline asm, or an address-taking instruction.
+  SmallSet<int, 16> ExposedSlots;
+  for (MachineBasicBlock &MBB : MF) {
+    for (MachineInstr &MI : MBB) {
+      if (MI.isDebugInstr())
+        continue;
+      int FI;
+      bool PlainAccess = !MI.hasOrderedMemoryRef() &&
+                         (TII.isLoadFromStackSlot(MI, FI) ||
+                          TII.isStoreToStackSlot(MI, FI));
+      for (const MachineOperand &MO : MI.operands())
+        if (MO.isFI() && (!PlainAccess || MO.getIndex() != FI))
+          ExposedSlots.insert(MO.getIndex());
+      for (const MachineMemOperand *MMO : MI.memoperands())
+        if (auto *PSV = dyn_cast_or_null<FixedStackPseudoSourceValue>(
+                MMO->getPseudoValue()))
+          if (!PlainAccess || PSV->getFrameIndex() != FI)
+            ExposedSlots.insert(PSV->getFrameIndex());
+    }
+  }
+
+  auto IsBoundary = [&](const MachineInstr &MI) {
+    return MI.isCall() || MI.isInlineAsm() || MI.isBundled() ||
+           MI.hasUnmodeledSideEffects() || MI.hasOrderedMemoryRef() ||
+           MI.isIndirectBranch() ||
+           (MI.isTerminator() && !MI.isBranch()) ||
+           MI.getOpcode() == TargetOpcode::STACKMAP ||
+           MI.getOpcode() == TargetOpcode::PATCHPOINT ||
+           MI.getOpcode() == TargetOpcode::STATEPOINT ||
+           MI.getOpcode() == TII.getCallFrameSetupOpcode() ||
+           MI.getOpcode() == TII.getCallFrameDestroyOpcode();
+  };
+  auto IsOrdinaryBlock = [](const MachineBasicBlock &MBB) {
+    return !MBB.isEHPad() && !MBB.hasAddressTaken() &&
+           !MBB.isInlineAsmBrIndirectTarget();
+  };
+
+  bool Changed = false;
+  for (MachineBasicBlock &MBB : MF) {
+    if (!IsOrdinaryBlock(MBB))
+      continue;
+    for (MachineInstr &Load : make_early_inc_range(MBB)) {
+      int FI;
+      TypeSize Size = TypeSize::getZero();
+      Register Reg = TII.isLoadFromStackSlot(Load, FI, Size);
+      if (!Reg || !Reg.isPhysical() || MRI.isReserved(Reg) ||
+          !TRI.superregs(Reg).empty() || !Size || Size.isScalable() ||
+          TRI.getRegSizeInBits(Reg, MRI) != Size * 8 ||
+          !MFI.isSpillSlotObjectIndex(FI) || ExposedSlots.contains(FI) ||
+          IsBoundary(Load) || TII.isPredicated(Load) ||
+          Load.memoperands().size() != 1)
+        continue;
+      // Do not drop additional (including implicit super-register) defs.
+      if (llvm::any_of(Load.operands(), [&](const MachineOperand &MO) {
+            return MO.isReg() && MO.isDef() &&
+                   (MO.getReg() != Reg || MO.isImplicit() || MO.getSubReg());
+          }))
+        continue;
+
+      SmallVector<MachineInstr *, 16> Scanned;
+      MachineBasicBlock *Block = &MBB;
+      auto I = Load.getIterator();
+      bool CrossedEdge = false, Found = false;
+      unsigned Budget = 32;
+      while (Budget) {
+        if (I == Block->instr_begin()) {
+          if (CrossedEdge || Block == &MF.front() || Block->pred_size() != 1)
+            break;
+          MachineBasicBlock *Pred = *Block->pred_begin();
+          if (Pred == Block || !IsOrdinaryBlock(*Pred))
+            break;
+          Block = Pred;
+          I = Block->instr_end();
+          CrossedEdge = true;
+          continue;
+        }
+        MachineInstr &MI = *--I;
+        if (MI.isDebugInstr())
+          continue;
+        --Budget;
+        if (IsBoundary(MI) || MI.modifiesRegister(Reg, &TRI))
+          break;
+        Scanned.push_back(&MI);
+        if (!MI.mayStore())
+          continue;
+        int StoreFI;
+        TypeSize StoreSize = TypeSize::getZero();
+        Register StoredReg = TII.isStoreToStackSlot(MI, StoreFI, StoreSize);
+        Found = StoredReg == Reg && StoreFI == FI && StoreSize == Size &&
+                !TII.isPredicated(MI) && MI.memoperands().size() == 1 &&
+                llvm::none_of(MI.operands(), [](const MachineOperand &MO) {
+                  return MO.isReg() && MO.getReg() && MO.isUndef();
+                });
+        // Any other store ends the search, without needing alias analysis.
+        break;
+      }
+      if (!Found)
+        continue;
+      for (MachineInstr *MI : Scanned)
+        MI->clearRegisterKills(Reg, &TRI);
+      if (CrossedEdge && !MBB.isLiveIn(Reg))
+        MBB.addLiveIn(Reg);
+      LLVM_DEBUG(dbgs() << "MCP: Removing redundant spill reload: " << Load);
+      Load.eraseFromParent();
+      ++NumSpillReloads;
+      Changed = true;
+    }
+  }
+  return Changed;
+}
+
 bool MachineCopyPropagationLegacy::runOnMachineFunction(MachineFunction &MF) {
   if (skipFunction(MF.getFunction()))
     return false;
@@ -1636,6 +1766,8 @@ bool MachineCopyPropagation::run(MachineFunction &MF) {
   TRI = MF.getSubtarget().getRegisterInfo();
   TII = MF.getSubtarget().getInstrInfo();
   MRI = &MF.getRegInfo();
+
+  Changed |= removeRedundantSpillReloads(MF, *TII, *TRI);
 
   for (MachineBasicBlock &MBB : MF) {
     if (IsSpillageCopyElimEnabled)
