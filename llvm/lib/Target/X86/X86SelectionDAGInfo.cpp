@@ -423,6 +423,26 @@ SDValue X86SelectionDAGInfo::EmitTargetCodeForMemcpy(
 
   // Handle constant sizes
   if (ConstantSDNode *ConstantSize = dyn_cast<ConstantSDNode>(Size)) {
+    const Function &F = DAG.getMachineFunction().getFunction();
+    // Go stack arguments and results must be copied inline. The generic
+    // eight-store limit otherwise makes even a 136-byte argument use REP MOVS,
+    // whose startup cost dominates these small copies. Let the AlwaysInline
+    // fallback expand up to sixteen SSE-sized chunks, while retaining the
+    // target strategy for larger copies and size-optimized functions.
+    if (AlwaysInline && ConstantSize->getZExtValue() <= 256 &&
+        Subtarget.is64Bit() && goabi::isGoCallingConv(F.getCallingConv()) &&
+        !DAG.shouldOptForSize()) {
+      // Respect soft-float, noimplicitfloat, and subtargets where unaligned
+      // vector accesses are slow instead of expanding a long scalar sequence.
+      MemOp Op = MemOp::Copy(ConstantSize->getZExtValue(),
+                            /*DstAlignCanChange=*/false, DstAlign, SrcAlign,
+                            isVolatile);
+      EVT CopyVT = DAG.getTargetLoweringInfo().getOptimalMemOpType(
+          *DAG.getContext(), Op, F.getAttributes());
+      if (CopyVT.isVector())
+        return SDValue();
+    }
+
     Align Alignment = std::min(DstAlign, SrcAlign);
     return emitConstantSizeRepmov(DAG, Subtarget, dl, Chain, Dst, Src,
                                   ConstantSize->getZExtValue(),
