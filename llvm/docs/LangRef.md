@@ -2105,6 +2105,17 @@ define void @f() optsize { ... }
 define void @f() "no-sse" { ... }
 ```
 
+`"gc-preserve-frame-base"`
+:   This optimization hint requests that SROA preserve a shared pointer base
+    when a PHI or select merges a static stack allocation with a non-stack
+    pointer. SROA avoids unfolding GEPs through such merges, which could split
+    one stack object into several objects and multiply the base/offset pairs
+    needed by a collector that relocates stack frames. It does not change
+    pointer semantics, object identity, or the collector's relocation rules.
+    It is effective only in functions containing a potential safepoint call;
+    calls marked `"gc-leaf-function"` do not count. Other scalar replacement
+    and promotion opportunities remain enabled.
+
 `alignstack(<n>)`
 :   This attribute indicates that, when emitting the prologue and
     epilogue, the backend should forcibly align the stack pointer.

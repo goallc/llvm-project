@@ -58,6 +58,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstVisitor.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
@@ -178,6 +179,7 @@ class SROA {
   AssumptionCache *const AC;
   const bool PreserveCFG;
   const bool AggregateToVector;
+  bool PreserveMixedFrameBases = false;
 
   /// Worklist of alloca instructions to simplify.
   ///
@@ -4153,10 +4155,12 @@ class AggLoadStoreRewriter : public InstVisitor<AggLoadStoreRewriter, bool> {
   const DataLayout &DL;
 
   IRBuilderTy &IRB;
+  const bool PreserveMixedFrameBases;
 
 public:
-  AggLoadStoreRewriter(const DataLayout &DL, IRBuilderTy &IRB)
-      : DL(DL), IRB(IRB) {}
+  AggLoadStoreRewriter(const DataLayout &DL, IRBuilderTy &IRB,
+                      bool PreserveMixedFrameBases)
+      : DL(DL), IRB(IRB), PreserveMixedFrameBases(PreserveMixedFrameBases) {}
 
   /// Rewrite loads and stores through a pointer and all pointers derived from
   /// it.
@@ -4437,6 +4441,33 @@ private:
     return false;
   }
 
+  // A collector which moves stack frames may need a separate base and offset
+  // for each live field address after splitting a frame object. Honor its
+  // request to retain a shared frame/object base instead of multiplying the
+  // relocation state by unfolding GEPs through the merge.
+  bool preserveMixedFrameBase(Instruction *Merge) {
+    if (!Merge || !Merge->getType()->isPointerTy())
+      return false;
+    if (!PreserveMixedFrameBases)
+      return false;
+    bool HasFrame = false, HasOther = false;
+    auto Visit = [&](Value *V) {
+      auto *AI = dyn_cast<AllocaInst>(V->stripPointerCasts());
+      if (AI && AI->isStaticAlloca())
+        HasFrame = true;
+      else
+        HasOther = true;
+    };
+    if (auto *Phi = dyn_cast<PHINode>(Merge)) {
+      for (Value *V : Phi->incoming_values())
+        Visit(V);
+    } else if (auto *Select = dyn_cast<SelectInst>(Merge)) {
+      Visit(Select->getTrueValue());
+      Visit(Select->getFalseValue());
+    }
+    return HasFrame && HasOther;
+  }
+
   // Unfold gep (select cond, ptr1, ptr2), idx
   //   => select cond, gep(ptr1, idx), gep(ptr2, idx)
   // and  gep ptr, (select cond, idx1, idx2)
@@ -4446,6 +4477,8 @@ private:
     // Check whether the GEP has exactly one select operand and all indices
     // will become constant after the transform.
     Instruction *Sel = dyn_cast<SelectInst>(GEPI.getPointerOperand());
+    if (preserveMixedFrameBase(Sel))
+      return false;
     for (Value *Op : GEPI.indices()) {
       if (auto *SI = dyn_cast<SelectInst>(Op)) {
         if (Sel)
@@ -4543,6 +4576,8 @@ private:
     // operand (looking through the phi if it is the phi we want to unfold) is
     // an instruction besides a static alloca.
     PHINode *Phi = dyn_cast<PHINode>(GEPI.getPointerOperand());
+    if (preserveMixedFrameBase(Phi))
+      return false;
     auto IsInvalidPointerOperand = [](Value *V) {
       if (!isa<Instruction>(V))
         return false;
@@ -6158,7 +6193,7 @@ SROA::runOnAlloca(AllocaInst &AI) {
   // First, split any FCA loads and stores touching this alloca to promote
   // better splitting and promotion opportunities.
   IRBuilderTy IRB(&AI);
-  AggLoadStoreRewriter AggRewriter(DL, IRB);
+  AggLoadStoreRewriter AggRewriter(DL, IRB, PreserveMixedFrameBases);
   Changed |= AggRewriter.rewrite(AI);
 
   // Build the slices using a recursive instruction-visiting builder.
@@ -6278,6 +6313,23 @@ bool SROA::promoteAllocas() {
 
 std::pair<bool /*Changed*/, bool /*CFGChanged*/> SROA::runSROA(Function &F) {
   LLVM_DEBUG(dbgs() << "SROA function: " << F.getName() << "\n");
+
+  // Without a possible relocation, unfolding can eliminate the frame object
+  // altogether. Do not inhibit this promotion merely because the frontend
+  // supplied a collector hint (calls may have disappeared in earlier passes).
+  PreserveMixedFrameBases =
+      F.hasFnAttribute("gc-preserve-frame-base") &&
+      llvm::any_of(instructions(F), [](const Instruction &I) {
+        const auto *Call = dyn_cast<CallBase>(&I);
+        if (!Call || Call->hasFnAttr("gc-leaf-function"))
+          return false;
+        if (const Function *Callee = Call->getCalledFunction())
+          return Callee->getIntrinsicID() ==
+                     Intrinsic::experimental_gc_statepoint ||
+                 (!Callee->isIntrinsic() &&
+                  !Callee->hasFnAttribute("gc-leaf-function"));
+        return true;
+      });
 
   const DataLayout &DL = F.getDataLayout();
   BasicBlock &EntryBB = F.getEntryBlock();
