@@ -9580,7 +9580,8 @@ static SDValue tryForwardByValStores(SelectionDAG &DAG, const SDLoc &DL,
   MachineFrameInfo &MFI = MF.getFrameInfo();
   int FI = SrcFI->getIndex();
 
-  if (MF.getTarget().getOptLevel() == CodeGenOptLevel::None)
+  if (MF.getTarget().getOptLevel() == CodeGenOptLevel::None ||
+      MF.getFunction().hasOptNone())
     return SDValue();
 
   // Argument-copy elision can remap a Go call carrier to a fixed canonical
@@ -9685,10 +9686,59 @@ static SDValue tryForwardByValStores(SelectionDAG &DAG, const SDLoc &DL,
     Ranges.emplace_back(Offset, Offset + Bytes);
   }
 
-  llvm::sort(Ranges);
-  for (unsigned I = 1; I != Ranges.size(); ++I)
-    if (Ranges[I - 1].second > Ranges[I].first)
+  auto SortedRanges = Ranges;
+  llvm::sort(SortedRanges);
+  bool HasOverlap = false;
+  for (unsigned I = 1; I != SortedRanges.size(); ++I)
+    HasOverlap |= SortedRanges[I - 1].second > SortedRanges[I].first;
+
+  if (HasOverlap) {
+    // Overlap does not prevent copy elision, but the stores must keep their
+    // original memory order. Recover that order from chains, never from the
+    // order of the alloca's uses or DAG node allocation. Bound the search and
+    // leave the ordinary copy in place if any overlapping pair is unordered.
+    if (Stores.size() > 128)
       return SDValue();
+    DenseMap<const SDNode *, unsigned> StoreIndices;
+    for (unsigned I = 0; I != Stores.size(); ++I)
+      StoreIndices[Stores[I]] = I;
+    SmallVector<BitVector, 8> Before(Stores.size(), BitVector(Stores.size()));
+    for (unsigned I = 0; I != Stores.size(); ++I) {
+      SmallVector<const SDNode *, 16> Chains{Stores[I]->getChain().getNode()};
+      SmallPtrSet<const SDNode *, 32> SeenChains;
+      while (!Chains.empty()) {
+        const SDNode *N = Chains.pop_back_val();
+        if (!SeenChains.insert(N).second)
+          continue;
+        if (SeenChains.size() > 4096)
+          return SDValue();
+        if (auto It = StoreIndices.find(N); It != StoreIndices.end())
+          Before[I].set(It->second);
+        for (const SDValue &Op : N->op_values())
+          if (Op.getValueType() == MVT::Other)
+            Chains.push_back(Op.getNode());
+      }
+    }
+    for (unsigned I = 0; I != Stores.size(); ++I)
+      for (unsigned J = 0; J != I; ++J)
+        if (Ranges[I].first < Ranges[J].second &&
+            Ranges[J].first < Ranges[I].second && !Before[I][J] &&
+            !Before[J][I])
+          return SDValue();
+
+    SmallVector<unsigned, 8> Order;
+    for (unsigned I = 0; I != Stores.size(); ++I)
+      Order.push_back(I);
+    // All ancestors of a store are also ancestors of its successors, so this
+    // is a topological order even when independent chains join in token factors.
+    llvm::stable_sort(Order, [&](unsigned A, unsigned B) {
+      return Before[A].count() < Before[B].count();
+    });
+    auto Unordered = std::move(Forwarded);
+    Forwarded.clear();
+    for (unsigned I : Order)
+      Forwarded.push_back(Unordered[I]);
+  }
 
   auto RemoveChainNode = [&](SDNode *N) {
     SDValue Old(N, 0);
@@ -9718,7 +9768,11 @@ static SDValue tryForwardByValStores(SelectionDAG &DAG, const SDLoc &DL,
     else
       NewStores.push_back(
           DAG.getStore(Chain, DL, ST.Value, Ptr, PtrInfo, Alignment));
+    if (HasOverlap)
+      Chain = NewStores.back();
   }
+  if (HasOverlap)
+    return Chain;
   return NewStores.size() == 1
              ? NewStores.front()
              : DAG.getNode(ISD::TokenFactor, DL, MVT::Other, NewStores);

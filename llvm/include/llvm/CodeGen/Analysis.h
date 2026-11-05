@@ -22,6 +22,7 @@ namespace llvm {
 template <typename T> class SmallVectorImpl;
 class GlobalValue;
 class AllocaInst;
+class DominatorTree;
 class LLT;
 class MachineBasicBlock;
 class MachineFunction;
@@ -108,6 +109,19 @@ LLVM_ABI void computeValueLLTs(const DataLayout &DL, Type &Ty,
 LLVM_ABI bool isSingleByValCallCarrier(const AllocaInst &Alloca,
                                        const DataLayout &DL,
                                        bool AllowGCLiveUses = false);
+
+/// Sink a private byval carrier's initialization to its consuming call. Uses
+/// the same ownership proof as isSingleByValCallCarrier, but accepts dominating
+/// initializers across an acyclic, call-free region and bounded memsets. Keep
+/// typed SSA values and the order of partially overlapping stores; discard
+/// fully overwritten writes and split fills around their overwritten bytes.
+/// There is no requirement for a complete initialization or a zero fill.
+///
+/// This changes pointer-value lifetimes and must run before GC liveness and
+/// statepoint rewriting. Clients with language-specific alloca semantics must
+/// exclude those allocas. Does not change the CFG or invalidate \p DT.
+LLVM_ABI bool prepareSingleByValCallCarrier(AllocaInst &Alloca,
+                                          const DominatorTree &DT);
 
 /// ExtractTypeInfo - Returns the type info, possibly bitcast, encoded in V.
 LLVM_ABI GlobalValue *ExtractTypeInfo(Value *V);

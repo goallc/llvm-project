@@ -26,6 +26,7 @@ add_llvm_component_library(LLVMCodeGen
   AggressiveAntiDepBreaker.cpp
   AllocationOrder.cpp
   Analysis.cpp
+  ByValCopyElision.cpp
   AssignmentTrackingAnalysis.cpp
   AtomicExpandPass.cpp
   BasicTargetTransformInfo.cpp

@@ -584,6 +584,14 @@ bool CodeGenPrepare::run(Function &F, FunctionAnalysisManager &AM) {
 bool CodeGenPrepare::_run(Function &F) {
   bool EverMadeChange = false;
 
+  // GC clients must prepare carriers before computing root lifetimes. Other
+  // callers can use the same target-independent preparation here, before the
+  // per-block SelectionDAG loses access to predecessor initializers.
+  if (!F.hasGC())
+    for (Instruction &I : F.getEntryBlock())
+      if (auto *AI = dyn_cast<AllocaInst>(&I))
+        EverMadeChange |= prepareSingleByValCallCarrier(*AI, DTU->getDomTree());
+
   OptSize = F.hasOptSize();
   // Use the basic-block-sections profile to promote hot functions to .text.hot
   // if requested.
