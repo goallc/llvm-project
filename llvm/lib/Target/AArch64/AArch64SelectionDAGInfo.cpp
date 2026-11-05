@@ -104,6 +104,64 @@ static SDValue emitGoInlineMemcpyLoop(SelectionDAG &DAG, const SDLoc &DL,
       SrcPtrInfo.getWithOffset(LoopSize));
 }
 
+static SDValue emitGoInlineMemzeroLoop(SelectionDAG &DAG, const SDLoc &DL,
+                                       SDValue Chain, SDValue Dst, SDValue Src,
+                                       SDValue Size, Align DstAlign,
+                                       bool IsVolatile,
+                                       MachinePointerInfo DstPtrInfo) {
+  auto *ConstantSize = dyn_cast<ConstantSDNode>(Size);
+  const Function &F = DAG.getMachineFunction().getFunction();
+  const Value *Object = dyn_cast_if_present<const Value *>(DstPtrInfo.V);
+  if (IsVolatile || !ConstantSize || !isNullConstant(Src) || F.hasOptSize() ||
+      Dst.getValueType() != MVT::i64 || Size.getValueType() != MVT::i64 ||
+      !goabi::isGoCallingConv(F.getCallingConv()) || !Object ||
+      !isa<AllocaInst>(getUnderlyingObject(Object)))
+    return SDValue();
+
+  MachineFunction &MF = DAG.getMachineFunction();
+  const AArch64Subtarget &STI = MF.getSubtarget<AArch64Subtarget>();
+  // Four STP xzr, xzr instructions clear 64 bytes, as in Go's arm64 backend.
+  // On strict-alignment targets use four legal scalar stores when the pointer
+  // is not aligned enough for an integer pair. No vector registers are needed.
+  uint64_t AccessSize = 16;
+  if (STI.requiresStrictAlign() && DstAlign < Align(8))
+    AccessSize = DstAlign.value();
+  uint64_t LoopStride = 4 * AccessSize;
+  uint64_t SetSize = ConstantSize->getZExtValue();
+  // Keep larger objects on the runtime path: its bulk clearing is faster
+  // than integer-pair loops for large stack regions.
+  if (SetSize > 4096)
+    return SDValue();
+  uint64_t LoopSize = SetSize - SetSize % LoopStride;
+  // This hook runs after the ordinary small-memset expansion has declined.
+  // Keep that policy, and only build a loop when at least three 64-byte
+  // iterations (or the equivalent strict-alignment stores) are worthwhile.
+  if (LoopSize < 192)
+    return SDValue();
+
+  auto *DstOp = MF.getMachineMemOperand(
+      DstPtrInfo, MachineMemOperand::MOStore, LocationSize::precise(LoopSize),
+      std::min(DstAlign, Align(std::min<uint64_t>(AccessSize, 8))));
+  SDValue Ops[] = {Dst, DAG.getConstant(LoopSize, DL, MVT::i64),
+                   DAG.getTargetConstant(AccessSize, DL, MVT::i64),
+                   DAG.getTargetConstant(LoopSize / LoopStride, DL, MVT::i64),
+                   Chain};
+  const EVT ResultTys[] = {MVT::i64, MVT::Other};
+  MachineSDNode *Loop = DAG.getMachineNode(AArch64::GoInlineMemzeroLoopPseudo,
+                                           DL, ResultTys, Ops);
+  DAG.setNodeMemRefs(Loop, {DstOp});
+
+  SDValue LoopChain(Loop, 1);
+  uint64_t TailSize = SetSize - LoopSize;
+  if (!TailSize)
+    return LoopChain;
+  return DAG.getMemset(LoopChain, DL, SDValue(Loop, 0), Src,
+                       DAG.getConstant(TailSize, DL, MVT::i64),
+                       commonAlignment(DstAlign, LoopSize), IsVolatile,
+                       /*AlwaysInline=*/true, /*CI=*/nullptr,
+                       DstPtrInfo.getWithOffset(LoopSize));
+}
+
 AArch64SelectionDAGInfo::AArch64SelectionDAGInfo()
     : SelectionDAGGenTargetInfo(AArch64GenSDNodeInfo) {}
 
@@ -326,22 +384,11 @@ SDValue AArch64SelectionDAGInfo::EmitTargetCodeForMemset(
   const AArch64Subtarget &STI =
       DAG.getMachineFunction().getSubtarget<AArch64Subtarget>();
 
-  // A bounded, fixed-size Go stack clear is commonly followed immediately by
-  // accesses to the initialized object. Avoid the generic runtime dispatch for
-  // these objects, while leaving large and dynamic clears to the runtime.
-  // This hook runs only after the ordinary small-memset expansion has declined.
-  // Re-enter once with AlwaysInline to use the normal store type/alignment and
-  // tail selection, rather than duplicating that logic here.
-  const Function &F = DAG.getMachineFunction().getFunction();
-  auto *ConstantSize = dyn_cast<ConstantSDNode>(Size);
-  const Value *Object = dyn_cast_if_present<const Value *>(DstPtrInfo.V);
-  if (!AlwaysInline && !isVolatile && !F.hasOptSize() && isNullConstant(Src) &&
-      ConstantSize && ConstantSize->getZExtValue() <= 1024 && Object &&
-      isa<AllocaInst>(getUnderlyingObject(Object)) &&
-      goabi::isGoCallingConv(F.getCallingConv()) &&
-      (!STI.requiresStrictAlign() || Alignment >= Align(8)))
-    return DAG.getMemset(Chain, dl, Dst, Src, Size, Alignment, isVolatile,
-                         /*AlwaysInline=*/true, /*CI=*/nullptr, DstPtrInfo);
+  // Keep fixed Go stack initialization compact and avoid the generic runtime
+  // clear immediately before the initialized storage is accessed.
+  if (SDValue Loop = emitGoInlineMemzeroLoop(DAG, dl, Chain, Dst, Src, Size,
+                                             Alignment, isVolatile, DstPtrInfo))
+    return Loop;
 
   if (UseMOPS && STI.hasMOPS())
     return EmitMOPS(AArch64::MOPSMemorySetPseudo, DAG, dl, Chain, Dst, Src,

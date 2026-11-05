@@ -11495,6 +11495,17 @@ let mayLoad = 1, mayStore = 1, usesCustomInserter = 1,
            "$dst = $dst_wb,$src = $src_wb">, Sched<[]>;
 }
 
+// Fixed Go stack zeroing uses the same machine-CFG loop infrastructure, with
+// no source pointer, loads, or implicit floating-point register use.
+let mayLoad = 0, mayStore = 1, usesCustomInserter = 1,
+    hasNoSchedulingInfo = 1 in {
+  def GoInlineMemzeroLoopPseudo :
+    Pseudo<(outs GPR64common:$dst_wb),
+           (ins GPR64common:$dst, GPR64common:$size,
+                i64imm:$access_size, i64imm:$iterations), [],
+           "$dst = $dst_wb">, Sched<[]>;
+}
+
 // MOPS operations always contain three 4-byte instructions
 let Predicates = [HasMOPS], Defs = [NZCV], Size = 12, mayStore = 1 in {
   let mayLoad = 1 in {

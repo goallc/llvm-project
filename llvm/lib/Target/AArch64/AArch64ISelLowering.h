@@ -181,7 +181,7 @@ public:
   MachineBasicBlock *EmitDynamicProbedAlloc(MachineInstr &MI,
                                             MachineBasicBlock *MBB) const;
 
-  MachineBasicBlock *EmitGoInlineMemcpyLoop(MachineInstr &MI,
+  MachineBasicBlock *EmitGoInlineMemoryLoop(MachineInstr &MI,
                                             MachineBasicBlock *MBB) const;
 
   MachineBasicBlock *EmitCheckMatchingVL(MachineInstr &MI,
