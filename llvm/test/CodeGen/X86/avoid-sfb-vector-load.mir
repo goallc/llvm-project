@@ -1,0 +1,803 @@
+# RUN: llc -mtriple=x86_64 -run-pass=x86-avoid-sfb -verify-machineinstrs %s -o - | FileCheck %s --enable-var-scope
+# RUN: llc -mtriple=x86_64 -passes=x86-avoid-sfb -verify-machineinstrs %s -o - | FileCheck %s --enable-var-scope
+# RUN: llc -mtriple=x86_64 -run-pass=x86-avoid-sfb -x86-disable-avoid-SFB %s -o - | FileCheck %s --check-prefix=UNCHANGED
+# RUN: llc -mtriple=x86_64 -run-pass=x86-avoid-sfb -x86-sfb-inspection-limit=0 %s -o - | FileCheck %s --check-prefix=UNCHANGED
+
+# Ordinary vector consumers need both lanes after splitting. Each incoming path
+# must contain a nearby half-width store; no global vector-load policy changes.
+--- |
+  declare void @callee()
+  define <2 x i64> @low_half(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @high_half(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @immediate_half(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @both_halves(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @shared_vector(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @unaligned(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @aligned(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @kill_base(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @negative_displacement(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @avx_half(ptr %p, i64 %v, ptr %q) "target-features"="+avx" { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @avx_integer(ptr %p, i64 %v, ptr %q) "target-features"="+avx" { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @no_store(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @other_address(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @nonoverlap(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @negative_nonoverlap(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @byte_store(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @dword_store(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @cross_half_store(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @full_store_after_half(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @smaller_store_after_half(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @volatile_load(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @atomic_load(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @volatile_store(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @atomic_store(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @unknown_load_mmo(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @indexed_load(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @optsize(ptr %p, i64 %v, ptr %q) optsize { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @minsize(ptr %p, i64 %v, ptr %q) minsize { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @no_sse2(ptr %p, i64 %v, ptr %q) "target-features"="-sse2" { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @too_far(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @at_limit(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @call_barrier(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @diamond_both(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @diamond_one(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @loop_without_store(ptr %p, i64 %v, ptr %q)  { ret <2 x i64> zeroinitializer }
+  define <2 x i64> @frame_slot(i64 %v) { ret <2 x i64> zeroinitializer }
+...
+---
+name: low_half
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: low_half
+  ; CHECK: %[[LO:[0-9]+]]:vr128 = MOVQI2PQIrm %0, 1, $noreg, 0, $noreg {{.*}}(load (s64)
+  ; CHECK-NEXT: %{{[0-9]+}}:vr128 = MOVHPSrm killed %[[LO]], %0, 1, $noreg, 8, $noreg {{.*}}(load (s64)
+  ; UNCHANGED-LABEL: name: low_half
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: high_half
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: high_half
+  ; CHECK: %[[LO:[0-9]+]]:vr128 = MOVQI2PQIrm %0, 1, $noreg, 0, $noreg {{.*}}(load (s64)
+  ; CHECK-NEXT: %{{[0-9]+}}:vr128 = MOVHPSrm killed %[[LO]], %0, 1, $noreg, 8, $noreg {{.*}}(load (s64)
+  ; UNCHANGED-LABEL: name: high_half
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 8, $noreg, %1 :: (store (s64) into %ir.p + 8)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: immediate_half
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: immediate_half
+  ; CHECK: %[[LO:[0-9]+]]:vr128 = MOVQI2PQIrm %0, 1, $noreg, 0, $noreg {{.*}}(load (s64)
+  ; CHECK-NEXT: %{{[0-9]+}}:vr128 = MOVHPSrm killed %[[LO]], %0, 1, $noreg, 8, $noreg {{.*}}(load (s64)
+  ; UNCHANGED-LABEL: name: immediate_half
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mi32 %0, 1, $noreg, 8, $noreg, 7 :: (store (s64) into %ir.p + 8)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: both_halves
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: both_halves
+  ; CHECK: %[[LO:[0-9]+]]:vr128 = MOVQI2PQIrm %0, 1, $noreg, 0, $noreg {{.*}}(load (s64)
+  ; CHECK-NEXT: %{{[0-9]+}}:vr128 = MOVHPSrm killed %[[LO]], %0, 1, $noreg, 8, $noreg {{.*}}(load (s64)
+  ; UNCHANGED-LABEL: name: both_halves
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    MOV64mr %0, 1, $noreg, 8, $noreg, %1 :: (store (s64) into %ir.p + 8)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: shared_vector
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: shared_vector
+  ; CHECK: %[[LO:[0-9]+]]:vr128 = MOVQI2PQIrm %0, 1, $noreg, 0, $noreg {{.*}}(load (s64)
+  ; CHECK-NEXT: %{{[0-9]+}}:vr128 = MOVHPSrm killed %[[LO]], %0, 1, $noreg, 8, $noreg {{.*}}(load (s64)
+  ; UNCHANGED-LABEL: name: shared_vector
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    %4:vr128 = PSHUFDri %2, 78
+    %5:vr128 = PXORrr %2, %4
+    MOVUPSmr %0, 1, $noreg, 32, $noreg, %2 :: (store (s128) into %ir.p + 32, align 8)
+    $xmm0 = COPY %5
+    RET 0, $xmm0
+...
+---
+name: unaligned
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: unaligned
+  ; CHECK: %[[LO:[0-9]+]]:vr128 = MOVQI2PQIrm %0, 1, $noreg, 1, $noreg {{.*}}(load (s64)
+  ; CHECK-NEXT: %{{[0-9]+}}:vr128 = MOVHPSrm killed %[[LO]], %0, 1, $noreg, 9, $noreg {{.*}}(load (s64)
+  ; UNCHANGED-LABEL: name: unaligned
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 1, $noreg, %1 :: (store (s64) into %ir.p + 1)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 1, $noreg :: (load (s128) from %ir.p + 1, align 1)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: aligned
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: aligned
+  ; CHECK: %[[LO:[0-9]+]]:vr128 = MOVQI2PQIrm %0, 1, $noreg, 0, $noreg {{.*}}(load (s64)
+  ; CHECK-NEXT: %{{[0-9]+}}:vr128 = MOVHPSrm killed %[[LO]], %0, 1, $noreg, 8, $noreg {{.*}}(load (s64)
+  ; UNCHANGED-LABEL: name: aligned
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVAPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    %2:vr128 = MOVAPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 16)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: kill_base
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: kill_base
+  ; CHECK: %[[LO:[0-9]+]]:vr128 = MOVQI2PQIrm %0, 1, $noreg, 0, $noreg {{.*}}(load (s64)
+  ; CHECK-NEXT: %{{[0-9]+}}:vr128 = MOVHPSrm killed %[[LO]], killed %0, 1, $noreg, 8, $noreg {{.*}}(load (s64)
+  ; UNCHANGED-LABEL: name: kill_base
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    %2:vr128 = MOVUPSrm killed %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: negative_displacement
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: negative_displacement
+  ; CHECK: %[[LO:[0-9]+]]:vr128 = MOVQI2PQIrm %0, 1, $noreg, -16, $noreg {{.*}}(load (s64)
+  ; CHECK-NEXT: %{{[0-9]+}}:vr128 = MOVHPSrm killed %[[LO]], %0, 1, $noreg, -8, $noreg {{.*}}(load (s64)
+  ; UNCHANGED-LABEL: name: negative_displacement
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, -16, $noreg, %1 :: (store (s64) into %ir.p + -16)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, -16, $noreg :: (load (s128) from %ir.p + -16, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: avx_half
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: avx_half
+  ; CHECK: %[[LO:[0-9]+]]:vr128 = VMOVQI2PQIrm %0, 1, $noreg, 0, $noreg {{.*}}(load (s64)
+  ; CHECK-NEXT: %{{[0-9]+}}:vr128 = VMOVHPSrm killed %[[LO]], %0, 1, $noreg, 8, $noreg {{.*}}(load (s64)
+  ; UNCHANGED-LABEL: name: avx_half
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = VMOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 8, $noreg, %1 :: (store (s64) into %ir.p + 8)
+    %2:vr128 = VMOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: avx_integer
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: avx_integer
+  ; CHECK: %[[LO:[0-9]+]]:vr128 = VMOVQI2PQIrm %0, 1, $noreg, 0, $noreg {{.*}}(load (s64)
+  ; CHECK-NEXT: %{{[0-9]+}}:vr128 = VMOVHPSrm killed %[[LO]], %0, 1, $noreg, 8, $noreg {{.*}}(load (s64)
+  ; UNCHANGED-LABEL: name: avx_integer
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = VMOVDQUrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    %2:vr128 = VMOVDQUrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: no_store
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: no_store
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: no_store
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: other_address
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: other_address
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: other_address
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    %3:gr64 = COPY $rdx
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    %2:vr128 = MOVUPSrm %3, 1, $noreg, 0, $noreg :: (load (s128) from %ir.q, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: nonoverlap
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: nonoverlap
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: nonoverlap
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 16, $noreg, %1 :: (store (s64) into %ir.p + 16)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: negative_nonoverlap
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: negative_nonoverlap
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: negative_nonoverlap
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, -8, $noreg, %1 :: (store (s64) into %ir.p + -8)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: byte_store
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: byte_store
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: byte_store
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV8mi %0, 1, $noreg, 0, $noreg, 7 :: (store (s8) into %ir.p)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: dword_store
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: dword_store
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: dword_store
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV32mi %0, 1, $noreg, 0, $noreg, 7 :: (store (s32) into %ir.p)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: cross_half_store
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: cross_half_store
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: cross_half_store
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 4, $noreg, %1 :: (store (s64) into %ir.p + 4)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: full_store_after_half
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: full_store_after_half
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: full_store_after_half
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    %3:vr128 = IMPLICIT_DEF
+    MOVUPSmr %0, 1, $noreg, 0, $noreg, %3 :: (store (s128) into %ir.p, align 8)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: smaller_store_after_half
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: smaller_store_after_half
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: smaller_store_after_half
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    MOV32mi %0, 1, $noreg, 8, $noreg, 7 :: (store (s32) into %ir.p + 8)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: volatile_load
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: volatile_load
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: volatile_load
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (volatile load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: atomic_load
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: atomic_load
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: atomic_load
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load monotonic (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: volatile_store
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: volatile_store
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: volatile_store
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (volatile store (s64) into %ir.p)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: atomic_store
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: atomic_store
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: atomic_store
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store monotonic (s64) into %ir.p)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: unknown_load_mmo
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: unknown_load_mmo
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: unknown_load_mmo
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: indexed_load
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: indexed_load
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: indexed_load
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64_nosp = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    %2:vr128 = MOVUPSrm %0, 8, %1, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: optsize
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: optsize
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: optsize
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: minsize
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: minsize
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: minsize
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: no_sse2
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: no_sse2
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: no_sse2
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: too_far
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: too_far
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: too_far
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: at_limit
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: at_limit
+  ; CHECK: %[[LO:[0-9]+]]:vr128 = MOVQI2PQIrm %0, 1, $noreg, 0, $noreg {{.*}}(load (s64)
+  ; CHECK-NEXT: %{{[0-9]+}}:vr128 = MOVHPSrm killed %[[LO]], %0, 1, $noreg, 8, $noreg {{.*}}(load (s64)
+  ; UNCHANGED-LABEL: name: at_limit
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    NOOP
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: call_barrier
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: call_barrier
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: call_barrier
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    liveins: $rdi, $rsi, $rdx
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    CALL64pcrel32 @callee, csr_64, implicit $rsp, implicit $ssp, implicit-def $rsp, implicit-def $ssp
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: diamond_both
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: diamond_both
+  ; CHECK: %[[LO:[0-9]+]]:vr128 = MOVQI2PQIrm %0, 1, $noreg, 0, $noreg {{.*}}(load (s64)
+  ; CHECK-NEXT: %{{[0-9]+}}:vr128 = MOVHPSrm killed %[[LO]], %0, 1, $noreg, 8, $noreg {{.*}}(load (s64)
+  ; UNCHANGED-LABEL: name: diamond_both
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    successors: %bb.1, %bb.3
+    liveins: $rdi, $rsi
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    TEST64rr %1, %1, implicit-def $eflags
+    JCC_1 %bb.1, 4, implicit $eflags
+    JMP_1 %bb.3
+  bb.1:
+    successors: %bb.2
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    JMP_1 %bb.2
+  bb.2:
+    successors: %bb.5
+    JMP_1 %bb.5
+  bb.3:
+    successors: %bb.4
+    MOV64mr %0, 1, $noreg, 8, $noreg, %1 :: (store (s64) into %ir.p + 8)
+    JMP_1 %bb.4
+  bb.4:
+    successors: %bb.5
+    JMP_1 %bb.5
+  bb.5:
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: diamond_one
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: diamond_one
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: diamond_one
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    successors: %bb.1, %bb.3
+    liveins: $rdi, $rsi
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY $rsi
+    TEST64rr %1, %1, implicit-def $eflags
+    JCC_1 %bb.1, 4, implicit $eflags
+    JMP_1 %bb.3
+  bb.1:
+    successors: %bb.2
+    MOV64mr %0, 1, $noreg, 0, $noreg, %1 :: (store (s64) into %ir.p)
+    JMP_1 %bb.2
+  bb.2:
+    successors: %bb.5
+    JMP_1 %bb.5
+  bb.3:
+    successors: %bb.4
+    NOOP
+    JMP_1 %bb.4
+  bb.4:
+    successors: %bb.5
+    JMP_1 %bb.5
+  bb.5:
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    RET 0, $xmm0
+...
+---
+name: loop_without_store
+tracksRegLiveness: true
+body: |
+  ; CHECK-LABEL: name: loop_without_store
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVUPSrm
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: loop_without_store
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVUPSrm
+  bb.0:
+    successors: %bb.1
+    liveins: $rdi
+    %0:gr64 = COPY $rdi
+    JMP_1 %bb.1
+  bb.1:
+    successors: %bb.1
+    %2:vr128 = MOVUPSrm %0, 1, $noreg, 0, $noreg :: (load (s128) from %ir.p, align 8)
+    $xmm0 = COPY %2
+    JMP_1 %bb.1
+...
+---
+name: frame_slot
+tracksRegLiveness: true
+stack:
+  - { id: 0, size: 16, alignment: 16 }
+body: |
+  ; CHECK-LABEL: name: frame_slot
+  ; CHECK-NOT: MOVQI2PQIrm
+  ; CHECK: %{{[0-9]+}}:vr128 = MOVAPSrm %stack.0
+  ; CHECK-NOT: MOVHPSrm
+  ; UNCHANGED-LABEL: name: frame_slot
+  ; UNCHANGED: %{{[0-9]+}}:vr128 = MOVAPSrm
+  bb.0:
+    liveins: $rdi
+    %0:gr64 = COPY $rdi
+    MOV64mr %stack.0, 1, $noreg, 0, $noreg, %0 :: (store (s64) into %stack.0)
+    %1:vr128 = MOVAPSrm %stack.0, 1, $noreg, 0, $noreg :: (load (s128) from %stack.0)
+    $xmm0 = COPY %1
+    RET 0, $xmm0
+...
