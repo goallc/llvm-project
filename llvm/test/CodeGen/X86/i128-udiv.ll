@@ -50,11 +50,13 @@ define i128 @test2(i128 %x) nounwind {
 ; X86-NEXT:    testl %edi, %edi
 ; X86-NEXT:    jne .LBB1_1
 ; X86-NEXT:  # %bb.2: # %_udiv-special-cases
+; X86-NEXT:    xorl %ebx, %ebx
 ; X86-NEXT:    bsrl %esi, %ebx
 ; X86-NEXT:    xorl $31, %ebx
 ; X86-NEXT:    orl $32, %ebx
 ; X86-NEXT:    jmp .LBB1_3
 ; X86-NEXT:  .LBB1_1:
+; X86-NEXT:    xorl %ebx, %ebx
 ; X86-NEXT:    bsrl %edi, %ebx
 ; X86-NEXT:    xorl $31, %ebx
 ; X86-NEXT:  .LBB1_3: # %_udiv-special-cases
@@ -365,11 +367,13 @@ define i128 @test3(i128 %x) nounwind {
 ; X86-NEXT:    testl %edx, %edx
 ; X86-NEXT:    jne .LBB2_1
 ; X86-NEXT:  # %bb.2: # %_udiv-special-cases
+; X86-NEXT:    xorl %ebx, %ebx
 ; X86-NEXT:    bsrl %edi, %ebx
 ; X86-NEXT:    xorl $31, %ebx
 ; X86-NEXT:    orl $32, %ebx
 ; X86-NEXT:    jmp .LBB2_3
 ; X86-NEXT:  .LBB2_1:
+; X86-NEXT:    xorl %ebx, %ebx
 ; X86-NEXT:    bsrl %edx, %ebx
 ; X86-NEXT:    xorl $31, %ebx
 ; X86-NEXT:  .LBB2_3: # %_udiv-special-cases
@@ -695,11 +699,13 @@ define i128 @div_by_7(i128 %x) nounwind {
 ; X86-NEXT:    testl %ebx, %ebx
 ; X86-NEXT:    jne .LBB3_1
 ; X86-NEXT:  # %bb.2: # %entry_udiv-special-cases
+; X86-NEXT:    xorl %esi, %esi
 ; X86-NEXT:    bsrl %edi, %esi
 ; X86-NEXT:    xorl $31, %esi
 ; X86-NEXT:    orl $32, %esi
 ; X86-NEXT:    jmp .LBB3_3
 ; X86-NEXT:  .LBB3_1:
+; X86-NEXT:    xorl %esi, %esi
 ; X86-NEXT:    bsrl %ebx, %esi
 ; X86-NEXT:    xorl $31, %esi
 ; X86-NEXT:  .LBB3_3: # %entry_udiv-special-cases
@@ -1021,11 +1027,13 @@ define i128 @div_by_11(i128 %x) nounwind {
 ; X86-NEXT:    testl %ebx, %ebx
 ; X86-NEXT:    jne .LBB4_1
 ; X86-NEXT:  # %bb.2: # %_udiv-special-cases
+; X86-NEXT:    xorl %esi, %esi
 ; X86-NEXT:    bsrl %edi, %esi
 ; X86-NEXT:    xorl $31, %esi
 ; X86-NEXT:    orl $32, %esi
 ; X86-NEXT:    jmp .LBB4_3
 ; X86-NEXT:  .LBB4_1:
+; X86-NEXT:    xorl %esi, %esi
 ; X86-NEXT:    bsrl %ebx, %esi
 ; X86-NEXT:    xorl $31, %esi
 ; X86-NEXT:  .LBB4_3: # %_udiv-special-cases
@@ -1345,11 +1353,13 @@ define i128 @div_by_22(i128 %x) nounwind {
 ; X86-NEXT:    testl %ebx, %ebx
 ; X86-NEXT:    jne .LBB5_1
 ; X86-NEXT:  # %bb.2: # %entry_udiv-special-cases
+; X86-NEXT:    xorl %esi, %esi
 ; X86-NEXT:    bsrl %edi, %esi
 ; X86-NEXT:    xorl $31, %esi
 ; X86-NEXT:    orl $32, %esi
 ; X86-NEXT:    jmp .LBB5_3
 ; X86-NEXT:  .LBB5_1:
+; X86-NEXT:    xorl %esi, %esi
 ; X86-NEXT:    bsrl %ebx, %esi
 ; X86-NEXT:    xorl $31, %esi
 ; X86-NEXT:  .LBB5_3: # %entry_udiv-special-cases
@@ -1671,11 +1681,13 @@ define i128 @div_by_56(i128 %x) nounwind {
 ; X86-NEXT:    testl %ebx, %ebx
 ; X86-NEXT:    jne .LBB6_1
 ; X86-NEXT:  # %bb.2: # %_udiv-special-cases
+; X86-NEXT:    xorl %esi, %esi
 ; X86-NEXT:    bsrl %edi, %esi
 ; X86-NEXT:    xorl $31, %esi
 ; X86-NEXT:    orl $32, %esi
 ; X86-NEXT:    jmp .LBB6_3
 ; X86-NEXT:  .LBB6_1:
+; X86-NEXT:    xorl %esi, %esi
 ; X86-NEXT:    bsrl %ebx, %esi
 ; X86-NEXT:    xorl $31, %esi
 ; X86-NEXT:  .LBB6_3: # %_udiv-special-cases
@@ -2668,11 +2680,13 @@ define i128 @div_by_67(i128 %x) nounwind {
 ; X86-NEXT:    testl %ebx, %ebx
 ; X86-NEXT:    jne .LBB9_1
 ; X86-NEXT:  # %bb.2: # %entry_udiv-special-cases
+; X86-NEXT:    xorl %esi, %esi
 ; X86-NEXT:    bsrl %edi, %esi
 ; X86-NEXT:    xorl $31, %esi
 ; X86-NEXT:    orl $32, %esi
 ; X86-NEXT:    jmp .LBB9_3
 ; X86-NEXT:  .LBB9_1:
+; X86-NEXT:    xorl %esi, %esi
 ; X86-NEXT:    bsrl %ebx, %esi
 ; X86-NEXT:    xorl $31, %esi
 ; X86-NEXT:  .LBB9_3: # %entry_udiv-special-cases
