@@ -2,6 +2,7 @@
 ; RUN: llc -mtriple=aarch64-unknown-linux-gnu -mattr=+strict-align -O2 -verify-machineinstrs < %s | FileCheck %s --check-prefixes=CHECK,STRICT
 ;
 ; RUN: llc -mtriple=aarch64-unknown-linux-gnu -mattr=-fp-armv8 -O2 -verify-machineinstrs < %s | FileCheck %s --check-prefixes=CHECK,UNALIGNED
+; RUN: llc -mtriple=aarch64-unknown-linux-gnu -mattr=+mops -O2 -verify-machineinstrs < %s | FileCheck %s --check-prefix=MOPS
 ; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O2 -verify-machineinstrs -stop-after=finalize-isel < %s | FileCheck %s --check-prefix=MIR
 ; RUN: llc -mtriple=aarch64-unknown-linux-gnu -O2 -verify-machineinstrs -filetype=obj -o /dev/null < %s
 ;
@@ -100,7 +101,14 @@ define goabiinternal void @stack_767() {
   ret void
 }
 
+; Target MOPS lowering keeps its existing priority.
 define goabiinternal void @stack_768() {
+; MOPS-LABEL: stack_768:
+; MOPS: setp
+; MOPS-NEXT: setm
+; MOPS-NEXT: sete
+; MOPS-NOT: b.ne
+; MOPS: bl observe
 ; CHECK-LABEL: stack_768:
 ; CHECK-NOT: bl memset
 ; CHECK-NOT: bl bzero

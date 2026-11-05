@@ -384,16 +384,16 @@ SDValue AArch64SelectionDAGInfo::EmitTargetCodeForMemset(
   const AArch64Subtarget &STI =
       DAG.getMachineFunction().getSubtarget<AArch64Subtarget>();
 
+  if (UseMOPS && STI.hasMOPS())
+    return EmitMOPS(AArch64::MOPSMemorySetPseudo, DAG, dl, Chain, Dst, Src,
+                    Size, Alignment, Alignment, isVolatile, DstPtrInfo,
+                    MachinePointerInfo{});
+
   // Keep fixed Go stack initialization compact and avoid the generic runtime
   // clear immediately before the initialized storage is accessed.
   if (SDValue Loop = emitGoInlineMemzeroLoop(DAG, dl, Chain, Dst, Src, Size,
                                              Alignment, isVolatile, DstPtrInfo))
     return Loop;
-
-  if (UseMOPS && STI.hasMOPS())
-    return EmitMOPS(AArch64::MOPSMemorySetPseudo, DAG, dl, Chain, Dst, Src,
-                    Size, Alignment, Alignment, isVolatile, DstPtrInfo,
-                    MachinePointerInfo{});
 
   auto *AFI = DAG.getMachineFunction().getInfo<AArch64FunctionInfo>();
   SMEAttrs Attrs = AFI->getSMEFnAttrs();
