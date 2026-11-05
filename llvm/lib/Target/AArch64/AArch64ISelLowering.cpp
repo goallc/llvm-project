@@ -3316,21 +3316,27 @@ AArch64TargetLowering::EmitDynamicProbedAlloc(MachineInstr &MI,
 }
 
 MachineBasicBlock *
-AArch64TargetLowering::EmitGoInlineMemcpyLoop(MachineInstr &MI,
+AArch64TargetLowering::EmitGoInlineMemoryLoop(MachineInstr &MI,
                                               MachineBasicBlock *MBB) const {
   MachineFunction &MF = *MBB->getParent();
   MachineRegisterInfo &MRI = MF.getRegInfo();
   const TargetInstrInfo *TII = Subtarget->getInstrInfo();
   const DebugLoc DL = MI.getDebugLoc();
 
+  // Copy and zero loops share CFG, pointer/count PHIs and call-frame state.
+  // Zeroing only needs the destination and has no loads or source result.
+  const bool IsZero = MI.getOpcode() == AArch64::GoInlineMemzeroLoopPseudo;
   Register DstResult = MI.getOperand(0).getReg();
-  Register SrcResult = MI.getOperand(1).getReg();
-  Register InitialDst = MI.getOperand(2).getReg();
-  Register InitialSrc = MI.getOperand(3).getReg();
-  Register InitialSize = MI.getOperand(4).getReg();
-  uint64_t AccessSize = MI.getOperand(5).getImm();
-  uint64_t Iterations = MI.getOperand(6).getImm();
-  uint64_t LoopStride = AccessSize == 16 ? 64 : 4 * AccessSize;
+  Register SrcResult = IsZero ? Register() : MI.getOperand(1).getReg();
+  Register InitialDst = MI.getOperand(IsZero ? 1 : 2).getReg();
+  Register InitialSrc = IsZero ? Register() : MI.getOperand(3).getReg();
+  Register InitialSize = MI.getOperand(IsZero ? 2 : 4).getReg();
+  uint64_t AccessSize = MI.getOperand(IsZero ? 3 : 5).getImm();
+  uint64_t Iterations = MI.getOperand(IsZero ? 4 : 6).getImm();
+  assert((AccessSize == 1 || AccessSize == 2 || AccessSize == 4 ||
+          AccessSize == 8 || AccessSize == 16) &&
+         "invalid inline memory loop access size");
+  uint64_t LoopStride = 4 * AccessSize;
 
   MachineMemOperand *LoadMMO = nullptr;
   MachineMemOperand *StoreMMO = nullptr;
@@ -3340,7 +3346,8 @@ AArch64TargetLowering::EmitGoInlineMemcpyLoop(MachineInstr &MI,
     if (MMO->isStore())
       StoreMMO = MMO;
   }
-  assert(LoadMMO && StoreMMO && "inline memcpy loop requires memory operands");
+  assert(StoreMMO && (IsZero || LoadMMO) &&
+         "inline memory loop requires memory operands");
 
   const BasicBlock *LLVMBB = MBB->getBasicBlock();
   unsigned CallFrameSize = TII->getCallFrameSizeAt(MI);
@@ -3361,19 +3368,39 @@ AArch64TargetLowering::EmitGoInlineMemcpyLoop(MachineInstr &MI,
   LoopMBB->addSuccessor(ExitMBB, BackedgeProbability.getCompl());
 
   Register LoopDst = MRI.createVirtualRegister(&AArch64::GPR64commonRegClass);
-  Register LoopSrc = MRI.createVirtualRegister(&AArch64::GPR64commonRegClass);
+  Register LoopSrc =
+      IsZero ? Register()
+             : MRI.createVirtualRegister(&AArch64::GPR64commonRegClass);
   Register LoopSize = MRI.createVirtualRegister(&AArch64::GPR64commonRegClass);
 
   Register NextDst = LoopDst;
   Register NextSrc = LoopSrc;
-  bool UseVectorPairs = AccessSize == 16 && Subtarget->hasFPARMv8();
+  bool UseVectorPairs = !IsZero && AccessSize == 16 && Subtarget->hasFPARMv8();
   unsigned CopiesPerIteration = UseVectorPairs ? 2 : 4;
 
   for (unsigned I = 0; I != CopiesPerIteration; ++I) {
-    Register NewSrc = MRI.createVirtualRegister(&AArch64::GPR64commonRegClass);
+    Register NewSrc =
+        IsZero ? Register()
+               : MRI.createVirtualRegister(&AArch64::GPR64commonRegClass);
     Register NewDst = MRI.createVirtualRegister(&AArch64::GPR64commonRegClass);
 
-    if (UseVectorPairs) {
+    if (IsZero) {
+      unsigned StoreOpcode = AccessSize == 16  ? AArch64::STPXpost
+                             : AccessSize == 8 ? AArch64::STRXpost
+                             : AccessSize == 4 ? AArch64::STRWpost
+                             : AccessSize == 2 ? AArch64::STRHHpost
+                                               : AArch64::STRBBpost;
+      Register Zero = AccessSize >= 8 ? AArch64::XZR : AArch64::WZR;
+      auto Store = BuildMI(LoopMBB, DL, TII->get(StoreOpcode))
+                       .addDef(NewDst)
+                       .addReg(Zero);
+      if (AccessSize == 16)
+        Store.addReg(Zero);
+      Store.addReg(NextDst)
+          .addImm(AccessSize == 16 ? 2 : AccessSize)
+          .addMemOperand(StoreMMO)
+          .setMIFlags(MI.getFlags());
+    } else if (UseVectorPairs) {
       Register Tmp0 = MRI.createVirtualRegister(&AArch64::FPR128RegClass);
       Register Tmp1 = MRI.createVirtualRegister(&AArch64::FPR128RegClass);
       BuildMI(LoopMBB, DL, TII->get(AArch64::LDPQpost))
@@ -3476,20 +3503,23 @@ AArch64TargetLowering::EmitGoInlineMemcpyLoop(MachineInstr &MI,
       .addMBB(MBB)
       .addReg(NextSize)
       .addMBB(LoopMBB);
-  BuildMI(*LoopMBB, LoopMBB->begin(), DL, TII->get(TargetOpcode::PHI), LoopSrc)
-      .addReg(InitialSrc)
-      .addMBB(MBB)
-      .addReg(NextSrc)
-      .addMBB(LoopMBB);
+  if (!IsZero)
+    BuildMI(*LoopMBB, LoopMBB->begin(), DL, TII->get(TargetOpcode::PHI),
+            LoopSrc)
+        .addReg(InitialSrc)
+        .addMBB(MBB)
+        .addReg(NextSrc)
+        .addMBB(LoopMBB);
   BuildMI(*LoopMBB, LoopMBB->begin(), DL, TII->get(TargetOpcode::PHI), LoopDst)
       .addReg(InitialDst)
       .addMBB(MBB)
       .addReg(NextDst)
       .addMBB(LoopMBB);
 
-  BuildMI(*ExitMBB, ExitMBB->begin(), DL, TII->get(TargetOpcode::COPY),
-          SrcResult)
-      .addReg(NextSrc);
+  if (!IsZero)
+    BuildMI(*ExitMBB, ExitMBB->begin(), DL, TII->get(TargetOpcode::COPY),
+            SrcResult)
+        .addReg(NextSrc);
   BuildMI(*ExitMBB, ExitMBB->begin(), DL, TII->get(TargetOpcode::COPY),
           DstResult)
       .addReg(NextDst);
@@ -3824,7 +3854,8 @@ MachineBasicBlock *AArch64TargetLowering::EmitInstrWithCustomInserter(
     return EmitDynamicProbedAlloc(MI, BB);
 
   case AArch64::GoInlineMemcpyLoopPseudo:
-    return EmitGoInlineMemcpyLoop(MI, BB);
+  case AArch64::GoInlineMemzeroLoopPseudo:
+    return EmitGoInlineMemoryLoop(MI, BB);
 
   case AArch64::CHECK_MATCHING_VL_PSEUDO:
     return EmitCheckMatchingVL(MI, BB);
