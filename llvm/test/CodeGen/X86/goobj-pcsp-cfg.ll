@@ -3,6 +3,10 @@
 ; RUN: llc -mtriple=x86_64-unknown-linux-goobj -verify-machineinstrs \
 ; RUN:   -goobj-package-path=main -filetype=obj < %s -o %t.o
 ; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.o | FileCheck %s --check-prefix=OBJ
+; RUN: llc -mtriple=x86_64-unknown-linux-goobj -verify-machineinstrs \
+; RUN:   -x86-branches-within-32B-boundaries -goobj-package-path=main \
+; RUN:   -filetype=obj < %s -o %t.align.o
+; RUN: %python %S/../../MC/GoObj/Inputs/dump-goobj.py %t.align.o | FileCheck %s --check-prefix=ALIGN
 
 declare goabiinternal void @"runtime.GC"()
 declare goabiinternal void @"runtime.panicmem"()
@@ -47,3 +51,10 @@ attributes #0 = { "frame-pointer"="non-leaf" }
 ; restores the 24-byte frame depth before morestack restores the entry depth.
 ; OBJ: aux 0.3: type=pcsp target= pc=[0-7:0,7-14:8,14-59:24,59-60:8,60-61:0,61-68:24,68-100:0]
 ; OBJ: reloc 0.2: off=62 size=4 type=7 add=0 target=runtime.GC
+
+; Aligning the fused comparison/backedge in the morestack retry adds four
+; bytes while the stack is at its entry depth. PCSP must cover that padding
+; and the relocated backedge without changing the earlier cold block's frame.
+; ALIGN: symdef 0: pcsp_cfg abi=1 type=1 size=104 align=32
+; ALIGN: aux 0.3: type=pcsp target= pc=[0-7:0,7-14:8,14-59:24,59-60:8,60-61:0,61-68:24,68-104:0]
+; ALIGN: reloc 0.2: off=62 size=4 type=7 add=0 target=runtime.GC
