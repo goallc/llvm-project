@@ -147,6 +147,7 @@ jobs:
             "$build/test/CodeGen/X86/go-statepoint-stack-results.ll"
             "$build/test/CodeGen/X86/goobj-content-addressable-cycle.ll"
             "$build/test/CodeGen/X86/goobj-filetype.ll"
+            "$build/test/CodeGen/X86/goobj-pcsp-cfg.ll"
             "$build/test/CodeGen/X86/goobj-windows.ll"
             "$build/test/CodeGen/X86/goobj-import-references.ll"
             "$build/test/CodeGen/X86/goobj-jump-table-boundaries.ll"
