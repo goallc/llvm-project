@@ -206,6 +206,10 @@ public:
       MCStreamer *(*)(MCContext &Ctx, std::unique_ptr<MCAsmBackend> &&TAB,
                       std::unique_ptr<MCObjectWriter> &&OW,
                       std::unique_ptr<MCCodeEmitter> &&Emitter);
+  using GoObjStreamerCtorTy =
+      MCStreamer *(*)(MCContext &Ctx, std::unique_ptr<MCAsmBackend> &&TAB,
+                     std::unique_ptr<MCObjectWriter> &&OW,
+                     std::unique_ptr<MCCodeEmitter> &&Emitter);
   using XCOFFStreamerCtorTy =
       MCStreamer *(*)(const Triple &T, MCContext &Ctx,
                       std::unique_ptr<MCAsmBackend> &&TAB,
@@ -324,6 +328,7 @@ private:
   COFFStreamerCtorTy COFFStreamerCtorFn = nullptr;
   MachOStreamerCtorTy MachOStreamerCtorFn = nullptr;
   ELFStreamerCtorTy ELFStreamerCtorFn = nullptr;
+  GoObjStreamerCtorTy GoObjStreamerCtorFn = nullptr;
   XCOFFStreamerCtorTy XCOFFStreamerCtorFn = nullptr;
 
   /// Construction function for this target's null TargetStreamer, if
@@ -952,6 +957,10 @@ struct TargetRegistry {
 
   static void RegisterELFStreamer(Target &T, Target::ELFStreamerCtorTy Fn) {
     T.ELFStreamerCtorFn = Fn;
+  }
+
+  static void RegisterGoObjStreamer(Target &T, Target::GoObjStreamerCtorTy Fn) {
+    T.GoObjStreamerCtorFn = Fn;
   }
 
   static void RegisterXCOFFStreamer(Target &T, Target::XCOFFStreamerCtorTy Fn) {

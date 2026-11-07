@@ -135,6 +135,11 @@ MCStreamer *createX86ELFStreamer(const Triple &T, MCContext &Context,
                                  std::unique_ptr<MCObjectWriter> &&MOW,
                                  std::unique_ptr<MCCodeEmitter> &&MCE);
 
+MCStreamer *createX86GoObjStreamer(MCContext &Context,
+                                 std::unique_ptr<MCAsmBackend> &&MAB,
+                                 std::unique_ptr<MCObjectWriter> &&MOW,
+                                 std::unique_ptr<MCCodeEmitter> &&MCE);
+
 /// Construct an X86 Mach-O object writer.
 std::unique_ptr<MCObjectTargetWriter>
 createX86MachObjectWriter(bool Is64Bit, uint32_t CPUType, uint32_t CPUSubtype);
