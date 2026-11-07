@@ -36,6 +36,7 @@
 #include "X86.h"
 #include "X86InstrInfo.h"
 #include "X86Subtarget.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -48,6 +49,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/MC/MCInstrDesc.h"
+#include "llvm/Support/MathExtras.h"
 
 using namespace llvm;
 
@@ -100,6 +102,8 @@ private:
   bool alias(const MachineMemOperand &Op1, const MachineMemOperand &Op2) const;
 
   unsigned getRegSizeInBytes(MachineInstr *Inst);
+
+  bool splitBlockedVectorLoads(MachineFunction &MF);
 };
 
 class X86AvoidSFBLegacy : public MachineFunctionPass {
@@ -652,6 +656,166 @@ removeRedundantBlockingStores(DisplacementSizeMap &BlockingStoresDispSizeMap) {
     BlockingStoresDispSizeMap.insert(Disp);
 }
 
+// Unlike a memcpy, an ordinary vector load may feed several computations. Keep
+// its vector result, but load the two halves separately if each incoming path
+// recently stored one of them. Requiring a store on every path avoids paying for
+// an extra load merely because a cold predecessor contains a partial store.
+static bool hasRecentHalfStore(MachineInstr &Load) {
+  struct SearchState {
+    MachineBasicBlock *MBB;
+    MachineBasicBlock::reverse_iterator Begin;
+    unsigned Remaining;
+  };
+  SmallVector<SearchState, 4> Worklist;
+  Worklist.push_back(
+      {Load.getParent(),
+       std::next(MachineBasicBlock::reverse_iterator(&Load)),
+       X86AvoidSFBInspectionLimit});
+  SmallPtrSet<MachineBasicBlock *, 8> Visited;
+  int64_t LoadDisp = getDispOperand(&Load).getImm();
+
+  while (!Worklist.empty()) {
+    auto [MBB, Begin, Remaining] = Worklist.pop_back_val();
+    // Bound work even through empty blocks, and conservatively reject cycles
+    // and reconvergent searches rather than reasoning about loop iterations.
+    if (Visited.size() == 8 || !Visited.insert(MBB).second)
+      return false;
+    bool Found = false;
+    for (auto I = Begin, E = MBB->rend(); I != E; ++I) {
+      MachineInstr &MI = *I;
+      if (MI.isMetaInstruction())
+        continue;
+      if (!Remaining)
+        return false;
+      --Remaining;
+      if (MI.isCall() || MI.hasUnmodeledSideEffects())
+        return false;
+      if (!MI.mayStore())
+        continue;
+      if (MI.memoperands_empty())
+        return false;
+
+      // Intervening small stores through other addresses do not prevent the
+      // split: no value is forwarded or moved across a store. A wider unknown
+      // store, however, might have overwritten the whole vector in the meantime.
+      const MachineMemOperand *MMO = *MI.memoperands_begin();
+      if (MMO->isVolatile() || MMO->isAtomic() || !MMO->getSize().hasValue() ||
+          MMO->getSize().isScalable())
+        return false;
+      uint64_t Size = MMO->getSize().getValue();
+      if (!Size)
+        return false;
+      bool SameBase = X86II::getMemoryOperandNo(MI.getDesc().TSFlags) >= 0 &&
+                      isRelevantAddressingMode(&MI) &&
+                      hasSameBaseOpValue(&Load, &MI);
+      if (!SameBase) {
+        if (Size > MOV64SZ)
+          return false;
+        continue;
+      }
+
+      int64_t Delta;
+      if (SubOverflow(getDispOperand(&MI).getImm(), LoadDisp, Delta))
+        return false;
+      if (Delta >= MOV128SZ || (Delta < 0 && uint64_t(-(Delta + 1)) >= Size - 1))
+        continue;
+      // A more recent overlapping store of another width could itself block
+      // the proposed 8-byte loads, or supersede the earlier partial store.
+      if (Size != MOV64SZ || (Delta != 0 && Delta != MOV64SZ) ||
+          (MI.getOpcode() != X86::MOV64mr &&
+           MI.getOpcode() != X86::MOV64mi32))
+        return false;
+      Found = true;
+      break;
+    }
+    if (Found)
+      continue;
+    if (!Remaining || MBB->pred_empty() || MBB->pred_size() > 2)
+      return false;
+    for (MachineBasicBlock *Pred : MBB->predecessors())
+      Worklist.push_back({Pred, Pred->rbegin(), Remaining});
+  }
+  return true;
+}
+
+bool X86AvoidSFBImpl::splitBlockedVectorLoads(MachineFunction &MF) {
+  const X86Subtarget &ST = MF.getSubtarget<X86Subtarget>();
+  if (!ST.hasSSE2() || MF.getFunction().hasOptSize())
+    return false;
+
+  bool Changed = false;
+  for (MachineBasicBlock &MBB : MF) {
+    for (MachineInstr &MI : make_early_inc_range(MBB)) {
+      bool UseAVX;
+      switch (MI.getOpcode()) {
+      default:
+        continue;
+      case X86::MOVUPSrm:
+      case X86::MOVAPSrm:
+        UseAVX = false;
+        break;
+      case X86::VMOVUPSrm:
+      case X86::VMOVAPSrm:
+      case X86::VMOVUPDrm:
+      case X86::VMOVAPDrm:
+      case X86::VMOVDQUrm:
+      case X86::VMOVDQArm:
+        UseAVX = true;
+        break;
+      }
+      if (!MI.hasOneMemOperand() || !isRelevantAddressingMode(&MI))
+        continue;
+      MachineMemOperand *MMO = *MI.memoperands_begin();
+      if (MMO->isVolatile() || MMO->isAtomic() ||
+          MMO->getSize() != LocationSize::precise(MOV128SZ))
+        continue;
+      const MachineOperand &Base = getBaseOperand(&MI);
+      // Leave direct stack-slot materializations alone: splitting their loads
+      // can change stack coloring and frame size. Restrict the address match to
+      // an SSA register, whose value cannot change along the searched paths.
+      if (!Base.isReg() || !Base.getReg().isVirtual())
+        continue;
+      int64_t Disp = getDispOperand(&MI).getImm();
+      if (!isInt<32>(Disp) || !isInt<32>(Disp + MOV64SZ))
+        continue;
+      Register Dst = MI.getOperand(0).getReg();
+      // Leave copies to the existing memcpy handling, including its smaller
+      // store-width and YMM support.
+      if (MRI->hasOneNonDBGUse(Dst) &&
+          isPotentialBlockedMemCpyPair(
+              MI.getOpcode(), MRI->use_nodbg_begin(Dst)->getParent()->getOpcode()))
+        continue;
+      if (!hasRecentHalfStore(MI))
+        continue;
+
+      Register Low = MRI->createVirtualRegister(&X86::VR128RegClass);
+      MachineInstrBuilder Lo =
+          BuildMI(MBB, MI, MI.getDebugLoc(),
+                  TII->get(UseAVX ? X86::VMOVQI2PQIrm : X86::MOVQI2PQIrm), Low);
+      MachineInstrBuilder Hi =
+          BuildMI(MBB, MI, MI.getDebugLoc(),
+                  TII->get(UseAVX ? X86::VMOVHPSrm : X86::MOVHPSrm), Dst)
+              .addReg(Low, RegState::Kill);
+      int AddrOffset = getAddrOffset(&MI);
+      for (unsigned I = 0; I != X86::AddrNumOperands; ++I) {
+        Lo.add(MI.getOperand(AddrOffset + I));
+        if (I == X86::AddrDisp)
+          Hi.addImm(Disp + MOV64SZ);
+        else
+          Hi.add(MI.getOperand(AddrOffset + I));
+      }
+      if (Base.isReg())
+        getBaseOperand(Lo).setIsKill(false);
+      Lo.addMemOperand(MF.getMachineMemOperand(MMO, 0, MOV64SZ));
+      Hi.addMemOperand(MF.getMachineMemOperand(MMO, MOV64SZ, MOV64SZ));
+      Hi->setDebugInstrNum(MI.peekDebugInstrNum());
+      MI.eraseFromParent();
+      Changed = true;
+    }
+  }
+  return Changed;
+}
+
 bool X86AvoidSFBImpl::runOnMachineFunction(MachineFunction &MF) {
   bool Changed = false;
 
@@ -711,9 +875,11 @@ bool X86AvoidSFBImpl::runOnMachineFunction(MachineFunction &MF) {
   }
   for (auto *RemovedInst : ForRemoval) {
     RemovedInst->eraseFromParent();
+    Changed = true;
   }
   ForRemoval.clear();
   BlockedLoadsStoresPairs.clear();
+  Changed |= splitBlockedVectorLoads(MF);
   LLVM_DEBUG(dbgs() << "End X86AvoidStoreForwardBlocks\n";);
 
   return Changed;
