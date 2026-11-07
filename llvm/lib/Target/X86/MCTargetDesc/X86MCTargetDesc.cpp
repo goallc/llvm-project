@@ -834,6 +834,7 @@ extern "C" LLVM_C_ABI void LLVMInitializeX86TargetMC() {
 
     TargetRegistry::RegisterCOFFStreamer(*T, createX86WinCOFFStreamer);
     TargetRegistry::RegisterELFStreamer(*T, createX86ELFStreamer);
+    TargetRegistry::RegisterGoObjStreamer(*T, createX86GoObjStreamer);
 
     // Register the MCInstPrinter.
     TargetRegistry::RegisterMCInstPrinter(*T, createX86MCInstPrinter);

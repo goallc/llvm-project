@@ -21,6 +21,7 @@
 #include "llvm/MC/MCELFObjectWriter.h"
 #include "llvm/MC/MCELFStreamer.h"
 #include "llvm/MC/MCExpr.h"
+#include "llvm/MC/MCGoObjStreamer.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCObjectStreamer.h"
@@ -161,6 +162,19 @@ public:
         AlignBoundary != Align(1) && AlignBranchType != X86::AlignBranchNone;
     AllowEnhancedRelaxation =
         AllowAutoPadding && TargetPrefixMax != 0 && X86PadForBranchAlign;
+  }
+
+  void alignGoObjSymbol(MCObjectStreamer &OS, MCSymbol *Symbol) {
+    if (!allowAutoPadding() || Symbol->isTemporary() || !canPadBranches(OS))
+      return;
+
+    // GoObj splits text sections into independently placed symbols. Preserve
+    // the branch-boundary origin both in MC layout and in the Go linker.
+    OS.emitCodeAlignment(AlignBoundary, STI);
+    MCContext &Context = OS.getContext();
+    uint32_t Alignment = Context.getGoObjSymbolAlignment(Symbol).value_or(0);
+    Context.setGoObjSymbolAlignment(
+        Symbol, std::max(Alignment, uint32_t(AlignBoundary.value())));
   }
 
   void emitInstructionBegin(MCObjectStreamer &OS, const MCInst &Inst,
@@ -1561,4 +1575,30 @@ MCStreamer *llvm::createX86ELFStreamer(const Triple &T, MCContext &Context,
                                        std::unique_ptr<MCCodeEmitter> &&MCE) {
   return new X86ELFStreamer(Context, std::move(MAB), std::move(MOW),
                             std::move(MCE));
+}
+
+namespace {
+class X86GoObjStreamer : public MCGoObjStreamer {
+public:
+  using MCGoObjStreamer::MCGoObjStreamer;
+
+  void emitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override {
+    static_cast<X86AsmBackend &>(getAssembler().getBackend())
+        .alignGoObjSymbol(*this, Symbol);
+    MCGoObjStreamer::emitLabel(Symbol, Loc);
+  }
+
+  void emitInstruction(const MCInst &Inst, const MCSubtargetInfo &STI) override {
+    // GoObj needs the same branch-boundary padding as the other X86 formats.
+    X86_MC::emitInstruction(*this, Inst, STI);
+  }
+};
+} // end anonymous namespace
+
+MCStreamer *llvm::createX86GoObjStreamer(
+    MCContext &Context, std::unique_ptr<MCAsmBackend> &&MAB,
+    std::unique_ptr<MCObjectWriter> &&MOW,
+    std::unique_ptr<MCCodeEmitter> &&MCE) {
+  return new X86GoObjStreamer(Context, std::move(MAB), std::move(MOW),
+                             std::move(MCE));
 }

@@ -36,7 +36,7 @@ jobs:
             build_jobs: auto
           - os: darwin
             arch: arm64
-            runner: macos-14
+            runner: macos-15
             build_jobs: 3
           - os: windows
             arch: amd64
@@ -147,6 +147,7 @@ jobs:
             "$build/test/CodeGen/X86/go-statepoint-stack-results.ll"
             "$build/test/CodeGen/X86/goobj-content-addressable-cycle.ll"
             "$build/test/CodeGen/X86/goobj-filetype.ll"
+            "$build/test/CodeGen/X86/goobj-pcsp-cfg.ll"
             "$build/test/CodeGen/X86/goobj-windows.ll"
             "$build/test/CodeGen/X86/goobj-import-references.ll"
             "$build/test/CodeGen/X86/goobj-jump-table-boundaries.ll"

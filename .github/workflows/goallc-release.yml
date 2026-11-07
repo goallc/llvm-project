@@ -38,7 +38,7 @@ jobs:
             build_jobs: 4
           - os: darwin
             arch: arm64
-            runner: macos-14
+            runner: macos-15
             build_jobs: 3
           - os: windows
             arch: amd64
@@ -107,7 +107,7 @@ jobs:
           GOALLC_BUILD_JOBS="${{ matrix.build_jobs }}" \
             ./llvm/utils/goallc/build-payload.bash
 
-      - name: Test byval forwarding and Windows GoObj support before packaging
+      - name: Test core GoObj regressions before packaging
         run: |
           set -euo pipefail
           build="$RUNNER_TEMP/goallc-llvm-build"
@@ -117,6 +117,8 @@ jobs:
           fi
           python3 "$lit" -sv \
             "$build/test/CodeGen/X86/byval-overlapping-stores.ll" \
+            "$build/test/CodeGen/X86/goobj-pcsp-cfg.ll" \
+            "$build/test/MC/GoObj/x86-branch-align.s" \
             "$build/test/CodeGen/X86/goobj-windows.ll"
 
       - name: Validate relocatable payload
