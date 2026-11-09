@@ -1756,6 +1756,8 @@ void GoObjObjectWriter::recordRelocation(const MCFragment &F,
 }
 
 uint64_t GoObjObjectWriter::writeObject() {
+  if (const auto *IRConfig = Asm->getContext().getGoObjConfig())
+    Config = *IRConfig;
   const uint64_t StartOffset = OS.tell();
 
   StringRef ABI0Suffix = GoObj::ABI0SymbolSuffix;

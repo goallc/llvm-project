@@ -11,6 +11,7 @@
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/DebugHandlerBase.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -26,6 +27,7 @@
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Mangler.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCContext.h"
@@ -121,6 +123,59 @@ class GoObjDebugHandler final : public DebugHandlerBase {
   const MCSymbol *getSubprogramSymbol(const DISubprogram *SP) {
     if (auto It = SubprogramSymbols.find(SP); It != SubprogramSymbols.end())
       return It->second;
+    // These scalar annotations survive importing and inlining even when the
+    // source GlobalValue is not imported, or its available_externally body is
+    // deleted. Definitions/clones above still bind to their actual symbol.
+    StringMap<const Metadata *> Identity;
+    if (const MDTuple *Annotations = SP->getAnnotations().get())
+      for (const MDOperand &Annotation : Annotations->operands()) {
+        const auto *MD = dyn_cast_or_null<MDNode>(Annotation);
+        const auto *Key = MD && MD->getNumOperands() > 0
+                              ? dyn_cast_or_null<MDString>(MD->getOperand(0))
+                              : nullptr;
+        if (!Key || (Key->getString() != "goobj.symbol" &&
+                     Key->getString() != "goobj.package" &&
+                     Key->getString() != "goobj.index" &&
+                     Key->getString() != "goobj.flags2"))
+          continue;
+        if (MD->getNumOperands() != 2)
+          report_fatal_error("invalid GoObj subprogram identity annotation");
+        if (!Identity.try_emplace(Key->getString(), MD->getOperand(1)).second)
+          report_fatal_error("duplicate GoObj subprogram identity annotation");
+      }
+    if (!Identity.empty()) {
+      const auto *Name =
+          dyn_cast_or_null<MDString>(Identity.lookup("goobj.symbol"));
+      if (!Name || Name->getString().empty())
+        report_fatal_error("invalid GoObj subprogram symbol annotation");
+      const auto *GV = M->getNamedValue(Name->getString());
+      SmallString<128> SymbolName;
+      Mangler::getNameWithPrefix(SymbolName, Name->getString(),
+                                 M->getDataLayout());
+      const MCSymbol *Symbol =
+          GV ? Asm.getSymbol(GV) : Asm.OutContext.getOrCreateSymbol(SymbolName);
+      if (Identity.size() != 1) {
+        const auto *Package =
+            dyn_cast_or_null<MDString>(Identity.lookup("goobj.package"));
+        const auto *Index = mdconst::dyn_extract_or_null<ConstantInt>(
+            Identity.lookup("goobj.index"));
+        const auto *Flags = mdconst::dyn_extract_or_null<ConstantInt>(
+            Identity.lookup("goobj.flags2"));
+        if (!Package || Package->getString().empty() || !Index || !Flags ||
+            Index->getValue().ugt(UINT32_MAX) ||
+            Flags->getValue().ugt(UINT8_MAX))
+          report_fatal_error("invalid GoObj subprogram package annotation");
+        if (!GV || GV->isDeclarationForLinker()) {
+          MCContext::GoObjImportedSymbolRef Ref;
+          Ref.PackagePrefix = Package->getString().str();
+          Ref.SymIdx = Index->getZExtValue();
+          Ref.Flags2 = Flags->getZExtValue();
+          Asm.OutContext.setGoObjImportedSymbolRef(Symbol, std::move(Ref));
+        }
+      }
+      SubprogramSymbols.try_emplace(SP, Symbol);
+      return Symbol;
+    }
     StringRef LinkageName = SP->getLinkageName();
     if (LinkageName.empty())
       LinkageName = SP->getName();
