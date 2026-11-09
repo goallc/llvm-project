@@ -16,6 +16,7 @@
 #define LLVM_CODEGEN_COMMANDFLAGS_H
 
 #include "llvm/ADT/FloatingPointMode.h"
+#include "llvm/MC/MCGoObjObjectWriter.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Error.h"
@@ -36,27 +37,11 @@ class TargetMachine;
 
 namespace codegen {
 
-// GoObjConfig is decoded from !goobj.config and the goobj.abi module flag.
-// It is intentionally distinct from command-line flags: the IR is the
-// reproducible handoff between the frontend and llc.
-struct GoObjConfig {
-  std::string GOOS;
-  std::string GOARCH;
-  std::string GOARCHSettingKey;
-  std::string GOARCHSettingValue;
-  std::string Version;
-  std::string BuildID;
-  std::string PackagePath;
-  std::vector<std::string> Experiments;
-  std::array<uint8_t, 8> Fingerprint = {};
-  bool IsMain = false;
-  bool IsShared = false;
-  bool IsStd = false;
-};
-
+// Decode the per-module GoObj contract without changing process-wide state.
+LLVM_ABI Expected<std::optional<MCGoObjObjectWriterConfig>>
+readGoObjConfig(const Module &M);
+// Validate the contract for callers that prepare IR before code generation.
 LLVM_ABI Error configureGoObjFromModule(const Module &M);
-LLVM_ABI void setGoObjConfig(GoObjConfig Config);
-LLVM_ABI std::optional<GoObjConfig> getGoObjConfig();
 
 LLVM_ABI std::string getMArch();
 

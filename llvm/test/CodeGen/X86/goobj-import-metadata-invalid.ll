@@ -1,4 +1,9 @@
 ; RUN: split-file %s %t
+; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/attr-definition.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ATTR-DEFINITION
+; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/attr-conflicting.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ATTR-CONFLICTING
+; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/attr-partial.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ATTR-PARTIAL
+; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/attr-flags.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ATTR-FLAGS
+; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/attr-index.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ATTR-INDEX
 ; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/fingerprint.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FINGERPRINT
 ; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/conflicting.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONFLICTING
 ; RUN: not --crash llc -mtriple=x86_64-unknown-linux-goobj -filetype=obj %t/import-builtin.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=IMPORT-BUILTIN
@@ -108,3 +113,24 @@ define goabiinternal void @f() {
 }
 
 ; DUPLICATE-LINKNAME: LLVM ERROR: invalid Go linkname symbol name
+
+;--- attr-index.ll
+declare goabiinternal void @f() "goobj.import.package"="pkg" "goobj.import.index"="4294967296" "goobj.import.flags2"="0"
+; ATTR-INDEX: LLVM ERROR: invalid GoObj function reference attributes
+
+;--- attr-flags.ll
+declare goabiinternal void @f() "goobj.import.package"="pkg" "goobj.import.index"="1" "goobj.import.flags2"="256"
+; ATTR-FLAGS: LLVM ERROR: invalid GoObj function reference attributes
+
+;--- attr-partial.ll
+declare goabiinternal void @f() "goobj.import.index"="1"
+; ATTR-PARTIAL: LLVM ERROR: invalid GoObj function reference attributes
+
+;--- attr-conflicting.ll
+declare !goobj.import !0 goabiinternal void @f() "goobj.import.package"="pkg" "goobj.import.index"="1" "goobj.import.flags2"="0"
+!0 = !{!"pkg", i32 1, i32 0}
+; ATTR-CONFLICTING: LLVM ERROR: invalid GoObj symbol reference attachment
+
+;--- attr-definition.ll
+define goabiinternal void @f() "goobj.import.package"="pkg" "goobj.import.index"="1" "goobj.import.flags2"="0" { ret void }
+; ATTR-DEFINITION: LLVM ERROR: invalid GoObj symbol reference attachment

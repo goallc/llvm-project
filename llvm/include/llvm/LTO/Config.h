@@ -252,6 +252,15 @@ struct Config {
   /// This module hook is called after optimization is complete.
   ModuleHookFn PostOptModuleHook;
 
+  /// Optional mutable IR transformation after optimization and the read-only
+  /// PostOptModuleHook, before code generation (and parallel module splitting).
+  /// This is for target/object-format adaptation which must see the final IR
+  /// before any codegen pass initialization. It runs in each in-process task
+  /// and follows the thread-safety and false-return rules of module hooks.
+  /// Clients using a backend cache must include their transformation identity
+  /// in the cache key, or disable that cache.
+  std::function<bool(unsigned Task, Module &)> PostOptModuleTransform;
+
   /// This module hook is called before code generation. It is similar to the
   /// PostOptModuleHook, but for parallel code generation it is called after
   /// splitting the module.
