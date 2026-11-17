@@ -17,6 +17,7 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/BinaryFormat/GoObj.h"
+#include "llvm/BinaryFormat/GoObjIdentity.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCAssembler.h"
@@ -1771,10 +1772,26 @@ uint64_t GoObjObjectWriter::writeObject() {
     bool IsFMVImplementation = false;
     bool IsABI0 = false;
   };
+  StringMap<std::string> DecodedNames;
   auto GetSymbolIdentity = [&](const MCSymbol *Sym) {
     if (!Sym)
       return GoObjSymbolIdentity{};
     StringRef Name = Sym->getName();
+    if (static_cast<const MCSymbolGoObj *>(Sym)->hasLLVMIdentity()) {
+      unsigned PrefixLength = static_cast<const MCSymbolGoObj *>(Sym)
+                                  ->getLLVMIdentityPrefixLength();
+      StringRef Native =
+          GoObj::decodeLLVMIdentity(Name.drop_front(PrefixLength));
+      if (Native.empty())
+        report_fatal_error(Twine("invalid stable Go symbol identity: ") + Name);
+      if (PrefixLength) {
+        auto &Decoded = DecodedNames[Name];
+        Decoded = (Name.take_front(PrefixLength) + Native).str();
+        Name = Decoded;
+      } else {
+        Name = Native;
+      }
+    }
     bool IsABI0 = Name.consume_back(ABI0Suffix);
     if (IsABI0 && (Name.empty() || Name.ends_with(ABI0Suffix)))
       report_fatal_error("invalid Go ABI0 symbol name");

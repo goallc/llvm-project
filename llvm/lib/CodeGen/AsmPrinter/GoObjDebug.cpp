@@ -12,6 +12,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/BinaryFormat/GoObjIdentity.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/DebugHandlerBase.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -33,6 +34,7 @@
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSymbol.h"
+#include "llvm/MC/MCSymbolGoObj.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/LEB128.h"
 #include "llvm/Support/Path.h"
@@ -136,7 +138,8 @@ class GoObjDebugHandler final : public DebugHandlerBase {
         if (!Key || (Key->getString() != "goobj.symbol" &&
                      Key->getString() != "goobj.package" &&
                      Key->getString() != "goobj.index" &&
-                     Key->getString() != "goobj.flags2"))
+                     Key->getString() != "goobj.flags2" &&
+                     Key->getString() != "goobj.llvm.identity"))
           continue;
         if (MD->getNumOperands() != 2)
           report_fatal_error("invalid GoObj subprogram identity annotation");
@@ -154,6 +157,17 @@ class GoObjDebugHandler final : public DebugHandlerBase {
                                  M->getDataLayout());
       const MCSymbol *Symbol =
           GV ? Asm.getSymbol(GV) : Asm.OutContext.getOrCreateSymbol(SymbolName);
+      if (const Metadata *Marker = Identity.lookup("goobj.llvm.identity")) {
+        const auto *Version = mdconst::dyn_extract<ConstantInt>(Marker);
+        if (!Version || !Version->equalsInt(1) ||
+            GoObj::decodeLLVMIdentity(Name->getString()).empty())
+          report_fatal_error("invalid GoObj debug LLVM identity annotation");
+        if (!Symbol->getName().ends_with(Name->getString()))
+          report_fatal_error("unsupported stable Go debug identity mangling");
+        static_cast<const MCSymbolGoObj *>(Symbol)->setLLVMIdentity(
+            Symbol->getName().size() - Name->getString().size());
+        Identity.erase("goobj.llvm.identity");
+      }
       if (Identity.size() != 1) {
         const auto *Package =
             dyn_cast_or_null<MDString>(Identity.lookup("goobj.package"));

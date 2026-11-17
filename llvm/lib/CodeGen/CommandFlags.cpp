@@ -17,6 +17,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
@@ -78,7 +79,15 @@ codegen::readGoObjConfig(const Module &M) {
   if (Error E = readGoObjConfigStrings(*Named->getOperand(0), 5,
                                        "!goobj.config", PackageFields))
     return E;
-  if (ABIFields[0] != "goallc.goobj")
+  bool StableIdentityABI = ABIFields[0] == "goallc.goobj.llvm-identity.v1";
+  if (StableIdentityABI || M.getModuleFlag("goobj.llvm.identity")) {
+    const auto *V = mdconst::dyn_extract_or_null<ConstantInt>(
+        M.getModuleFlag("goobj.llvm.identity"));
+    if (!StableIdentityABI || !V || !V->equalsInt(1))
+      return createStringError(inconvertibleErrorCode(),
+                               "incompatible GoObj LLVM identity ABI");
+  }
+  if (!StableIdentityABI && ABIFields[0] != "goallc.goobj")
     return createStringError(inconvertibleErrorCode(),
                              "unsupported goobj.abi schema %s",
                              ABIFields[0].c_str());

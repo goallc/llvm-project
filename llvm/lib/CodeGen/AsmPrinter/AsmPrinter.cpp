@@ -39,13 +39,14 @@
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/BinaryFormat/GoObj.h"
+#include "llvm/BinaryFormat/GoObjIdentity.h"
 #include "llvm/CodeGen/AsmPrinterAnalysis.h"
 #include "llvm/CodeGen/BasicBlockSectionsProfileReader.h"
+#include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/CodeGen/GCMetadata.h"
 #include "llvm/CodeGen/GCMetadataPrinter.h"
 #include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/GoObjAsyncPreemption.h"
-#include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/CodeGen/InsertCodePrefetch.h"
 #include "llvm/CodeGen/LazyMachineBlockFrequencyInfo.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
@@ -1021,6 +1022,23 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
   // calling convention as an independent lowering contract and reject stale
   // metadata or mismatched names instead of trying to repair either one.
   for (const GlobalObject &GO : M.global_objects()) {
+    const MDNode *Identity = GO.getMetadata("goobj.llvm.identity");
+    const auto *F = dyn_cast<Function>(&GO);
+    Attribute Attr = F ? F->getFnAttribute("goobj.llvm.identity") : Attribute();
+    if (Identity || Attr.isValid()) {
+      const auto *Version =
+          Identity && Identity->getNumOperands() == 1
+              ? mdconst::dyn_extract<ConstantInt>(Identity->getOperand(0))
+              : nullptr;
+      if ((Identity && (!Version || !Version->equalsInt(1))) ||
+          (Attr.isValid() && Attr.getValueAsString() != "1") ||
+          GoObj::decodeLLVMIdentity(GO.getName()).empty())
+        report_fatal_error("invalid GoObj LLVM identity annotation");
+      auto *Symbol = static_cast<MCSymbolGoObj *>(AP.getSymbol(&GO));
+      if (!Symbol->getName().ends_with(GO.getName()))
+        report_fatal_error("unsupported stable Go identity mangling");
+      Symbol->setLLVMIdentity(Symbol->getName().size() - GO.getName().size());
+    }
     if (GO.getMetadata("goobj.weak_relocs"))
       report_fatal_error("GoObj weak relocations require R_WEAK in !goobj.relocs");
     if (GO.getMetadata("goobj.symbol.name"))
