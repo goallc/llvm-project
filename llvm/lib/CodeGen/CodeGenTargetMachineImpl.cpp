@@ -238,34 +238,20 @@ CodeGenTargetMachineImpl::createMCStreamer(raw_pwrite_stream &Out,
     } else if (T.isOSBinFormatGoObj()) {
       MCGoObjObjectWriterConfig Config;
       Config.SourceKind = GoObj::SourceKind::Compiler;
-      if (std::optional<codegen::GoObjConfig> IRConfig =
-              codegen::getGoObjConfig()) {
-        Config.GOOS = std::move(IRConfig->GOOS);
-        Config.GOARCH = std::move(IRConfig->GOARCH);
-        Config.GOARCHSettingKey = std::move(IRConfig->GOARCHSettingKey);
-        Config.GOARCHSettingValue = std::move(IRConfig->GOARCHSettingValue);
-        Config.Version = std::move(IRConfig->Version);
-        Config.BuildID = std::move(IRConfig->BuildID);
-        Config.PackagePath = std::move(IRConfig->PackagePath);
-        Config.Experiments = std::move(IRConfig->Experiments);
-        Config.Fingerprint = IRConfig->Fingerprint;
-        Config.IsMain = IRConfig->IsMain;
-        Config.IsShared = IRConfig->IsShared;
-        Config.IsStd = IRConfig->IsStd;
-      } else {
-        Config.PackagePath = GoObjPackagePath;
-        if (!GoObjVersion.empty())
-          Config.Version = GoObjVersion;
-        if (!GoObjExperiments.empty()) {
-          Config.Experiments.clear();
-          SmallVector<StringRef, 8> Experiments;
-          StringRef(GoObjExperiments)
-              .split(Experiments, ',', -1, /*KeepEmpty=*/false);
-          for (StringRef Experiment : Experiments)
-            Config.Experiments.push_back(Experiment.str());
-        }
-        Config.IsShared = GoObjShared;
+      // Compiler IR config is installed in MCContext by AsmPrinter. These
+      // options remain the fallback for hand-written IR without !goobj.config.
+      Config.PackagePath = GoObjPackagePath;
+      if (!GoObjVersion.empty())
+        Config.Version = GoObjVersion;
+      if (!GoObjExperiments.empty()) {
+        Config.Experiments.clear();
+        SmallVector<StringRef, 8> Experiments;
+        StringRef(GoObjExperiments)
+            .split(Experiments, ',', -1, /*KeepEmpty=*/false);
+        for (StringRef Experiment : Experiments)
+          Config.Experiments.push_back(Experiment.str());
       }
+      Config.IsShared = GoObjShared;
       OW = createGoObjObjectWriter(
           cast<MCGoObjObjectTargetWriter>(MAB->createObjectTargetWriter()), Out,
           std::move(Config));

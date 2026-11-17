@@ -50,6 +50,7 @@ namespace llvm {
 class CodeViewContext;
 class MCAsmInfo;
 class MCExpr;
+struct MCGoObjObjectWriterConfig;
 class MCInst;
 class MCLabel;
 class MCObjectFileInfo;
@@ -370,6 +371,9 @@ private:
   /// Go object zero-width linker marker relocations, including R_KEEP, keyed
   /// by source symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjMarkerReloc>> GoObjMarkerRelocs;
+
+  /// Output package configuration, owned by this code generation context.
+  std::unique_ptr<MCGoObjObjectWriterConfig> GoObjConfig;
 
   /// Imported packages and their opaque linker fingerprints, in source order.
   std::vector<GoObjImport> GoObjImports;
@@ -973,6 +977,11 @@ public:
     if (It == GoObjMarkerRelocs.end())
       return nullptr;
     return &It->second;
+  }
+
+  LLVM_ABI void setGoObjConfig(std::unique_ptr<MCGoObjObjectWriterConfig> Config);
+  const MCGoObjObjectWriterConfig *getGoObjConfig() const {
+    return GoObjConfig.get();
   }
 
   void setGoObjImports(std::vector<GoObjImport> Imports) {

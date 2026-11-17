@@ -21,6 +21,15 @@ public:
   MCSymbolGoObj(const MCSymbolTableEntry *Name, bool IsTemporary)
       : MCSymbol(Name, IsTemporary) {}
 
+  bool hasLLVMIdentity() const { return getFlags() & 1; }
+  unsigned getLLVMIdentityPrefixLength() const {
+    return (getFlags() >> 1) & 255;
+  }
+  void setLLVMIdentity(unsigned PrefixLength) const {
+    assert(PrefixLength < 256 && "GoObj mangling prefix is too long");
+    modifyFlags(1 | (PrefixLength << 1), 511);
+  }
+
   bool isExternal() const { return IsExternal; }
   void setExternal(bool Value) { IsExternal = Value; }
 

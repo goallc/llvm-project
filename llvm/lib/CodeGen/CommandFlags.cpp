@@ -17,6 +17,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
@@ -39,16 +40,6 @@
 
 using namespace llvm;
 
-static std::optional<codegen::GoObjConfig> IRGoObjConfig;
-
-void codegen::setGoObjConfig(GoObjConfig Config) {
-  IRGoObjConfig = std::move(Config);
-}
-
-std::optional<codegen::GoObjConfig> codegen::getGoObjConfig() {
-  return IRGoObjConfig;
-}
-
 static Error readGoObjConfigStrings(const MDNode &Node, unsigned Count,
                                     StringRef Name,
                                     SmallVectorImpl<std::string> &Fields) {
@@ -66,10 +57,11 @@ static Error readGoObjConfigStrings(const MDNode &Node, unsigned Count,
 // Decode the shared ABI contract and the output package identity before
 // constructing the writer. LLVM's Error module flag handles ABI compatibility
 // when linking IR; package identity remains local to each input.
-Error codegen::configureGoObjFromModule(const Module &M) {
+Expected<std::optional<MCGoObjObjectWriterConfig>>
+codegen::readGoObjConfig(const Module &M) {
   const NamedMDNode *Named = M.getNamedMetadata("goobj.config");
   if (!Named)
-    return Error::success();
+    return std::nullopt;
   if (Named->getNumOperands() != 1 ||
       Named->getOperand(0)->getNumOperands() != 5)
     return createStringError(
@@ -87,7 +79,15 @@ Error codegen::configureGoObjFromModule(const Module &M) {
   if (Error E = readGoObjConfigStrings(*Named->getOperand(0), 5,
                                        "!goobj.config", PackageFields))
     return E;
-  if (ABIFields[0] != "goallc.goobj")
+  bool StableIdentityABI = ABIFields[0] == "goallc.goobj.llvm-identity.v1";
+  if (StableIdentityABI || M.getModuleFlag("goobj.llvm.identity")) {
+    const auto *V = mdconst::dyn_extract_or_null<ConstantInt>(
+        M.getModuleFlag("goobj.llvm.identity"));
+    if (!StableIdentityABI || !V || !V->equalsInt(1))
+      return createStringError(inconvertibleErrorCode(),
+                               "incompatible GoObj LLVM identity ABI");
+  }
+  if (!StableIdentityABI && ABIFields[0] != "goallc.goobj")
     return createStringError(inconvertibleErrorCode(),
                              "unsupported goobj.abi schema %s",
                              ABIFields[0].c_str());
@@ -111,7 +111,9 @@ Error codegen::configureGoObjFromModule(const Module &M) {
     return createStringError(inconvertibleErrorCode(),
                              "!goobj.config requires a GoObj target triple");
 
-  GoObjConfig Config;
+  MCGoObjObjectWriterConfig Config;
+  Config.SourceKind = GoObj::SourceKind::Compiler;
+  Config.Experiments.clear();
   const auto *Experiments = dyn_cast_or_null<MDNode>(ABI->getOperand(7));
   if (!Experiments)
     return createStringError(inconvertibleErrorCode(),
@@ -144,8 +146,11 @@ Error codegen::configureGoObjFromModule(const Module &M) {
   Config.PackagePath = std::move(PackageFields[1]);
   Config.IsMain = PackageFields[2] == "1";
   Config.IsStd = PackageFields[3] == "1";
-  setGoObjConfig(std::move(Config));
-  return Error::success();
+  return Config;
+}
+
+Error codegen::configureGoObjFromModule(const Module &M) {
+  return readGoObjConfig(M).takeError();
 }
 
 #define CGOPT(TY, NAME)                                                        \

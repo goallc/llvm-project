@@ -21,6 +21,7 @@
 #include "llvm/MC/MCCodeView.h"
 #include "llvm/MC/MCDwarf.h"
 #include "llvm/MC/MCExpr.h"
+#include "llvm/MC/MCGoObjObjectWriter.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCLabel.h"
 #include "llvm/MC/MCSectionCOFF.h"
@@ -186,6 +187,7 @@ void MCContext::reset() {
   GoObjRelocOverrides.clear();
   GoObjWeakCalls.clear();
   GoObjMarkerRelocs.clear();
+  GoObjConfig.reset();
   GoObjImports.clear();
   GoObjImportedSymbolRefs.clear();
   GoObjSymbolAlignments.clear();
@@ -1191,4 +1193,8 @@ void MCContext::reportWarning(SMLoc Loc, const Twine &Msg) {
       D = SMP->GetMessage(Loc, SourceMgr::DK_Warning, Msg);
     });
   }
+}
+
+void MCContext::setGoObjConfig(std::unique_ptr<MCGoObjObjectWriterConfig> Config) {
+  GoObjConfig = std::move(Config);
 }

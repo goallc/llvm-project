@@ -431,7 +431,9 @@ bool lto::opt(const Config &Conf, TargetMachine *TM, unsigned Task, Module &Mod,
     runNewPMPasses(Conf, Mod, TM, Conf.OptLevel, IsThinLTO, ExportSummary,
                    ImportSummary, BitcodeLibFuncsSet);
   }
-  return !Conf.PostOptModuleHook || Conf.PostOptModuleHook(Task, Mod);
+  if (Conf.PostOptModuleHook && !Conf.PostOptModuleHook(Task, Mod))
+    return false;
+  return !Conf.PostOptModuleTransform || Conf.PostOptModuleTransform(Task, Mod);
 }
 
 static void codegen(const Config &Conf, TargetMachine *TM,

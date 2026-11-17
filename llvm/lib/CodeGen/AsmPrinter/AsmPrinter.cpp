@@ -39,8 +39,10 @@
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/BinaryFormat/GoObj.h"
+#include "llvm/BinaryFormat/GoObjIdentity.h"
 #include "llvm/CodeGen/AsmPrinterAnalysis.h"
 #include "llvm/CodeGen/BasicBlockSectionsProfileReader.h"
+#include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/CodeGen/GCMetadata.h"
 #include "llvm/CodeGen/GCMetadataPrinter.h"
 #include "llvm/CodeGen/GoCallingConv.h"
@@ -570,6 +572,12 @@ bool AsmPrinter::doInitialization(Module &M) {
   TM.getObjFileLowering()->getModuleMetadata(M);
 
   if (Target.isOSBinFormatGoObj()) {
+    auto Config = codegen::readGoObjConfig(M);
+    if (!Config)
+      report_fatal_error(Config.takeError());
+    OutContext.setGoObjConfig(
+        *Config ? std::make_unique<MCGoObjObjectWriterConfig>(std::move(**Config))
+                : nullptr);
     collectGoObjModuleMetadata(*this, M);
   }
 
@@ -1014,6 +1022,23 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
   // calling convention as an independent lowering contract and reject stale
   // metadata or mismatched names instead of trying to repair either one.
   for (const GlobalObject &GO : M.global_objects()) {
+    const MDNode *Identity = GO.getMetadata("goobj.llvm.identity");
+    const auto *F = dyn_cast<Function>(&GO);
+    Attribute Attr = F ? F->getFnAttribute("goobj.llvm.identity") : Attribute();
+    if (Identity || Attr.isValid()) {
+      const auto *Version =
+          Identity && Identity->getNumOperands() == 1
+              ? mdconst::dyn_extract<ConstantInt>(Identity->getOperand(0))
+              : nullptr;
+      if ((Identity && (!Version || !Version->equalsInt(1))) ||
+          (Attr.isValid() && Attr.getValueAsString() != "1") ||
+          GoObj::decodeLLVMIdentity(GO.getName()).empty())
+        report_fatal_error("invalid GoObj LLVM identity annotation");
+      auto *Symbol = static_cast<MCSymbolGoObj *>(AP.getSymbol(&GO));
+      if (!Symbol->getName().ends_with(GO.getName()))
+        report_fatal_error("unsupported stable Go identity mangling");
+      Symbol->setLLVMIdentity(Symbol->getName().size() - GO.getName().size());
+    }
     if (GO.getMetadata("goobj.weak_relocs"))
       report_fatal_error("GoObj weak relocations require R_WEAK in !goobj.relocs");
     if (GO.getMetadata("goobj.symbol.name"))
@@ -1096,27 +1121,47 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
   // is encoded directly in the declaration name instead.
   for (const GlobalObject &GO : M.global_objects()) {
     const MDNode *Imported = GO.getMetadata("goobj.import");
-    if (!Imported)
+    const auto *F = dyn_cast<Function>(&GO);
+    Attribute Package = F ? F->getFnAttribute("goobj.import.package") : Attribute();
+    Attribute Index = F ? F->getFnAttribute("goobj.import.index") : Attribute();
+    Attribute Flags = F ? F->getFnAttribute("goobj.import.flags2") : Attribute();
+    bool HasAttrs = Package.isValid() || Index.isValid() || Flags.isValid();
+    if (!Imported && !HasAttrs)
       continue;
-    if (!GO.isDeclaration() ||
-        GoObj::hasReferenceSuffix(GO.getName()))
+    if (!GO.isDeclaration() || GoObj::hasReferenceSuffix(GO.getName()) ||
+        (Imported && HasAttrs))
       report_fatal_error("invalid GoObj symbol reference attachment");
 
-    if (Imported->getNumOperands() != 3)
-      report_fatal_error("expected !goobj.import to have three operands");
-    StringRef Prefix =
-        getGoObjMetadataString(Imported->getOperand(0), "goobj.import");
-    const auto *SymIdx =
-        mdconst::dyn_extract<ConstantInt>(Imported->getOperand(1));
-    const auto *Flags2 =
-        mdconst::dyn_extract<ConstantInt>(Imported->getOperand(2));
-    if (Prefix.empty() || !SymIdx || SymIdx->getValue().ugt(UINT32_MAX) ||
-        !Flags2 || Flags2->getValue().ugt(UINT8_MAX))
-      report_fatal_error("invalid !goobj.import attachment");
     MCContext::GoObjImportedSymbolRef Ref;
-    Ref.PackagePrefix = Prefix.str();
-    Ref.SymIdx = static_cast<uint32_t>(SymIdx->getZExtValue());
-    Ref.Flags2 = static_cast<uint8_t>(Flags2->getZExtValue());
+    if (Imported) {
+      if (Imported->getNumOperands() != 3)
+        report_fatal_error("expected !goobj.import to have three operands");
+      StringRef Prefix =
+          getGoObjMetadataString(Imported->getOperand(0), "goobj.import");
+      const auto *SymIdx =
+          mdconst::dyn_extract<ConstantInt>(Imported->getOperand(1));
+      const auto *Flags2 =
+          mdconst::dyn_extract<ConstantInt>(Imported->getOperand(2));
+      if (Prefix.empty() || !SymIdx || SymIdx->getValue().ugt(UINT32_MAX) ||
+          !Flags2 || Flags2->getValue().ugt(UINT8_MAX))
+        report_fatal_error("invalid !goobj.import attachment");
+      Ref.PackagePrefix = Prefix.str();
+      Ref.SymIdx = static_cast<uint32_t>(SymIdx->getZExtValue());
+      Ref.Flags2 = static_cast<uint8_t>(Flags2->getZExtValue());
+    } else {
+      // ThinLTO eliminates available_externally bodies with deleteBody, which
+      // drops function metadata. String attributes retain the same reference
+      // identity on the surviving declaration without a driver-side snapshot.
+      unsigned Flags2;
+      if (!Package.isValid() || Package.getValueAsString().empty() ||
+          !Index.isValid() ||
+          Index.getValueAsString().getAsInteger(10, Ref.SymIdx) ||
+          !Flags.isValid() || Flags.getValueAsString().getAsInteger(10, Flags2) ||
+          Flags2 > UINT8_MAX)
+        report_fatal_error("invalid GoObj function reference attributes");
+      Ref.PackagePrefix = Package.getValueAsString().str();
+      Ref.Flags2 = static_cast<uint8_t>(Flags2);
+    }
     AP.OutContext.setGoObjImportedSymbolRef(AP.getSymbol(&GO), std::move(Ref));
   }
 

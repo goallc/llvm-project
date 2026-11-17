@@ -185,8 +185,11 @@ std::string getGoObjBuiltinCalleeName(const MachineFunction &MF,
     return Match->getName().str();
 
   // Native Go disables builtin-index references for -linkshared.
-  if (std::optional<codegen::GoObjConfig> Config = codegen::getGoObjConfig();
-      Config && Config->IsShared) {
+  const auto *ABI = dyn_cast_or_null<MDNode>(M.getModuleFlag("goobj.abi"));
+  const auto *Shared = ABI && ABI->getNumOperands() == 8
+                           ? dyn_cast_or_null<MDString>(ABI->getOperand(6))
+                           : nullptr;
+  if (Shared && Shared->getString() == "1") {
     std::string StorageName = SymbolName.str();
     if (CC == CallingConv::GoABI0)
       StorageName += GoObj::ABI0SymbolSuffix;
