@@ -748,8 +748,12 @@ enum class ValueProfilingCallType {
 
 } // end anonymous namespace
 
+AnalysisKey InstrProfLoweringAnalysis::Key;
+
 PreservedAnalyses InstrProfilingLoweringPass::run(Module &M,
                                                   ModuleAnalysisManager &AM) {
+  if (AM.isPassRegistered<InstrProfLoweringAnalysis>())
+    return AM.getResult<InstrProfLoweringAnalysis>(M)(M);
   FunctionAnalysisManager &FAM =
       AM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
   auto GetTLI = [&FAM](Function &F) -> TargetLibraryInfo & {

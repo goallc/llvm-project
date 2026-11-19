@@ -94,3 +94,25 @@ TEST_F(PassBuilderCTest, Function) {
   }
   LLVMDisposePassBuilderOptions(Options);
 }
+
+TEST_F(PassBuilderCTest, IRPGOCallsCustomLoweringAtInstrumentationSite) {
+  LLVMBuilderRef Builder = LLVMCreateBuilderInContext(Context);
+  LLVMPositionBuilderAtEnd(
+      Builder, LLVMAppendBasicBlockInContext(Context, Function, "entry"));
+  LLVMBuildRetVoid(Builder);
+  LLVMDisposeBuilder(Builder);
+  auto Opts = LLVMCreatePassBuilderOptions();
+  LLVMPassBuilderOptionsSetIRPGO(Opts, "", [](LLVMModuleRef M) {
+    // Returning an error also verifies propagation through LLVMRunPasses.
+    return LLVMCreateStringError(
+        LLVMGetNamedGlobal(M, "__llvm_profile_raw_version")
+            ? "instrumentation present"
+            : "instrumentation missing");
+  });
+  auto E = LLVMRunPasses(Module, "default<O2>", TM, Opts);
+  LLVMDisposePassBuilderOptions(Opts);
+  ASSERT_NE(E, nullptr);
+  char *Message = LLVMGetErrorMessage(E);
+  EXPECT_STREQ(Message, "instrumentation present");
+  LLVMDisposeErrorMessage(Message);
+}

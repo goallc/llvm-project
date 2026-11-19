@@ -138,7 +138,8 @@ MODULE_PASS("openmp-opt-postlink",
 MODULE_PASS("partial-inliner", PartialInlinerPass())
 MODULE_PASS("pgo-icall-prom", PGOIndirectCallPromotion())
 MODULE_PASS("pgo-instr-gen", PGOInstrumentationGen())
-MODULE_PASS("pgo-instr-use", PGOInstrumentationUse())
+MODULE_PASS("pgo-instr-use", PGOInstrumentationUse(
+    PGOOpt && PGOOpt->Action == PGOOptions::IRUse ? PGOOpt->ProfileFile : ""))
 MODULE_PASS("pre-isel-intrinsic-lowering", PreISelIntrinsicLoweringPass(TM))
 MODULE_PASS("print", PrintModulePass(errs()))
 MODULE_PASS("print-callgraph", CallGraphPrinterPass(errs()))
