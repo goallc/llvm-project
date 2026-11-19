@@ -16,8 +16,24 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Transforms/Utils/Instrumentation.h"
+#include <functional>
 
 namespace llvm {
+
+/// Optional per-run implementation of counter lowering for a custom runtime.
+class InstrProfLoweringAnalysis
+    : public AnalysisInfoMixin<InstrProfLoweringAnalysis> {
+  friend AnalysisInfoMixin<InstrProfLoweringAnalysis>;
+  LLVM_ABI static AnalysisKey Key;
+
+public:
+  using Result = std::function<PreservedAnalyses(Module &)>;
+  explicit InstrProfLoweringAnalysis(Result Lower) : Lower(std::move(Lower)) {}
+  Result run(Module &, ModuleAnalysisManager &) { return Lower; }
+
+private:
+  Result Lower;
+};
 
 class TargetLibraryInfo;
 /// Instrumentation based profiling lowering pass. This pass lowers

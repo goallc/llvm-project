@@ -38,6 +38,18 @@ LLVM_C_EXTERN_C_BEGIN
  */
 typedef struct LLVMOpaquePassBuilderOptions *LLVMPassBuilderOptionsRef;
 
+/** Configure IR instrumentation PGO for module pipelines. A null profile
+ * disables PGO, an empty path selects generation, and a nonempty path selects
+ * use of that indexed profile. The path is copied. A generation callback may
+ * lower instrumentation for a custom runtime at the normal instrprof site.
+ * Return NULL on success or an owned error. After a successful profiled run,
+ * the target machine also uses the selected profile options for codegen. */
+typedef LLVMErrorRef (*LLVMInstrProfLoweringCallback)(LLVMModuleRef);
+LLVM_C_ABI void
+LLVMPassBuilderOptionsSetIRPGO(LLVMPassBuilderOptionsRef Options,
+                               const char *Profile,
+                               LLVMInstrProfLoweringCallback Lower);
+
 /**
  * Construct and run a set of passes over a module
  *

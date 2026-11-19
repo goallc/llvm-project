@@ -13,11 +13,15 @@
 
 #include "llvm-c/Transforms/PassBuilder.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/IR/DiagnosticHandler.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/StandardInstrumentations.h"
 #include "llvm/Support/CBindingWrapping.h"
+
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/Instrumentation/InstrProfiling.h"
 
 using namespace llvm;
 
@@ -34,6 +38,8 @@ public:
       : DebugLogging(DebugLogging), VerifyEach(VerifyEach),
         AAPipeline(AAPipeline), PTO(PTO) {}
 
+  std::optional<PGOOptions> PGO;
+  LLVMInstrProfLoweringCallback Lower = nullptr;
   bool DebugLogging;
   bool VerifyEach;
   const char *AAPipeline;
@@ -55,12 +61,23 @@ static LLVMErrorRef runPasses(Module *Mod, Function *Fun, const char *Passes,
   bool VerifyEach = PassOpts->VerifyEach;
 
   PassInstrumentationCallbacks PIC;
-  PassBuilder PB(Machine, PassOpts->PTO, std::nullopt, &PIC);
+  if (Fun && PassOpts->PGO)
+    return LLVMCreateStringError("IR PGO requires a module pipeline");
+  PassBuilder PB(Machine, PassOpts->PTO, PassOpts->PGO, &PIC);
 
   LoopAnalysisManager LAM;
   FunctionAnalysisManager FAM;
   CGSCCAnalysisManager CGAM;
   ModuleAnalysisManager MAM;
+  std::string LoweringError;
+  if (auto Lower = PassOpts->Lower)
+    MAM.registerPass([&LoweringError, Lower] {
+      return InstrProfLoweringAnalysis([&LoweringError, Lower](Module &M) {
+        if (auto Err = unwrap(Lower(wrap(&M))))
+          LoweringError = toString(std::move(Err));
+        return PreservedAnalyses::none();
+      });
+    });
   if (PassOpts->AAPipeline) {
     // If we have a custom AA pipeline, we need to register it _before_ calling
     // registerFunctionAnalyses, or the default alias analysis pipeline is used.
@@ -93,6 +110,12 @@ static LLVMErrorRef runPasses(Module *Mod, Function *Fun, const char *Passes,
     if (auto Err = PB.parsePassPipeline(MPM, Passes))
       return wrap(std::move(Err));
     MPM.run(*Mod, MAM);
+    if (!LoweringError.empty())
+      return LLVMCreateStringError(LoweringError.c_str());
+    if (PassOpts->PGO && Mod->getContext().getDiagHandlerPtr()->HasErrors)
+      return LLVMCreateStringError("IR PGO pipeline reported an error");
+    if (Machine && PassOpts->PGO)
+      Machine->setPGOOption(PassOpts->PGO);
   }
 
   return LLVMErrorSuccess;
@@ -118,6 +141,20 @@ LLVMErrorRef LLVMRunPassesOnFunction(LLVMValueRef F, const char *Passes,
 
 LLVMPassBuilderOptionsRef LLVMCreatePassBuilderOptions() {
   return wrap(new LLVMPassBuilderOptions());
+}
+
+void LLVMPassBuilderOptionsSetIRPGO(LLVMPassBuilderOptionsRef Options,
+                                    const char *Profile,
+                                    LLVMInstrProfLoweringCallback Lower) {
+  auto *Opts = unwrap(Options);
+  Opts->PGO.reset();
+  Opts->Lower = nullptr;
+  if (Profile) {
+    Opts->PGO.emplace(Profile, "", "", "",
+                      *Profile ? PGOOptions::IRUse : PGOOptions::IRInstr);
+    if (!*Profile)
+      Opts->Lower = Lower;
+  }
 }
 
 void LLVMPassBuilderOptionsSetVerifyEach(LLVMPassBuilderOptionsRef Options,
